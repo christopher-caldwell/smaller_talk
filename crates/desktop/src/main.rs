@@ -1,19 +1,21 @@
-use std::{
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context as _, bail};
 use gpui::{
     App, Application, Bounds, Context, KeyBinding, Menu, MenuItem, Render, Window, WindowBounds,
     WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
-use smaller_talk_application::{ChatQueries, ChatService, ChatWrites, DeleteChatError};
+use smaller_talk_application::{
+    ChatQueries, ChatService, ChatWrites, CreateChatError, DeleteChatError,
+};
 use smaller_talk_database::{
     SqliteChatStore, create_empty_database, migrate_existing, open_existing,
 };
 use smaller_talk_domain::Chat;
-use tokio::{runtime::Builder, sync::oneshot};
+use tokio::{
+    runtime::Builder,
+    sync::{oneshot, watch},
+};
 use uuid::Uuid;
 
 actions!(smaller_talk, [CloseWindow, Quit]);
@@ -82,10 +84,14 @@ fn main() -> anyhow::Result<()> {
         .block_on(service.list_chats())
         .context("could not load chats; run `cargo run -p smaller-talk-desktop -- db-migrate`")?;
     let tokio = runtime.handle().clone();
-    let shared_state = Arc::new(Mutex::new(ChatSnapshot {
+    let (snapshot, _) = watch::channel(ChatSnapshot {
         selected_chat: chats.first().map(|chat| chat.id),
         chats,
-    }));
+    });
+    let shared_state = SharedChatState {
+        snapshot,
+        write_gate: Arc::new(tokio::sync::Mutex::new(())),
+    };
     let app = Application::new();
     let reopen_service = service.clone();
     let reopen_tokio = tokio.clone();
@@ -129,16 +135,78 @@ struct ChatSnapshot {
     selected_chat: Option<Uuid>,
 }
 
+#[derive(Clone)]
+struct SharedChatState {
+    snapshot: watch::Sender<ChatSnapshot>,
+    write_gate: Arc<tokio::sync::Mutex<()>>,
+}
+
+impl SharedChatState {
+    fn publish_created_chat(&self, chat: Chat) {
+        self.snapshot.send_modify(|snapshot| {
+            snapshot.chats.push(chat.clone());
+            snapshot.chats.sort_by(|left, right| {
+                right
+                    .created_at
+                    .cmp(&left.created_at)
+                    .then_with(|| right.id.cmp(&left.id))
+            });
+            snapshot.selected_chat = Some(chat.id);
+        });
+    }
+
+    fn publish_deleted_chat(&self, id: Uuid) {
+        self.snapshot.send_modify(|snapshot| {
+            snapshot.chats.retain(|chat| chat.id != id);
+            if snapshot.selected_chat == Some(id) {
+                snapshot.selected_chat = snapshot.chats.first().map(|chat| chat.id);
+            }
+        });
+    }
+
+    fn select_chat(&self, id: Uuid) -> ChatSnapshot {
+        self.snapshot.send_modify(|snapshot| {
+            if snapshot.chats.iter().any(|chat| chat.id == id) {
+                snapshot.selected_chat = Some(id);
+            }
+        });
+        self.snapshot.borrow().clone()
+    }
+}
+
+async fn create_and_publish(
+    service: Arc<ChatService>,
+    shared_state: SharedChatState,
+) -> Result<Chat, CreateChatError> {
+    let _write_guard = shared_state.write_gate.lock().await;
+    let result = service.create_empty_chat().await;
+    if let Ok(chat) = &result {
+        shared_state.publish_created_chat(chat.clone());
+    }
+    result
+}
+
+async fn delete_and_publish(
+    service: Arc<ChatService>,
+    shared_state: SharedChatState,
+    id: Uuid,
+) -> Result<(), DeleteChatError> {
+    let _write_guard = shared_state.write_gate.lock().await;
+    let result = service.delete_chat(id).await;
+    if matches!(&result, Ok(()) | Err(DeleteChatError::NotFound)) {
+        shared_state.publish_deleted_chat(id);
+    }
+    result
+}
+
 fn open_chat_window(
     cx: &mut App,
     service: Arc<ChatService>,
     tokio: tokio::runtime::Handle,
-    shared_state: Arc<Mutex<ChatSnapshot>>,
+    shared_state: SharedChatState,
 ) {
-    let snapshot = shared_state
-        .lock()
-        .expect("chat snapshot mutex poisoned")
-        .clone();
+    let state_updates = shared_state.snapshot.subscribe();
+    let snapshot = state_updates.borrow().clone();
     let bounds = Bounds::centered(None, size(px(1000.0), px(680.0)), cx);
     cx.open_window(
         WindowOptions {
@@ -152,6 +220,8 @@ fn open_chat_window(
                 chats: snapshot.chats,
                 selected_chat: snapshot.selected_chat,
                 shared_state,
+                state_updates,
+                state_listener_started: false,
                 working: false,
                 error: None,
             })
@@ -166,7 +236,9 @@ struct ChatsView {
     tokio: tokio::runtime::Handle,
     chats: Vec<Chat>,
     selected_chat: Option<Uuid>,
-    shared_state: Arc<Mutex<ChatSnapshot>>,
+    shared_state: SharedChatState,
+    state_updates: watch::Receiver<ChatSnapshot>,
+    state_listener_started: bool,
     working: bool,
     error: Option<String>,
 }
@@ -185,21 +257,18 @@ impl ChatsView {
         self.error = None;
         let service = self.service.clone();
         let tokio = self.tokio.clone();
+        let shared_state = self.shared_state.clone();
+        let (sender, receiver) = oneshot::channel();
+        tokio.spawn(async move {
+            let _ = sender.send(create_and_publish(service, shared_state).await);
+        });
 
         cx.spawn(async move |this, cx| {
-            let (sender, receiver) = oneshot::channel();
-            tokio.spawn(async move {
-                let _ = sender.send(service.create_empty_chat().await);
-            });
             let result = receiver.await;
             let _ = this.update(cx, |view, cx| {
                 view.working = false;
                 match result {
-                    Ok(Ok(chat)) => {
-                        view.selected_chat = Some(chat.id);
-                        view.chats.insert(0, chat);
-                        view.save_snapshot();
-                    }
+                    Ok(Ok(_)) => {}
                     Ok(Err(error)) => view.error = Some(error.to_string()),
                     Err(_) => view.error = Some("The database task stopped unexpectedly.".into()),
                 }
@@ -218,23 +287,18 @@ impl ChatsView {
         self.error = None;
         let service = self.service.clone();
         let tokio = self.tokio.clone();
+        let shared_state = self.shared_state.clone();
+        let (sender, receiver) = oneshot::channel();
+        tokio.spawn(async move {
+            let _ = sender.send(delete_and_publish(service, shared_state, id).await);
+        });
 
         cx.spawn(async move |this, cx| {
-            let (sender, receiver) = oneshot::channel();
-            tokio.spawn(async move {
-                let _ = sender.send(service.delete_chat(id).await);
-            });
             let result = receiver.await;
             let _ = this.update(cx, |view, cx| {
                 view.working = false;
                 match result {
-                    Ok(Ok(())) | Ok(Err(DeleteChatError::NotFound)) => {
-                        view.chats.retain(|chat| chat.id != id);
-                        if view.selected_chat == Some(id) {
-                            view.selected_chat = view.chats.first().map(|chat| chat.id);
-                        }
-                        view.save_snapshot();
-                    }
+                    Ok(Ok(())) | Ok(Err(DeleteChatError::NotFound)) => {}
                     Ok(Err(error)) => view.error = Some(error.to_string()),
                     Err(_) => view.error = Some("The database task stopped unexpectedly.".into()),
                 }
@@ -246,24 +310,41 @@ impl ChatsView {
     }
 
     fn select_chat(&mut self, id: Uuid, cx: &mut Context<Self>) {
-        self.selected_chat = Some(id);
+        let snapshot = self.shared_state.select_chat(id);
+        self.chats = snapshot.chats;
+        self.selected_chat = snapshot.selected_chat;
         self.error = None;
-        self.save_snapshot();
         cx.notify();
     }
 
-    fn save_snapshot(&self) {
-        let mut snapshot = self
-            .shared_state
-            .lock()
-            .expect("chat snapshot mutex poisoned");
-        snapshot.chats.clone_from(&self.chats);
-        snapshot.selected_chat = self.selected_chat;
+    fn start_state_listener(&mut self, cx: &mut Context<Self>) {
+        if self.state_listener_started {
+            return;
+        }
+        self.state_listener_started = true;
+        let mut state_updates = self.state_updates.clone();
+        cx.spawn(async move |this, cx| {
+            while state_updates.changed().await.is_ok() {
+                let snapshot = state_updates.borrow_and_update().clone();
+                if this
+                    .update(cx, |view, cx| {
+                        view.chats = snapshot.chats;
+                        view.selected_chat = snapshot.selected_chat;
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 }
 
 impl Render for ChatsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.start_state_listener(cx);
         let selected = self
             .selected_chat
             .and_then(|id| self.chats.iter().find(|chat| chat.id == id));
@@ -427,5 +508,148 @@ impl Render for ChatsView {
             .child(sidebar)
             .child(detail)
             .on_action(|_: &CloseWindow, window, _| window.remove_window())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use async_trait::async_trait;
+    use smaller_talk_application::{
+        ChatQueries, ChatService, ChatWrites, DeleteChatOutcome, NewChat, PersistenceError,
+    };
+    use smaller_talk_database::{
+        SqliteChatStore, create_empty_database, migrate_existing, open_existing,
+    };
+    use tokio::{sync::Notify, time::timeout};
+
+    use super::{ChatSnapshot, SharedChatState, create_and_publish, delete_and_publish};
+
+    struct DelayedChatWrites {
+        store: Arc<SqliteChatStore>,
+        started: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    impl DelayedChatWrites {
+        async fn pause_before_write(&self) {
+            self.started.notify_one();
+            self.release.notified().await;
+        }
+    }
+
+    #[async_trait]
+    impl ChatWrites for DelayedChatWrites {
+        async fn create_chat(
+            &self,
+            chat: NewChat,
+        ) -> Result<smaller_talk_domain::Chat, PersistenceError> {
+            self.pause_before_write().await;
+            self.store.create_chat(chat).await
+        }
+
+        async fn delete_chat(&self, id: uuid::Uuid) -> Result<DeleteChatOutcome, PersistenceError> {
+            self.pause_before_write().await;
+            self.store.delete_chat(id).await
+        }
+    }
+
+    #[tokio::test]
+    async fn writes_committed_after_window_replacement_reach_the_new_view() {
+        let directory = tempfile::tempdir().expect("temporary database directory");
+        let path = directory.path().join("chats.sqlite3");
+        create_empty_database(&path).await.expect("create database");
+        migrate_existing(&path).await.expect("migrate database");
+        let store = Arc::new(SqliteChatStore::new(
+            open_existing(&path).await.expect("open migrated database"),
+        ));
+
+        let queries: Arc<dyn ChatQueries> = store.clone();
+        let writes: Arc<dyn ChatWrites> = store.clone();
+        let initial_service = ChatService::new(queries, writes);
+        let existing = initial_service
+            .create_empty_chat()
+            .await
+            .expect("create existing chat");
+
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let delayed_writes: Arc<dyn ChatWrites> = Arc::new(DelayedChatWrites {
+            store: store.clone(),
+            started: started.clone(),
+            release: release.clone(),
+        });
+        let queries: Arc<dyn ChatQueries> = store.clone();
+        let service = Arc::new(ChatService::new(queries, delayed_writes));
+        let (snapshot, _) = tokio::sync::watch::channel(ChatSnapshot {
+            chats: vec![existing.clone()],
+            selected_chat: Some(existing.id),
+        });
+        let shared_state = SharedChatState {
+            snapshot,
+            write_gate: Arc::new(tokio::sync::Mutex::new(())),
+        };
+
+        let old_view = shared_state.snapshot.subscribe();
+        let create_task = tokio::spawn(create_and_publish(service.clone(), shared_state.clone()));
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("create reaches delayed storage");
+        drop(old_view);
+
+        let mut replacement_view = shared_state.snapshot.subscribe();
+        release.notify_one();
+        let created = timeout(Duration::from_secs(2), create_task)
+            .await
+            .expect("create task completes")
+            .expect("create task joins")
+            .expect("create succeeds");
+        timeout(Duration::from_secs(2), replacement_view.changed())
+            .await
+            .expect("replacement view receives the create")
+            .expect("shared state remains open");
+        let after_create = replacement_view.borrow_and_update().clone();
+        assert!(after_create.chats.iter().any(|chat| chat.id == created.id));
+        assert_eq!(after_create.selected_chat, Some(created.id));
+
+        let delete_task = tokio::spawn(delete_and_publish(
+            service,
+            shared_state.clone(),
+            created.id,
+        ));
+        timeout(Duration::from_secs(2), started.notified())
+            .await
+            .expect("delete reaches delayed storage");
+        drop(replacement_view);
+
+        let mut reopened_view = shared_state.snapshot.subscribe();
+        release.notify_one();
+        timeout(Duration::from_secs(2), delete_task)
+            .await
+            .expect("delete task completes")
+            .expect("delete task joins")
+            .expect("delete succeeds");
+        timeout(Duration::from_secs(2), reopened_view.changed())
+            .await
+            .expect("reopened view receives the delete")
+            .expect("shared state remains open");
+        let after_delete = reopened_view.borrow_and_update().clone();
+        assert!(!after_delete.chats.iter().any(|chat| chat.id == created.id));
+        assert_eq!(after_delete.selected_chat, Some(existing.id));
+        assert!(
+            after_delete
+                .chats
+                .iter()
+                .any(|chat| Some(chat.id) == after_delete.selected_chat)
+        );
+
+        let persisted_chats = initial_service
+            .list_chats()
+            .await
+            .expect("list persisted chats");
+        assert!(persisted_chats.iter().any(|chat| chat.id == existing.id));
+        assert!(!persisted_chats.iter().any(|chat| chat.id == created.id));
+        store.pool().close().await;
     }
 }

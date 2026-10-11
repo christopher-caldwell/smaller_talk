@@ -4502,6 +4502,7 @@ name = "smaller-talk-desktop"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "chrono",
  "gpui",
  "smaller-talk-application",

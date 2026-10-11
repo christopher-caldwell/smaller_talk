@@ -505,6 +505,7 @@ fn open_chat_window(
                     composer,
                     rename_editor,
                     renaming_chat: None,
+                    markdown_cache: markdown::MarkdownCache::default(),
                     transcript_scroll: ScrollHandle::new(),
                     code_scroll_handles: HashMap::new(),
                     initial_scroll_done: false,
@@ -531,6 +532,7 @@ struct ChatsView {
     composer: Entity<composer::Composer>,
     rename_editor: Entity<composer::Composer>,
     renaming_chat: Option<Uuid>,
+    markdown_cache: markdown::MarkdownCache,
     transcript_scroll: ScrollHandle,
     code_scroll_handles: HashMap<(Uuid, usize), ScrollHandle>,
     initial_scroll_done: bool,
@@ -542,15 +544,15 @@ fn chat_element_id(kind: &'static str, id: Uuid) -> gpui::ElementId {
 }
 
 fn render_markdown(
-    body: &str,
+    blocks: Arc<[markdown::MarkdownBlock]>,
     message_id: Uuid,
     conversation_width: gpui::Pixels,
     code_scroll_handles: &mut HashMap<(Uuid, usize), ScrollHandle>,
     window: &mut Window,
 ) -> impl IntoElement {
     let mut content = div().flex().flex_col().gap_3().w_full().min_w(px(0.0));
-    for (block_index, block) in markdown::parse_markdown(body).into_iter().enumerate() {
-        match block.kind {
+    for (block_index, block) in blocks.iter().enumerate() {
+        match &block.kind {
             markdown::MarkdownBlockKind::Rule => {
                 content = content.child(div().h(px(1.0)).w_full().bg(rgb(0x3b4049)));
             }
@@ -578,7 +580,7 @@ fn render_markdown(
                             .mb_2()
                             .text_xs()
                             .text_color(rgb(MUTED))
-                            .child(language),
+                            .child(language.clone()),
                     );
                 }
                 let mut code_text_style = window.text_style();
@@ -589,23 +591,8 @@ fn render_markdown(
                     .line_height
                     .to_pixels(font_size.into(), window.rem_size());
                 let lines = block
-                    .text
-                    .trim_end_matches('\n')
-                    .split('\n')
-                    .scan(0usize, |offset, line| {
-                        let line_start = *offset;
-                        *offset += line.len() + 1;
-                        Some((line, line_start))
-                    })
-                    .map(|(line, line_start)| {
-                        let (line, highlights) =
-                            display_code_line(line, line_start, &block.code_highlights);
-                        if line.is_empty() {
-                            (" ".to_owned(), Vec::new())
-                        } else {
-                            (line, highlights)
-                        }
-                    })
+                    .code_lines
+                    .iter()
                     .map(|(display_line, highlights)| {
                         let line_width = window
                             .text_system()
@@ -621,7 +608,7 @@ fn render_markdown(
                                 lines.iter().map(|line| line.size(line_height).width).max()
                             })
                             .unwrap_or(px(0.0));
-                        (display_line, highlights, line_width)
+                        (display_line.clone(), highlights.clone(), line_width)
                     })
                     .collect::<Vec<_>>();
                 let code_width = lines
@@ -657,11 +644,11 @@ fn render_markdown(
                 content = content.child(code);
             }
             kind => {
-                let text = StyledText::new(block.text).with_highlights(
+                let text = StyledText::new(block.text.clone()).with_highlights(
                     block
                         .highlights
-                        .into_iter()
-                        .map(|(range, style)| (range, gpui::HighlightStyle::from(style))),
+                        .iter()
+                        .map(|(range, style)| (range.clone(), gpui::HighlightStyle::from(*style))),
                 );
                 let element = match kind {
                     markdown::MarkdownBlockKind::Heading(1) => div()
@@ -691,46 +678,6 @@ fn render_markdown(
     content
 }
 
-fn display_code_line(
-    line: &str,
-    source_offset: usize,
-    highlights: &[(std::ops::Range<usize>, u32)],
-) -> (String, Vec<(std::ops::Range<usize>, u32)>) {
-    let mut displayed = String::with_capacity(line.len());
-    let mut mapped: Vec<(std::ops::Range<usize>, u32)> = Vec::new();
-    let mut previous: Option<(usize, u32)> = None;
-    for (offset, character) in line.char_indices() {
-        let token = highlights
-            .iter()
-            .find(|(range, _)| range.contains(&(source_offset + offset)))
-            .map(|(_, token)| *token);
-        let start = displayed.len();
-        match character {
-            ' ' => displayed.push(' '),
-            '\t' => displayed.push_str("    "),
-            _ => displayed.push(character),
-        }
-        let end = displayed.len();
-        if let Some(token) = token {
-            if let Some((last, last_token)) = previous.as_mut()
-                && *last == start
-                && *last_token == token
-            {
-                *last = end;
-                if let Some((range, _)) = mapped.last_mut() {
-                    range.end = end;
-                }
-            } else {
-                mapped.push((start..end, token));
-                previous = Some((end, token));
-            }
-        } else {
-            previous = None;
-        }
-    }
-    (displayed, mapped)
-}
-
 impl ChatsView {
     fn apply_snapshot(&mut self, snapshot: ChatSnapshot) {
         let selection_changed = self.selected_chat != snapshot.selected_chat;
@@ -739,6 +686,15 @@ impl ChatsView {
         self.chats = snapshot.chats;
         self.selected_chat = snapshot.selected_chat;
         self.messages = snapshot.messages;
+        let message_ids = self
+            .messages
+            .iter()
+            .map(|message| message.id)
+            .collect::<std::collections::HashSet<_>>();
+        self.markdown_cache
+            .retain_messages(message_ids.iter().copied());
+        self.code_scroll_handles
+            .retain(|(message_id, _), _| message_ids.contains(message_id));
         if follow {
             self.transcript_scroll.scroll_to_bottom();
         }
@@ -1076,6 +1032,84 @@ impl Render for ChatsView {
                 .format("%b %-d, %-I:%M:%S %p")
                 .to_string();
             let row_background = if is_selected { PANEL_HOVER } else { PANEL };
+            let is_renaming = self.renaming_chat == Some(id);
+            let mut chat_label = div()
+                .id(chat_element_id("select-chat", id))
+                .flex_1()
+                .min_w(px(0.0));
+            if is_renaming && !is_selected {
+                chat_label = chat_label.flex().items_center().gap_1().child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(0x3b4049))
+                        .bg(rgb(PANEL))
+                        .child(self.rename_editor.clone()),
+                );
+                chat_label = chat_label
+                    .child(
+                        div()
+                            .id("save-chat-title")
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .bg(rgb(ACCENT))
+                            .text_color(rgb(0x101715))
+                            .cursor_pointer()
+                            .child("Save")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_rename(cx))),
+                    )
+                    .child(
+                        div()
+                            .id("cancel-chat-title")
+                            .px_1()
+                            .py_1()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .cursor_pointer()
+                            .child("×")
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
+                    );
+            } else {
+                chat_label = chat_label
+                    .cursor_pointer()
+                    .child(div().text_color(rgb(TEXT)).child(title))
+                    .child(div().text_xs().text_color(rgb(MUTED)).child(date))
+                    .on_click(cx.listener(move |this, _, _, cx| this.select_chat(id, cx)));
+            }
+            let mut row_actions = div().flex().flex_col().items_end().gap_1();
+            if !(is_renaming && !is_selected) {
+                row_actions = row_actions.child(
+                    div()
+                        .id(chat_element_id("rename-chat", id))
+                        .px_1()
+                        .py_1()
+                        .rounded_sm()
+                        .text_xs()
+                        .text_color(rgb(ACCENT))
+                        .cursor_pointer()
+                        .child("Rename")
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.begin_rename(id, window, cx)
+                        })),
+                );
+            }
+            row_actions = row_actions.child(
+                div()
+                    .id(chat_element_id("delete-chat", id))
+                    .px_1()
+                    .py_1()
+                    .rounded_sm()
+                    .text_xs()
+                    .text_color(rgb(DANGER))
+                    .cursor_pointer()
+                    .child("Delete")
+                    .on_click(cx.listener(move |this, _, _, cx| this.delete_chat(id, cx))),
+            );
             chat_list = chat_list.child(
                 div()
                     .id(chat_element_id("chat-row", id))
@@ -1085,51 +1119,8 @@ impl Render for ChatsView {
                     .p_2()
                     .rounded_md()
                     .bg(rgb(row_background))
-                    .child(
-                        div()
-                            .id(chat_element_id("select-chat", id))
-                            .flex_1()
-                            .min_w(px(0.0))
-                            .cursor_pointer()
-                            .child(div().text_color(rgb(TEXT)).child(title))
-                            .child(div().text_xs().text_color(rgb(MUTED)).child(date))
-                            .on_click(cx.listener(move |this, _, _, cx| this.select_chat(id, cx))),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .items_end()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .id(chat_element_id("rename-chat", id))
-                                    .px_1()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .text_xs()
-                                    .text_color(rgb(ACCENT))
-                                    .cursor_pointer()
-                                    .child("Rename")
-                                    .on_click(cx.listener(move |this, _, window, cx| {
-                                        this.begin_rename(id, window, cx)
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .id(chat_element_id("delete-chat", id))
-                                    .px_1()
-                                    .py_1()
-                                    .rounded_sm()
-                                    .text_xs()
-                                    .text_color(rgb(DANGER))
-                                    .cursor_pointer()
-                                    .child("Delete")
-                                    .on_click(
-                                        cx.listener(move |this, _, _, cx| this.delete_chat(id, cx)),
-                                    ),
-                            ),
-                    ),
+                    .child(chat_label)
+                    .child(row_actions),
             );
         }
         sidebar = sidebar.child(chat_list);
@@ -1251,13 +1242,18 @@ impl Render for ChatsView {
                                             .text_color(rgb(ACCENT))
                                             .child("CODEX"),
                                     )
-                                    .child(render_markdown(
-                                        &message.body,
-                                        message.id,
-                                        (window.bounds().size.width - px(344.0)).max(px(120.0)),
-                                        &mut self.code_scroll_handles,
-                                        window,
-                                    )),
+                                    .child({
+                                        let blocks = self
+                                            .markdown_cache
+                                            .get_or_parse(message.id, &message.body);
+                                        render_markdown(
+                                            blocks,
+                                            message.id,
+                                            (window.bounds().size.width - px(344.0)).max(px(120.0)),
+                                            &mut self.code_scroll_handles,
+                                            window,
+                                        )
+                                    }),
                             );
                         }
                     }
@@ -1391,8 +1387,8 @@ mod tests {
     use tokio::{sync::Notify, time::timeout};
 
     use super::{
-        ChatSnapshot, SharedChatState, create_and_publish, delete_and_publish, display_code_line,
-        follows_transcript, resolve_codex_executable_from,
+        ChatSnapshot, SharedChatState, create_and_publish, delete_and_publish, follows_transcript,
+        resolve_codex_executable_from,
     };
     use smaller_talk_domain::{Chat, Message, MessageRole};
 
@@ -1562,14 +1558,14 @@ mod tests {
     fn displayed_code_whitespace_keeps_token_ranges_aligned() {
         let source = "\tlet value = \"café\";";
         let tokens = markdown::parse_markdown(&format!("```rust\n{source}\n```"));
-        let (displayed, ranges) = display_code_line(source, 0, &tokens[0].code_highlights);
+        let (displayed, ranges) = &tokens[0].code_lines[0];
         assert_eq!(displayed, "    let value = \"café\";");
         let let_start = displayed.find("let").expect("keyword is displayed");
         assert!(ranges.iter().any(|(range, _)| range.contains(&let_start)));
         for (range, _) in ranges {
             assert!(displayed.is_char_boundary(range.start));
             assert!(displayed.is_char_boundary(range.end));
-            assert!(displayed.get(range).is_some());
+            assert!(displayed.get(range.clone()).is_some());
         }
     }
 

@@ -1,8 +1,13 @@
-use std::{ops::Range, sync::OnceLock};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    sync::{Arc, OnceLock},
+};
 
 use gpui::{FontStyle, FontWeight, HighlightStyle};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
+use uuid::Uuid;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MarkdownBlockKind {
@@ -20,6 +25,45 @@ pub struct MarkdownBlock {
     pub text: String,
     pub highlights: Vec<(Range<usize>, InlineStyle)>,
     pub code_highlights: Vec<(Range<usize>, u32)>,
+    pub code_lines: Vec<(String, Vec<(Range<usize>, u32)>)>,
+}
+
+#[derive(Default)]
+pub struct MarkdownCache {
+    entries: HashMap<Uuid, CachedMarkdown>,
+}
+
+struct CachedMarkdown {
+    source: String,
+    blocks: Arc<[MarkdownBlock]>,
+}
+
+impl MarkdownCache {
+    pub fn get_or_parse(&mut self, message_id: Uuid, source: &str) -> Arc<[MarkdownBlock]> {
+        if let Some(cached) = self.entries.get(&message_id)
+            && cached.source == source
+        {
+            return cached.blocks.clone();
+        }
+
+        let blocks: Arc<[MarkdownBlock]> = Arc::from(parse_markdown(source));
+        self.entries.insert(
+            message_id,
+            CachedMarkdown {
+                source: source.to_owned(),
+                blocks: blocks.clone(),
+            },
+        );
+        blocks
+    }
+
+    pub fn retain_messages(&mut self, message_ids: impl IntoIterator<Item = Uuid>) {
+        let message_ids = message_ids
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        self.entries
+            .retain(|message_id, _| message_ids.contains(message_id));
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -132,6 +176,7 @@ impl BlockBuilder {
                 text: std::mem::take(&mut self.text),
                 highlights: std::mem::take(&mut self.highlights),
                 code_highlights: Vec::new(),
+                code_lines: Vec::new(),
             });
             self.marks.clear();
         }
@@ -198,9 +243,68 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
     for block in &mut blocks {
         if let MarkdownBlockKind::Code(language) = &block.kind {
             block.code_highlights = highlight_code(language, &block.text);
+            block.code_lines = block
+                .text
+                .trim_end_matches('\n')
+                .split('\n')
+                .scan(0usize, |offset, line| {
+                    let line_start = *offset;
+                    *offset += line.len() + 1;
+                    Some((line, line_start))
+                })
+                .map(|(line, line_start)| {
+                    let (line, highlights) =
+                        display_code_line(line, line_start, &block.code_highlights);
+                    if line.is_empty() {
+                        (" ".to_owned(), Vec::new())
+                    } else {
+                        (line, highlights)
+                    }
+                })
+                .collect();
         }
     }
     blocks
+}
+
+fn display_code_line(
+    line: &str,
+    source_offset: usize,
+    highlights: &[(Range<usize>, u32)],
+) -> (String, Vec<(Range<usize>, u32)>) {
+    let mut displayed = String::with_capacity(line.len());
+    let mut mapped: Vec<(Range<usize>, u32)> = Vec::new();
+    let mut previous: Option<(usize, u32)> = None;
+    for (offset, character) in line.char_indices() {
+        let token = highlights
+            .iter()
+            .find(|(range, _)| range.contains(&(source_offset + offset)))
+            .map(|(_, token)| *token);
+        let start = displayed.len();
+        match character {
+            ' ' => displayed.push(' '),
+            '\t' => displayed.push_str("    "),
+            _ => displayed.push(character),
+        }
+        let end = displayed.len();
+        if let Some(token) = token {
+            if let Some((last, last_token)) = previous.as_mut()
+                && *last == start
+                && *last_token == token
+            {
+                *last = end;
+                if let Some((range, _)) = mapped.last_mut() {
+                    range.end = end;
+                }
+            } else {
+                mapped.push((start..end, token));
+                previous = Some((end, token));
+            }
+        } else {
+            previous = None;
+        }
+    }
+    (displayed, mapped)
 }
 
 struct SyntaxResources {
@@ -219,7 +323,13 @@ fn syntax_resources() -> &'static SyntaxResources {
 
 fn highlight_code(language: &str, source: &str) -> Vec<(Range<usize>, u32)> {
     let resources = syntax_resources();
-    let Some(syntax) = resources.syntaxes.find_syntax_by_token(language.trim()) else {
+    let language = language.trim();
+    let language = if language.eq_ignore_ascii_case("typescript") {
+        "js"
+    } else {
+        language
+    };
+    let Some(syntax) = resources.syntaxes.find_syntax_by_token(language) else {
         return Vec::new();
     };
     if syntax.name == "Plain Text" {
@@ -276,7 +386,9 @@ fn remove_last_mark(marks: &mut Vec<InlineMark>, style: InlineMark) {
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineStyle, MarkdownBlock, MarkdownBlockKind, parse_markdown};
+    use std::sync::Arc;
+
+    use super::{InlineStyle, MarkdownBlock, MarkdownBlockKind, MarkdownCache, parse_markdown};
 
     fn style_at(block: &MarkdownBlock, byte: usize) -> InlineStyle {
         block
@@ -379,5 +491,37 @@ mod tests {
         assert_eq!(blocks.len(), 1);
         assert!(matches!(blocks[0].kind, MarkdownBlockKind::Code(_)));
         assert!(!blocks[0].code_highlights.is_empty());
+    }
+
+    #[test]
+    fn markdown_cache_reuses_unchanged_results_and_replaces_streaming_versions() {
+        let mut cache = MarkdownCache::default();
+        let first_id = uuid::Uuid::new_v4();
+        let second_id = uuid::Uuid::new_v4();
+
+        let first = cache.get_or_parse(first_id, "```rust\nfn main() {\n```");
+        let same = cache.get_or_parse(first_id, "```rust\nfn main() {\n```");
+        assert!(Arc::ptr_eq(&first, &same));
+        assert!(!first[0].code_highlights.is_empty());
+
+        let updated = cache.get_or_parse(first_id, "```rust\nfn main() {}\n```");
+        assert!(!Arc::ptr_eq(&first, &updated));
+        assert_eq!(updated[0].text, "fn main() {}\n");
+        assert!(!updated[0].code_highlights.is_empty());
+        assert_eq!(first[0].text, "fn main() {\n");
+
+        let other = cache.get_or_parse(second_id, "**unchanged**");
+        let other_again = cache.get_or_parse(second_id, "**unchanged**");
+        assert!(Arc::ptr_eq(&other, &other_again));
+        let other_after_first_changed = cache.get_or_parse(second_id, "**unchanged**");
+        assert!(Arc::ptr_eq(&other, &other_after_first_changed));
+
+        let updated_weak = Arc::downgrade(&updated);
+        drop(updated);
+        cache.retain_messages([second_id]);
+        assert_eq!(cache.entries.len(), 1);
+        assert!(updated_weak.upgrade().is_none());
+        let reloaded = cache.get_or_parse(first_id, "```rust\nfn main() {}\n```");
+        assert_eq!(reloaded[0].text, "fn main() {}\n");
     }
 }

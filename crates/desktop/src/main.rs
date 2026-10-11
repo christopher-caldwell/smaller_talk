@@ -632,9 +632,15 @@ fn render_markdown(
                 let mut code_lines = div().flex().flex_col().items_start().w(code_width);
                 for (display_line, highlights, line_width) in lines {
                     let styled = StyledText::new(display_line).with_highlights(
-                        highlights
-                            .into_iter()
-                            .map(|(range, token)| (range, code_token_style(token))),
+                        highlights.into_iter().map(|(range, color)| {
+                            (
+                                range,
+                                gpui::HighlightStyle {
+                                    color: Some(rgb(color).into()),
+                                    ..Default::default()
+                                },
+                            )
+                        }),
                     );
                     code_lines = code_lines.child(
                         div()
@@ -685,28 +691,14 @@ fn render_markdown(
     content
 }
 
-fn code_token_style(token: markdown::CodeToken) -> gpui::HighlightStyle {
-    let color = match token {
-        markdown::CodeToken::Keyword => 0xc792ea,
-        markdown::CodeToken::String => 0xc3e88d,
-        markdown::CodeToken::Comment => 0x7f8999,
-        markdown::CodeToken::Number => 0xf78c6c,
-        markdown::CodeToken::Punctuation => 0x89ddff,
-    };
-    gpui::HighlightStyle {
-        color: Some(rgb(color).into()),
-        ..Default::default()
-    }
-}
-
 fn display_code_line(
     line: &str,
     source_offset: usize,
-    highlights: &[(std::ops::Range<usize>, markdown::CodeToken)],
-) -> (String, Vec<(std::ops::Range<usize>, markdown::CodeToken)>) {
+    highlights: &[(std::ops::Range<usize>, u32)],
+) -> (String, Vec<(std::ops::Range<usize>, u32)>) {
     let mut displayed = String::with_capacity(line.len());
-    let mut mapped = Vec::new();
-    let mut previous: Option<(usize, markdown::CodeToken)> = None;
+    let mut mapped: Vec<(std::ops::Range<usize>, u32)> = Vec::new();
+    let mut previous: Option<(usize, u32)> = None;
     for (offset, character) in line.char_indices() {
         let token = highlights
             .iter()
@@ -725,6 +717,9 @@ fn display_code_line(
                 && *last_token == token
             {
                 *last = end;
+                if let Some((range, _)) = mapped.last_mut() {
+                    range.end = end;
+                }
             } else {
                 mapped.push((start..end, token));
                 previous = Some((end, token));
@@ -1269,18 +1264,27 @@ impl Render for ChatsView {
                 }
             }
 
+            let can_send = !self.working && !self.composer.read(cx).content().trim().is_empty();
             let send_button = div()
                 .id("send-message")
-                .px_4()
-                .py_2()
-                .rounded_md()
-                .bg(rgb(if self.working { PANEL_HOVER } else { ACCENT }))
-                .text_color(rgb(0x101715))
-                .cursor_pointer()
-                .child(if self.working { "Sending…" } else { "Send" })
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.send_prompt(this.composer.read(cx).content(), cx)
-                }));
+                .w(px(36.0))
+                .h(px(36.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(if can_send { ACCENT } else { PANEL_HOVER }))
+                .text_color(rgb(if can_send { 0x101715 } else { MUTED }))
+                .text_xl()
+                .font_weight(gpui::FontWeight::BOLD)
+                .when(can_send, |button| {
+                    button
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.send_prompt(this.composer.read(cx).content(), cx)
+                        }))
+                })
+                .child("↑");
             let action_row = div()
                 .w_full()
                 .flex()
@@ -1561,9 +1565,7 @@ mod tests {
         let (displayed, ranges) = display_code_line(source, 0, &tokens[0].code_highlights);
         assert_eq!(displayed, "    let value = \"café\";");
         let let_start = displayed.find("let").expect("keyword is displayed");
-        assert!(ranges.iter().any(|(range, token)| {
-            range.contains(&let_start) && *token == markdown::CodeToken::Keyword
-        }));
+        assert!(ranges.iter().any(|(range, _)| range.contains(&let_start)));
         for (range, _) in ranges {
             assert!(displayed.is_char_boundary(range.start));
             assert!(displayed.is_char_boundary(range.end));

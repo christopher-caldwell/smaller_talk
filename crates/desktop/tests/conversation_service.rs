@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use smaller_talk_application::{
     ChatQueries, ChatService, ChatWrites, ConversationEvent, ConversationService, ExecutionAdapter,
     ExecutionError, ExecutionEvent, ExecutionRequest, MessageQueries, MessageWrites,
+    SendMessageInput,
 };
 use smaller_talk_database::{
     SqliteChatStore, create_empty_database, migrate_existing, open_existing,
@@ -80,7 +81,7 @@ async fn send_and_collect(
     let prompt = prompt.to_owned();
     let send = tokio::spawn(async move {
         service
-            .send_message(chat_id, prompt, sender)
+            .send_message(SendMessageInput { chat_id, prompt }, sender)
             .await
             .expect("message turn succeeds")
     });

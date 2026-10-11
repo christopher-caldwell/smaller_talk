@@ -20,8 +20,31 @@ pub struct MarkdownBlock {
     pub highlights: Vec<(Range<usize>, InlineStyle)>,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct InlineStyle {
+    bold: bool,
+    italic: bool,
+    code: bool,
+    link: bool,
+}
+
+impl InlineStyle {
+    fn include(&mut self, mark: InlineMark) {
+        match mark {
+            InlineMark::Bold => self.bold = true,
+            InlineMark::Italic => self.italic = true,
+            InlineMark::Code => self.code = true,
+            InlineMark::Link => self.link = true,
+        }
+    }
+
+    fn is_empty(self) -> bool {
+        !self.bold && !self.italic && !self.code && !self.link
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum InlineStyle {
+enum InlineMark {
     Bold,
     Italic,
     Code,
@@ -30,23 +53,23 @@ pub enum InlineStyle {
 
 impl From<InlineStyle> for HighlightStyle {
     fn from(style: InlineStyle) -> Self {
-        match style {
-            InlineStyle::Bold => FontWeight::BOLD.into(),
-            InlineStyle::Italic => FontStyle::Italic.into(),
-            InlineStyle::Code => HighlightStyle {
-                background_color: Some(gpui::rgb(0x272b32).into()),
-                color: Some(gpui::rgb(0xf0c890).into()),
-                ..Default::default()
+        HighlightStyle {
+            color: if style.code {
+                Some(gpui::rgb(0xf0c890).into())
+            } else if style.link {
+                Some(gpui::rgb(0x8ab4f8).into())
+            } else {
+                None
             },
-            InlineStyle::Link => HighlightStyle {
-                color: Some(gpui::rgb(0x8ab4f8).into()),
-                underline: Some(gpui::UnderlineStyle {
-                    color: None,
-                    thickness: gpui::px(1.0),
-                    wavy: false,
-                }),
-                ..Default::default()
-            },
+            font_weight: style.bold.then_some(FontWeight::BOLD),
+            font_style: style.italic.then_some(FontStyle::Italic),
+            background_color: style.code.then(|| gpui::rgb(0x272b32).into()),
+            underline: style.link.then_some(gpui::UnderlineStyle {
+                color: None,
+                thickness: gpui::px(1.0),
+                wavy: false,
+            }),
+            ..Default::default()
         }
     }
 }
@@ -56,7 +79,7 @@ struct BlockBuilder {
     kind: Option<MarkdownBlockKind>,
     text: String,
     highlights: Vec<(Range<usize>, InlineStyle)>,
-    marks: Vec<InlineStyle>,
+    marks: Vec<InlineMark>,
 }
 
 impl BlockBuilder {
@@ -67,25 +90,31 @@ impl BlockBuilder {
     }
 
     fn append(&mut self, text: &str) {
-        self.begin(MarkdownBlockKind::Paragraph);
-        let start = self.text.len();
-        self.text.push_str(text);
-        let end = self.text.len();
-        for style in &self.marks {
-            self.highlights.push((start..end, *style));
-        }
+        self.append_with_mark(text, None);
     }
 
-    fn append_styled(&mut self, text: &str, style: InlineStyle) {
+    fn append_with_mark(&mut self, text: &str, additional_mark: Option<InlineMark>) {
         self.begin(MarkdownBlockKind::Paragraph);
         let start = self.text.len();
         self.text.push_str(text);
         let end = self.text.len();
-        self.highlights.push((start..end, style));
-        for outer_style in &self.marks {
-            if *outer_style != style {
-                self.highlights.push((start..end, *outer_style));
-            }
+        let mut style = InlineStyle::default();
+        for mark in &self.marks {
+            style.include(*mark);
+        }
+        if let Some(mark) = additional_mark {
+            style.include(mark);
+        }
+        if style.is_empty() || start == end {
+            return;
+        }
+        if let Some((previous_range, previous_style)) = self.highlights.last_mut()
+            && previous_range.end == start
+            && *previous_style == style
+        {
+            previous_range.end = end;
+        } else {
+            self.highlights.push((start..end, style));
         }
     }
 
@@ -135,18 +164,18 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
             Event::End(TagEnd::Item) => current.finish(&mut blocks),
             Event::Start(Tag::BlockQuote(_)) => current.begin(MarkdownBlockKind::Quote),
             Event::End(TagEnd::BlockQuote(_)) => current.finish(&mut blocks),
-            Event::Start(Tag::Strong) => current.marks.push(InlineStyle::Bold),
-            Event::End(TagEnd::Strong) => remove_last_mark(&mut current.marks, InlineStyle::Bold),
-            Event::Start(Tag::Emphasis) => current.marks.push(InlineStyle::Italic),
+            Event::Start(Tag::Strong) => current.marks.push(InlineMark::Bold),
+            Event::End(TagEnd::Strong) => remove_last_mark(&mut current.marks, InlineMark::Bold),
+            Event::Start(Tag::Emphasis) => current.marks.push(InlineMark::Italic),
             Event::End(TagEnd::Emphasis) => {
-                remove_last_mark(&mut current.marks, InlineStyle::Italic);
+                remove_last_mark(&mut current.marks, InlineMark::Italic);
             }
-            Event::Start(Tag::Link { .. }) => current.marks.push(InlineStyle::Link),
-            Event::End(TagEnd::Link) => remove_last_mark(&mut current.marks, InlineStyle::Link),
+            Event::Start(Tag::Link { .. }) => current.marks.push(InlineMark::Link),
+            Event::End(TagEnd::Link) => remove_last_mark(&mut current.marks, InlineMark::Link),
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 current.append(&text);
             }
-            Event::Code(text) => current.append_styled(&text, InlineStyle::Code),
+            Event::Code(text) => current.append_with_mark(&text, Some(InlineMark::Code)),
             Event::SoftBreak | Event::HardBreak => current.append("\n"),
             Event::Rule => {
                 current.begin(MarkdownBlockKind::Rule);
@@ -177,7 +206,7 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
-fn remove_last_mark(marks: &mut Vec<InlineStyle>, style: InlineStyle) {
+fn remove_last_mark(marks: &mut Vec<InlineMark>, style: InlineMark) {
     if let Some(index) = marks.iter().rposition(|mark| *mark == style) {
         marks.remove(index);
     }
@@ -185,7 +214,27 @@ fn remove_last_mark(marks: &mut Vec<InlineStyle>, style: InlineStyle) {
 
 #[cfg(test)]
 mod tests {
-    use super::{MarkdownBlockKind, parse_markdown};
+    use super::{InlineStyle, MarkdownBlock, MarkdownBlockKind, parse_markdown};
+
+    fn style_at(block: &MarkdownBlock, byte: usize) -> InlineStyle {
+        block
+            .highlights
+            .iter()
+            .find(|(range, _)| range.contains(&byte))
+            .map(|(_, style)| *style)
+            .unwrap_or_default()
+    }
+
+    fn assert_highlights_are_valid(block: &MarkdownBlock) {
+        for (range, _) in &block.highlights {
+            assert!(block.text.is_char_boundary(range.start));
+            assert!(block.text.is_char_boundary(range.end));
+            assert!(block.text.get(range.clone()).is_some());
+        }
+        for pair in block.highlights.windows(2) {
+            assert!(pair[0].0.end <= pair[1].0.start);
+        }
+    }
 
     #[test]
     fn renders_headings_emphasis_lists_and_fenced_code_as_blocks() {
@@ -203,5 +252,41 @@ mod tests {
             MarkdownBlockKind::Code(language) if language == "rust"
         ));
         assert_eq!(blocks[4].text, "fn main() {}\n");
+    }
+
+    #[test]
+    fn composes_nested_inline_styles_into_nonoverlapping_utf8_safe_spans() {
+        let chunks = [
+            "é Before **",
+            "bold ",
+            "_italic_",
+            " `code`",
+            "** after 后.",
+        ];
+        let mut streamed = String::new();
+        for chunk in chunks {
+            streamed.push_str(chunk);
+            for block in parse_markdown(&streamed) {
+                assert_highlights_are_valid(&block);
+            }
+        }
+
+        let blocks = parse_markdown(&streamed);
+        let block = &blocks[0];
+        assert_eq!(block.text, "é Before bold italic code after 后.");
+        assert_highlights_are_valid(block);
+
+        let bold = block.text.find("bold").expect("bold text present");
+        let italic = block.text.find("italic").expect("italic text present");
+        let code = block.text.find("code").expect("inline code present");
+        let after = block.text.find("after").expect("following text present");
+        assert!(style_at(block, bold).bold);
+        assert!(style_at(block, italic).bold && style_at(block, italic).italic);
+        assert!(style_at(block, code).bold && style_at(block, code).code);
+        assert!(!style_at(block, after).bold);
+        assert!(!style_at(block, after).italic);
+
+        let reloaded = parse_markdown(&streamed);
+        assert_eq!(reloaded, blocks);
     }
 }

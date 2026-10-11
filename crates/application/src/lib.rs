@@ -98,14 +98,33 @@ pub enum ExecutionEvent {
 #[error("{message}")]
 pub struct ExecutionError {
     message: String,
+    #[source]
+    source: Option<Box<dyn Error + Send + Sync + 'static>>,
 }
 
 impl ExecutionError {
     pub fn new(message: impl Into<String>) -> Self {
         Self {
             message: message.into(),
+            source: None,
         }
     }
+
+    pub fn with_source(
+        message: impl Into<String>,
+        source: impl Error + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            source: Some(Box::new(source)),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SendMessageInput {
+    pub chat_id: Uuid,
+    pub prompt: String,
 }
 
 #[async_trait]
@@ -210,10 +229,10 @@ impl ConversationService {
 
     pub async fn send_message(
         &self,
-        chat_id: Uuid,
-        prompt: String,
+        input: SendMessageInput,
         output: mpsc::UnboundedSender<ConversationEvent>,
     ) -> Result<(), SendMessageError> {
+        let SendMessageInput { chat_id, prompt } = input;
         let chat = self
             .chats
             .find_chat(chat_id)
@@ -362,5 +381,16 @@ mod tests {
         let source = Error::source(&error).expect("diagnostic source is retained");
         assert!(source.downcast_ref::<AdapterDiagnostic>().is_some());
         assert_eq!(error.to_string(), "adapter detail");
+    }
+
+    #[test]
+    fn execution_error_preserves_an_opaque_adapter_source() {
+        let error = ExecutionError::with_source(
+            "the Codex request could not be written",
+            std::io::Error::other("pipe closed"),
+        );
+        let source = Error::source(&error).expect("I/O diagnostic is retained");
+        assert!(source.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(error.to_string(), "the Codex request could not be written");
     }
 }

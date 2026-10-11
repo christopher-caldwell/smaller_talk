@@ -1,7 +1,11 @@
-mod codex;
 mod markdown;
 
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::HashMap,
+    ffi::OsString,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::{Context as _, bail};
 use gpui::{
@@ -11,12 +15,13 @@ use gpui::{
 };
 use smaller_talk_application::{
     ChatQueries, ChatService, ChatWrites, ConversationEvent, ConversationService, CreateChatError,
-    DeleteChatError, ExecutionAdapter, MessageQueries, MessageWrites,
+    DeleteChatError, ExecutionAdapter, MessageQueries, MessageWrites, SendMessageInput,
 };
 use smaller_talk_database::{
     SqliteChatStore, create_empty_database, migrate_existing, open_existing,
 };
 use smaller_talk_domain::{Chat, Message, MessageRole};
+use smaller_talk_infrastructure::CodexAdapter;
 use tokio::{
     runtime::Builder,
     sync::{oneshot, watch},
@@ -40,6 +45,73 @@ fn database_path() -> anyhow::Result<PathBuf> {
 
     let home = std::env::var_os("HOME").context("HOME is not set")?;
     Ok(PathBuf::from(home).join("Library/Application Support/SmallerTalk/chats.sqlite3"))
+}
+
+fn codex_executable() -> PathBuf {
+    resolve_codex_executable_from(
+        std::env::var_os("SMALLER_TALK_CODEX_BIN"),
+        std::env::var_os("PATH"),
+        std::env::var_os("HOME"),
+    )
+}
+
+fn resolve_codex_executable_from(
+    explicit: Option<OsString>,
+    path: Option<OsString>,
+    home: Option<OsString>,
+) -> PathBuf {
+    if let Some(path) = explicit {
+        return PathBuf::from(path);
+    }
+
+    if let Some(path) = path {
+        for directory in std::env::split_paths(&path) {
+            let candidate = directory.join("codex");
+            if is_executable_file(&candidate) {
+                return candidate;
+            }
+        }
+    }
+
+    if let Some(home) = home {
+        let home = PathBuf::from(home);
+        for candidate in [
+            home.join(".local/bin/codex"),
+            PathBuf::from("/opt/homebrew/bin/codex"),
+            PathBuf::from("/usr/local/bin/codex"),
+        ] {
+            if is_executable_file(&candidate) {
+                return candidate;
+            }
+        }
+        let nvm_bins = home.join(".nvm/versions/node");
+        if let Ok(entries) = std::fs::read_dir(nvm_bins) {
+            let mut candidates = entries
+                .filter_map(Result::ok)
+                .map(|entry| entry.path().join("bin/codex"))
+                .filter(|path| is_executable_file(path))
+                .collect::<Vec<_>>();
+            candidates.sort();
+            if let Some(candidate) = candidates.pop() {
+                return candidate;
+            }
+        }
+    }
+    PathBuf::from("codex")
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::metadata(path)
+            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    }
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
 }
 
 fn main() -> anyhow::Result<()> {
@@ -93,7 +165,7 @@ fn main() -> anyhow::Result<()> {
     let messages: Arc<dyn MessageQueries> = store.clone();
     let message_writes: Arc<dyn MessageWrites> = store.clone();
     let execution_adapter: Arc<dyn ExecutionAdapter> =
-        Arc::new(codex::CodexAdapter::from_environment());
+        Arc::new(CodexAdapter::new(codex_executable()));
     let conversation_service = Arc::new(ConversationService::new(
         conversation_chats,
         conversation_writes,
@@ -113,7 +185,8 @@ fn main() -> anyhow::Result<()> {
     let (snapshot, _) = watch::channel(ChatSnapshot {
         selected_chat: initial_selected_chat,
         chats,
-        messages: initial_messages,
+        messages: initial_messages.clone(),
+        active_transcripts: HashMap::new(),
     });
     let shared_state = SharedChatState {
         snapshot,
@@ -163,6 +236,7 @@ struct ChatSnapshot {
     chats: Vec<Chat>,
     selected_chat: Option<Uuid>,
     messages: Vec<Message>,
+    active_transcripts: HashMap<Uuid, Vec<Message>>,
 }
 
 #[derive(Clone)]
@@ -189,9 +263,13 @@ impl SharedChatState {
     fn publish_deleted_chat(&self, id: Uuid) {
         self.snapshot.send_modify(|snapshot| {
             snapshot.chats.retain(|chat| chat.id != id);
+            snapshot.active_transcripts.remove(&id);
             if snapshot.selected_chat == Some(id) {
                 snapshot.selected_chat = snapshot.chats.first().map(|chat| chat.id);
-                snapshot.messages.clear();
+                snapshot.messages = snapshot
+                    .selected_chat
+                    .and_then(|chat_id| snapshot.active_transcripts.get(&chat_id).cloned())
+                    .unwrap_or_default();
             }
         });
     }
@@ -200,9 +278,13 @@ impl SharedChatState {
         self.snapshot.send_modify(|snapshot| {
             if snapshot.chats.iter().any(|chat| chat.id == id) {
                 if snapshot.selected_chat != Some(id) {
-                    snapshot.messages.clear();
+                    snapshot.selected_chat = Some(id);
+                    snapshot.messages = snapshot
+                        .active_transcripts
+                        .get(&id)
+                        .cloned()
+                        .unwrap_or_default();
                 }
-                snapshot.selected_chat = Some(id);
             }
         });
         self.snapshot.borrow().clone()
@@ -210,62 +292,104 @@ impl SharedChatState {
 
     fn publish_messages(&self, id: Uuid, messages: Vec<Message>) {
         self.snapshot.send_if_modified(|snapshot| {
-            if snapshot.selected_chat != Some(id) {
+            if snapshot.selected_chat != Some(id)
+                || !snapshot.chats.iter().any(|chat| chat.id == id)
+            {
                 return false;
             }
-            snapshot.messages = messages;
+            let mut merged = messages;
+            if let Some(live_messages) = snapshot.active_transcripts.get(&id) {
+                for live in live_messages {
+                    if let Some(existing) = merged.iter_mut().find(|message| message.id == live.id)
+                    {
+                        *existing = live.clone();
+                    } else {
+                        merged.push(live.clone());
+                    }
+                }
+            }
+            merged.sort_by(|left, right| {
+                left.created_at
+                    .cmp(&right.created_at)
+                    .then_with(|| left.id.cmp(&right.id))
+            });
+            snapshot.messages = merged;
             true
         });
     }
 
     fn publish_conversation_event(&self, event: ConversationEvent) {
-        self.snapshot.send_modify(|snapshot| match event {
+        let chat_id = match &event {
             ConversationEvent::UserMessage(message)
-                if snapshot.selected_chat == Some(message.chat_id) =>
-            {
-                if !snapshot
-                    .messages
-                    .iter()
-                    .any(|stored| stored.id == message.id)
-                {
-                    snapshot.messages.push(message);
+            | ConversationEvent::AssistantMessage(message) => message.chat_id,
+            ConversationEvent::AssistantDelta { chat_id, .. } => *chat_id,
+        };
+        self.snapshot.send_modify(|snapshot| match event {
+            event => {
+                if !snapshot.chats.iter().any(|chat| chat.id == chat_id) {
+                    return;
                 }
-            }
-            ConversationEvent::AssistantDelta {
-                chat_id,
-                message_id,
-                delta,
-            } if snapshot.selected_chat == Some(chat_id) => {
-                if let Some(message) = snapshot
-                    .messages
-                    .iter_mut()
-                    .find(|message| message.id == message_id)
-                {
-                    message.body.push_str(&delta);
-                } else {
-                    snapshot.messages.push(Message {
-                        id: message_id,
+                let selected = snapshot.selected_chat == Some(chat_id);
+                match event {
+                    ConversationEvent::UserMessage(message) => {
+                        upsert_message(
+                            snapshot.active_transcripts.entry(chat_id).or_default(),
+                            message.clone(),
+                        );
+                        if selected {
+                            upsert_message(&mut snapshot.messages, message);
+                        }
+                    }
+                    ConversationEvent::AssistantDelta {
                         chat_id,
-                        role: MessageRole::Assistant,
-                        body: delta,
-                        created_at: chrono::Utc::now(),
-                    });
+                        message_id,
+                        delta,
+                    } => {
+                        append_assistant_delta(
+                            snapshot.active_transcripts.entry(chat_id).or_default(),
+                            chat_id,
+                            message_id,
+                            delta.clone(),
+                        );
+                        if selected {
+                            append_assistant_delta(
+                                &mut snapshot.messages,
+                                chat_id,
+                                message_id,
+                                delta,
+                            );
+                        }
+                    }
+                    ConversationEvent::AssistantMessage(message) => {
+                        if selected {
+                            upsert_message(&mut snapshot.messages, message);
+                        }
+                        snapshot.active_transcripts.remove(&chat_id);
+                    }
                 }
             }
-            ConversationEvent::AssistantMessage(message)
-                if snapshot.selected_chat == Some(message.chat_id) =>
-            {
-                if let Some(stored) = snapshot
-                    .messages
-                    .iter_mut()
-                    .find(|stored| stored.id == message.id)
-                {
-                    *stored = message;
-                } else {
-                    snapshot.messages.push(message);
-                }
-            }
-            _ => {}
+        });
+    }
+}
+
+fn upsert_message(messages: &mut Vec<Message>, message: Message) {
+    if let Some(existing) = messages.iter_mut().find(|stored| stored.id == message.id) {
+        *existing = message;
+    } else {
+        messages.push(message);
+    }
+}
+
+fn append_assistant_delta(messages: &mut Vec<Message>, chat_id: Uuid, id: Uuid, delta: String) {
+    if let Some(message) = messages.iter_mut().find(|message| message.id == id) {
+        message.body.push_str(&delta);
+    } else {
+        messages.push(Message {
+            id,
+            chat_id,
+            role: MessageRole::Assistant,
+            body: delta,
+            created_at: chrono::Utc::now(),
         });
     }
 }
@@ -524,7 +648,7 @@ impl ChatsView {
                 match result {
                     Ok(Ok(messages)) => {
                         view.shared_state.publish_messages(id, messages.clone());
-                        view.messages = messages;
+                        view.messages = view.shared_state.snapshot.borrow().messages.clone();
                         view.transcript_scroll.scroll_to_bottom();
                     }
                     Ok(Err(error)) => view.error = Some(error.to_string()),
@@ -556,7 +680,7 @@ impl ChatsView {
         let (result_sender, result_receiver) = oneshot::channel();
         tokio.spawn(async move {
             let result = service
-                .send_message(chat_id, prompt, event_sender)
+                .send_message(SendMessageInput { chat_id, prompt }, event_sender)
                 .await
                 .map_err(|error| error.to_string());
             let _ = result_sender.send(result);
@@ -616,7 +740,7 @@ impl ChatsView {
                     self.composer.push_str(&text);
                 }
             }
-            _ if !keystroke.modifiers.modified() => {
+            _ if accepts_text_key(keystroke.modifiers) => {
                 if let Some(typed) = &keystroke.key_char {
                     self.composer.push_str(typed);
                 }
@@ -651,6 +775,10 @@ impl ChatsView {
         })
         .detach();
     }
+}
+
+fn accepts_text_key(modifiers: gpui::Modifiers) -> bool {
+    !modifiers.control && !modifiers.alt && !modifiers.platform && !modifiers.function
 }
 
 impl Render for ChatsView {
@@ -953,9 +1081,11 @@ impl Render for ChatsView {
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::Arc, time::Duration};
+    use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
     use async_trait::async_trait;
+    use chrono::{Duration as ChronoDuration, Utc};
+    use gpui::Modifiers;
     use smaller_talk_application::{
         ChatQueries, ChatService, ChatWrites, DeleteChatOutcome, NewChat, PersistenceError,
     };
@@ -964,12 +1094,26 @@ mod tests {
     };
     use tokio::{sync::Notify, time::timeout};
 
-    use super::{ChatSnapshot, SharedChatState, create_and_publish, delete_and_publish};
+    use super::{
+        ChatSnapshot, SharedChatState, accepts_text_key, create_and_publish, delete_and_publish,
+        resolve_codex_executable_from,
+    };
+    use smaller_talk_domain::{Chat, Message, MessageRole};
 
     struct DelayedChatWrites {
         store: Arc<SqliteChatStore>,
         started: Arc<Notify>,
         release: Arc<Notify>,
+    }
+
+    #[test]
+    fn entry_resolves_an_explicit_codex_path_before_searching_path() {
+        let resolved = resolve_codex_executable_from(
+            Some("/tmp/codex-fixture".into()),
+            Some("/usr/bin".into()),
+            None,
+        );
+        assert_eq!(resolved, PathBuf::from("/tmp/codex-fixture"));
     }
 
     impl DelayedChatWrites {
@@ -1034,6 +1178,7 @@ mod tests {
             chats: vec![existing.clone()],
             selected_chat: Some(existing.id),
             messages: Vec::new(),
+            active_transcripts: HashMap::new(),
         });
         let shared_state = SharedChatState {
             snapshot,
@@ -1100,5 +1245,97 @@ mod tests {
         assert!(persisted_chats.iter().any(|chat| chat.id == existing.id));
         assert!(!persisted_chats.iter().any(|chat| chat.id == created.id));
         store.pool().close().await;
+    }
+
+    #[test]
+    fn shifted_text_is_allowed_without_enabling_shortcut_combinations() {
+        assert!(accepts_text_key(Modifiers::default()));
+        assert!(accepts_text_key(Modifiers {
+            shift: true,
+            ..Default::default()
+        }));
+        assert!(!accepts_text_key(Modifiers {
+            shift: true,
+            platform: true,
+            ..Default::default()
+        }));
+        assert!(!accepts_text_key(Modifiers {
+            control: true,
+            ..Default::default()
+        }));
+    }
+
+    #[test]
+    fn active_stream_survives_chat_switch_and_transcript_reload() {
+        let first = Chat {
+            id: uuid::Uuid::new_v4(),
+            title: "First".into(),
+            created_at: Utc::now(),
+            binding: None,
+        };
+        let second = Chat {
+            id: uuid::Uuid::new_v4(),
+            title: "Second".into(),
+            created_at: Utc::now() + ChronoDuration::milliseconds(1),
+            binding: None,
+        };
+        let (snapshot, _) = tokio::sync::watch::channel(ChatSnapshot {
+            chats: vec![second.clone(), first.clone()],
+            selected_chat: Some(first.id),
+            messages: Vec::new(),
+            active_transcripts: HashMap::new(),
+        });
+        let state = SharedChatState {
+            snapshot,
+            write_gate: Arc::new(tokio::sync::Mutex::new(())),
+        };
+        let user = Message {
+            id: uuid::Uuid::new_v4(),
+            chat_id: first.id,
+            role: MessageRole::User,
+            body: "uppercase TEST prompt".into(),
+            created_at: Utc::now(),
+        };
+        let assistant_id = uuid::Uuid::new_v4();
+
+        state.publish_conversation_event(super::ConversationEvent::UserMessage(user.clone()));
+        state.publish_conversation_event(super::ConversationEvent::AssistantDelta {
+            chat_id: first.id,
+            message_id: assistant_id,
+            delta: "PREFIX".into(),
+        });
+        assert_eq!(state.snapshot.borrow().messages[1].body, "PREFIX");
+
+        assert!(state.select_chat(second.id).messages.is_empty());
+        state.publish_conversation_event(super::ConversationEvent::AssistantDelta {
+            chat_id: first.id,
+            message_id: assistant_id,
+            delta: "MIDDLE".into(),
+        });
+        assert!(state.snapshot.borrow().messages.is_empty());
+
+        let returned = state.select_chat(first.id);
+        assert_eq!(returned.messages[0].body, "uppercase TEST prompt");
+        assert_eq!(returned.messages[1].body, "PREFIXMIDDLE");
+
+        state.publish_messages(first.id, vec![user.clone()]);
+        assert_eq!(state.snapshot.borrow().messages[1].body, "PREFIXMIDDLE");
+        state.publish_conversation_event(super::ConversationEvent::AssistantDelta {
+            chat_id: first.id,
+            message_id: assistant_id,
+            delta: "TAIL".into(),
+        });
+        assert_eq!(state.snapshot.borrow().messages[1].body, "PREFIXMIDDLETAIL");
+
+        let completed = Message {
+            id: assistant_id,
+            chat_id: first.id,
+            role: MessageRole::Assistant,
+            body: "PREFIXMIDDLETAIL".into(),
+            created_at: user.created_at + ChronoDuration::milliseconds(1),
+        };
+        state.publish_conversation_event(super::ConversationEvent::AssistantMessage(completed));
+        assert_eq!(state.snapshot.borrow().messages[1].body, "PREFIXMIDDLETAIL");
+        assert_eq!(state.snapshot.borrow().messages[0].id, user.id);
     }
 }

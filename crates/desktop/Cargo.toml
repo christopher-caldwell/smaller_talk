@@ -6,21 +6,20 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
-async-trait.workspace = true
 anyhow = "1"
 chrono = { workspace = true, features = ["clock"] }
 gpui.workspace = true
 pulldown-cmark = "0.13"
-serde_json = "1"
 smaller-talk-application = { path = "../application" }
 smaller-talk-database = { path = "../database" }
+smaller-talk-infrastructure = { path = "../infrastructure" }
 smaller-talk-domain = { path = "../domain" }
-tokio = { workspace = true, features = ["process", "io-util", "time"] }
+tokio = { workspace = true, features = ["time"] }
 uuid.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true
 sqlx.workspace = true
 tempfile = "3"
-tokio = { workspace = true, features = ["time", "process", "io-util"] }
+tokio = { workspace = true, features = ["time"] }
 uuid = { workspace = true, features = ["v4"] }

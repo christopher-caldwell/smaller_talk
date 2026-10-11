@@ -1,9 +1,4 @@
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    process::Stdio,
-    time::Duration,
-};
+use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -29,13 +24,6 @@ pub struct CodexAdapter {
 }
 
 impl CodexAdapter {
-    pub fn from_environment() -> Self {
-        Self {
-            executable: resolve_codex_executable(),
-        }
-    }
-
-    #[cfg(test)]
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
@@ -57,10 +45,13 @@ impl CodexAdapter {
             .kill_on_drop(true);
 
         let mut child = command.spawn().map_err(|error| {
-            ExecutionError::new(format!(
-                "could not start Codex at {}: {error}. Set SMALLER_TALK_CODEX_BIN if it is not on PATH",
-                self.executable.display()
-            ))
+            ExecutionError::with_source(
+                format!(
+                    "could not start Codex at {}: {error}. Set SMALLER_TALK_CODEX_BIN if it is not on PATH",
+                    self.executable.display()
+                ),
+                error,
+            )
         })?;
         let mut stdin = child
             .stdin
@@ -127,7 +118,12 @@ impl CodexAdapter {
         };
         events
             .send(ExecutionEvent::BindingEstablished(binding))
-            .map_err(|_| ExecutionError::new("conversation stopped before Codex could continue"))?;
+            .map_err(|error| {
+                ExecutionError::with_source(
+                    format!("conversation stopped before Codex could continue: {error}"),
+                    error,
+                )
+            })?;
 
         send_request(
             &mut stdin,
@@ -164,9 +160,10 @@ impl CodexAdapter {
                         if let Some(delta) = params["delta"].as_str() {
                             events
                                 .send(ExecutionEvent::TextDelta(delta.to_owned()))
-                                .map_err(|_| {
-                                    ExecutionError::new(
-                                        "conversation stopped while Codex was responding",
+                                .map_err(|error| {
+                                    ExecutionError::with_source(
+                                        format!("conversation stopped while Codex was responding: {error}"),
+                                        error,
                                     )
                                 })?;
                         }
@@ -207,18 +204,25 @@ impl CodexAdapter {
         match timeout(Duration::from_secs(5), child.wait()).await {
             Ok(Ok(status)) if status.success() => {}
             Ok(Ok(status)) => {
-                let stderr = stderr_task
-                    .await
-                    .unwrap_or_else(|error| format!("could not read Codex stderr: {error}"));
+                let stderr = match stderr_task.await {
+                    Ok(stderr) => stderr,
+                    Err(error) => {
+                        return Err(ExecutionError::with_source(
+                            format!("could not read Codex stderr: {error}"),
+                            error,
+                        ));
+                    }
+                };
                 return Err(ExecutionError::new(format!(
                     "Codex app-server exited with {status}: {}",
                     summarize_stderr(&stderr)
                 )));
             }
             Ok(Err(error)) => {
-                return Err(ExecutionError::new(format!(
-                    "could not wait for Codex app-server: {error}"
-                )));
+                return Err(ExecutionError::with_source(
+                    format!("could not wait for Codex app-server: {error}"),
+                    error,
+                ));
             }
             Err(_) => {
                 let _ = child.kill().await;
@@ -245,73 +249,6 @@ impl ExecutionAdapter for CodexAdapter {
     }
 }
 
-fn resolve_codex_executable() -> PathBuf {
-    resolve_codex_executable_from(
-        std::env::var_os("SMALLER_TALK_CODEX_BIN"),
-        std::env::var_os("PATH"),
-        std::env::var_os("HOME"),
-    )
-}
-
-fn resolve_codex_executable_from(
-    explicit: Option<OsString>,
-    path: Option<OsString>,
-    home: Option<OsString>,
-) -> PathBuf {
-    if let Some(path) = explicit {
-        return PathBuf::from(path);
-    }
-
-    if let Some(path) = path {
-        for directory in std::env::split_paths(&path) {
-            let candidate = directory.join("codex");
-            if is_executable_file(&candidate) {
-                return candidate;
-            }
-        }
-    }
-
-    if let Some(home) = home {
-        let home = PathBuf::from(home);
-        for candidate in [
-            home.join(".local/bin/codex"),
-            PathBuf::from("/opt/homebrew/bin/codex"),
-            PathBuf::from("/usr/local/bin/codex"),
-        ] {
-            if is_executable_file(&candidate) {
-                return candidate;
-            }
-        }
-        let nvm_bins = home.join(".nvm/versions/node");
-        if let Ok(entries) = std::fs::read_dir(nvm_bins) {
-            let mut candidates = entries
-                .filter_map(Result::ok)
-                .map(|entry| entry.path().join("bin/codex"))
-                .filter(|path| is_executable_file(path))
-                .collect::<Vec<_>>();
-            candidates.sort();
-            if let Some(candidate) = candidates.pop() {
-                return candidate;
-            }
-        }
-    }
-    PathBuf::from("codex")
-}
-
-fn is_executable_file(path: &Path) -> bool {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(path)
-            .map(|metadata| metadata.is_file() && metadata.permissions().mode() & 0o111 != 0)
-            .unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    {
-        path.is_file()
-    }
-}
-
 async fn send_request(
     stdin: &mut ChildStdin,
     id: u64,
@@ -334,17 +271,16 @@ async fn send_notification(
 }
 
 async fn write_message(stdin: &mut ChildStdin, message: &Value) -> Result<(), ExecutionError> {
-    let mut bytes = serde_json::to_vec(message)
-        .map_err(|error| ExecutionError::new(format!("could not encode Codex request: {error}")))?;
+    let mut bytes = serde_json::to_vec(message).map_err(|error| {
+        ExecutionError::with_source(format!("could not encode Codex request: {error}"), error)
+    })?;
     bytes.push(b'\n');
-    stdin
-        .write_all(&bytes)
-        .await
-        .map_err(|error| ExecutionError::new(format!("could not write to Codex: {error}")))?;
-    stdin
-        .flush()
-        .await
-        .map_err(|error| ExecutionError::new(format!("could not flush Codex request: {error}")))
+    stdin.write_all(&bytes).await.map_err(|error| {
+        ExecutionError::with_source(format!("could not write to Codex: {error}"), error)
+    })?;
+    stdin.flush().await.map_err(|error| {
+        ExecutionError::with_source(format!("could not flush Codex request: {error}"), error)
+    })
 }
 
 async fn read_response(
@@ -370,17 +306,17 @@ async fn read_response(
 
 async fn read_message(stdout: &mut BufReader<ChildStdout>) -> Result<Value, ExecutionError> {
     let mut line = String::new();
-    let bytes_read = stdout
-        .read_line(&mut line)
-        .await
-        .map_err(|error| ExecutionError::new(format!("could not read Codex output: {error}")))?;
+    let bytes_read = stdout.read_line(&mut line).await.map_err(|error| {
+        ExecutionError::with_source(format!("could not read Codex output: {error}"), error)
+    })?;
     if bytes_read == 0 {
         return Err(ExecutionError::new(
             "Codex app-server closed its output before the turn completed",
         ));
     }
-    serde_json::from_str(&line)
-        .map_err(|error| ExecutionError::new(format!("Codex sent invalid JSON: {error}")))
+    serde_json::from_str(&line).map_err(|error| {
+        ExecutionError::with_source(format!("Codex sent invalid JSON: {error}"), error)
+    })
 }
 
 async fn handle_server_request(
@@ -436,21 +372,22 @@ fn summarize_stderr(stderr: &str) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{error::Error, path::PathBuf};
 
     use smaller_talk_application::{ExecutionEvent, ExecutionRequest};
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
-    use super::{CodexAdapter, resolve_codex_executable_from};
+    use super::CodexAdapter;
     use smaller_talk_application::ExecutionAdapter;
 
-    #[test]
-    fn resolves_an_explicit_codex_path_before_using_path_search() {
-        assert_eq!(
-            resolve_codex_executable_from(Some("/tmp/codex-fixture".into()), None, None),
-            PathBuf::from("/tmp/codex-fixture")
-        );
+    fn request(workspace: PathBuf) -> ExecutionRequest {
+        ExecutionRequest {
+            chat_id: Uuid::new_v4(),
+            binding: None,
+            workspace,
+            prompt: "continue".into(),
+        }
     }
 
     #[tokio::test]
@@ -509,5 +446,50 @@ for line in sys.stdin:
             Some(ExecutionEvent::TextDelta("streamed answer".into()))
         );
         assert!(receiver.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn spawn_failure_keeps_its_opaque_io_source() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let missing = directory.path().join("missing-codex");
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let error = CodexAdapter::new(missing)
+            .execute(request(directory.path().to_path_buf()), sender)
+            .await
+            .expect_err("missing executable fails to start");
+
+        assert!(error.to_string().contains("could not start Codex"));
+        assert!(
+            Error::source(&error)
+                .expect("spawn diagnostic is retained")
+                .is::<std::io::Error>()
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_app_server_json_keeps_its_serde_source() {
+        let directory = tempfile::tempdir().expect("fixture directory");
+        let script = directory.path().join("invalid-codex.py");
+        std::fs::write(
+            &script,
+            "#!/usr/bin/env python3\nprint('{invalid-json', flush=True)\n",
+        )
+        .expect("write fixture");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+
+        let (sender, _receiver) = mpsc::unbounded_channel();
+        let error = CodexAdapter::new(&script)
+            .execute(request(directory.path().to_path_buf()), sender)
+            .await
+            .expect_err("invalid server output fails to parse");
+
+        assert!(error.to_string().contains("Codex sent invalid JSON"));
+        assert!(
+            Error::source(&error)
+                .expect("parse diagnostic is retained")
+                .is::<serde_json::Error>()
+        );
     }
 }

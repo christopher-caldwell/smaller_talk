@@ -4535,10 +4535,10 @@ dependencies = [
  "chrono",
  "gpui",
  "pulldown-cmark",
- "serde_json",
  "smaller-talk-application",
  "smaller-talk-database",
  "smaller-talk-domain",
+ "smaller-talk-infrastructure",
  "sqlx",
  "tempfile",
  "tokio",
@@ -4550,6 +4550,19 @@ name = "smaller-talk-domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "uuid",
+]
+
+[[package]]
+name = "smaller-talk-infrastructure"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "smaller-talk-application",
+ "smaller-talk-domain",
+ "tempfile",
+ "tokio",
  "uuid",
 ]
 

@@ -354,10 +354,26 @@ fn rpc_error(value: &Value) -> ExecutionError {
     ExecutionError::new(message.to_owned())
 }
 
-async fn read_stderr(stderr: tokio::process::ChildStderr) -> String {
-    let mut stderr = stderr.take(16 * 1024);
-    let mut output = String::new();
-    let _ = stderr.read_to_string(&mut output).await;
+const STDERR_LIMIT: usize = 16 * 1024;
+
+async fn read_stderr(mut stderr: impl tokio::io::AsyncRead + Unpin) -> String {
+    let mut retained = Vec::with_capacity(STDERR_LIMIT);
+    let mut buffer = [0; 4096];
+    // Keep the pipe open and drain to EOF even after the diagnostic prefix is full.
+    while let Ok(count) = stderr.read(&mut buffer).await {
+        if count == 0 {
+            break;
+        }
+        let keep = count.min(STDERR_LIMIT - retained.len());
+        retained.extend_from_slice(&buffer[..keep]);
+    }
+    // Diagnostics can contain invalid UTF-8, or the limit can split a character.
+    let mut output = String::from_utf8_lossy(&retained).into_owned();
+    let mut end = output.len().min(STDERR_LIMIT);
+    while !output.is_char_boundary(end) {
+        end -= 1;
+    }
+    output.truncate(end);
     output
 }
 
@@ -388,6 +404,44 @@ mod tests {
             workspace,
             prompt: "continue".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn stderr_is_drained_past_the_retention_limit_without_breaking_the_child() {
+        let mut child = tokio::process::Command::new("python3")
+            .args([
+                "-c",
+                "import os; os.write(2, b'x' * (1024 * 1024)); print('finished')",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("start noisy subprocess");
+        let stderr = child.stderr.take().expect("stderr pipe");
+        let reader = tokio::spawn(super::read_stderr(stderr));
+        let output =
+            tokio::time::timeout(std::time::Duration::from_secs(5), child.wait_with_output())
+                .await
+                .expect("child must not block on stderr")
+                .expect("child output");
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"finished\n");
+        let diagnostics = reader.await.expect("stderr reader");
+        assert_eq!(diagnostics.len(), super::STDERR_LIMIT);
+        assert!(diagnostics.bytes().all(|byte| byte == b'x'));
+    }
+
+    #[tokio::test]
+    async fn stderr_retention_tolerates_invalid_and_split_utf8() {
+        let bytes = vec![0xff; super::STDERR_LIMIT + 10];
+        let diagnostics = super::read_stderr(&bytes[..]).await;
+        assert!(!diagnostics.is_empty());
+        assert!(diagnostics.len() <= super::STDERR_LIMIT);
+        let mut bytes = vec![b'x'; super::STDERR_LIMIT - 1];
+        bytes.extend_from_slice("é".as_bytes());
+        let diagnostics = super::read_stderr(&bytes[..]).await;
+        assert!(diagnostics.len() <= super::STDERR_LIMIT);
     }
 
     #[tokio::test]

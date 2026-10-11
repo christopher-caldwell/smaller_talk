@@ -153,11 +153,11 @@ pub enum SendMessageError {
     ChatNotFound,
     #[error("chat storage failed: {0}")]
     Storage(#[source] PersistenceError),
-    #[error("Codex execution failed: {0}")]
+    #[error("Agent execution failed: {0}")]
     Execution(#[source] ExecutionError),
-    #[error("the Codex execution task stopped unexpectedly: {0}")]
+    #[error("the agent execution task stopped unexpectedly: {0}")]
     Task(String),
-    #[error("Codex completed without an assistant response")]
+    #[error("The agent completed without an assistant response")]
     EmptyResponse,
 }
 
@@ -386,11 +386,11 @@ mod tests {
     #[test]
     fn execution_error_preserves_an_opaque_adapter_source() {
         let error = ExecutionError::with_source(
-            "the Codex request could not be written",
+            "the agent request could not be written",
             std::io::Error::other("pipe closed"),
         );
         let source = Error::source(&error).expect("I/O diagnostic is retained");
         assert!(source.downcast_ref::<std::io::Error>().is_some());
-        assert_eq!(error.to_string(), "the Codex request could not be written");
+        assert_eq!(error.to_string(), "the agent request could not be written");
     }
 }

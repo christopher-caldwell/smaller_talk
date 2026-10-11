@@ -1,3 +1,4 @@
+mod composer;
 mod markdown;
 
 use std::{
@@ -9,9 +10,8 @@ use std::{
 
 use anyhow::{Context as _, bail};
 use gpui::{
-    App, Application, Bounds, Context, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
-    MouseButton, Render, ScrollHandle, StyledText, Window, WindowBounds, WindowOptions, actions,
-    div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, Entity, KeyBinding, Menu, MenuItem, Render, ScrollHandle,
+    StyledText, Window, WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
 use smaller_talk_application::{
     ChatQueries, ChatService, ChatWrites, ConversationEvent, ConversationService, CreateChatError,
@@ -212,6 +212,7 @@ fn main() -> anyhow::Result<()> {
     });
 
     app.run(move |cx: &mut App| {
+        composer::bind_keys(cx);
         cx.on_action(quit);
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
@@ -435,22 +436,32 @@ fn open_chat_window(
             ..Default::default()
         },
         move |_, cx| {
-            cx.new(|view_cx| ChatsView {
-                service,
-                conversation_service,
-                tokio,
-                chats: snapshot.chats,
-                selected_chat: snapshot.selected_chat,
-                messages: snapshot.messages,
-                shared_state,
-                state_updates,
-                state_listener_started: false,
-                working: false,
-                error: None,
-                composer: String::new(),
-                composer_focus: view_cx.focus_handle(),
-                transcript_scroll: ScrollHandle::new(),
-                initial_scroll_done: false,
+            cx.new(|view_cx| {
+                let composer = view_cx.new(composer::Composer::new);
+                view_cx
+                    .subscribe(
+                        &composer,
+                        |view: &mut ChatsView, _, _: &composer::Submitted, cx| {
+                            view.send_prompt(view.composer.read(cx).content(), cx);
+                        },
+                    )
+                    .detach();
+                ChatsView {
+                    service,
+                    conversation_service,
+                    tokio,
+                    chats: snapshot.chats,
+                    selected_chat: snapshot.selected_chat,
+                    messages: snapshot.messages,
+                    shared_state,
+                    state_updates,
+                    state_listener_started: false,
+                    working: false,
+                    error: None,
+                    composer,
+                    transcript_scroll: ScrollHandle::new(),
+                    initial_scroll_done: false,
+                }
             })
         },
     )
@@ -470,8 +481,7 @@ struct ChatsView {
     state_listener_started: bool,
     working: bool,
     error: Option<String>,
-    composer: String,
-    composer_focus: FocusHandle,
+    composer: Entity<composer::Composer>,
     transcript_scroll: ScrollHandle,
     initial_scroll_done: bool,
 }
@@ -554,6 +564,27 @@ fn render_markdown(body: &str) -> impl IntoElement {
 }
 
 impl ChatsView {
+    fn apply_snapshot(&mut self, snapshot: ChatSnapshot) {
+        let selection_changed = self.selected_chat != snapshot.selected_chat;
+        let transcript_changed = self.messages != snapshot.messages;
+        let follow = selection_changed || (transcript_changed && self.at_transcript_bottom());
+        self.chats = snapshot.chats;
+        self.selected_chat = snapshot.selected_chat;
+        self.messages = snapshot.messages;
+        if follow {
+            self.transcript_scroll.scroll_to_bottom();
+        }
+    }
+
+    fn at_transcript_bottom(&self) -> bool {
+        // GPUI offsets are negative when scrolled down. Inspect the old layout,
+        // before applying the new stream text, so growing content can follow it.
+        follows_transcript(
+            self.transcript_scroll.offset().y,
+            self.transcript_scroll.max_offset().height,
+        )
+    }
+
     fn create_chat(&mut self, cx: &mut Context<Self>) {
         if self.working {
             return;
@@ -605,9 +636,8 @@ impl ChatsView {
                 match result {
                     Ok(Ok(())) | Ok(Err(DeleteChatError::NotFound)) => {
                         let selected_chat = view.shared_state.snapshot.borrow().selected_chat;
-                        view.chats = view.shared_state.snapshot.borrow().chats.clone();
-                        view.selected_chat = selected_chat;
-                        view.messages = view.shared_state.snapshot.borrow().messages.clone();
+                        let snapshot = view.shared_state.snapshot.borrow().clone();
+                        view.apply_snapshot(snapshot);
                         if let Some(selected_chat) = selected_chat {
                             view.reload_messages(selected_chat, cx);
                         }
@@ -624,9 +654,7 @@ impl ChatsView {
 
     fn select_chat(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let snapshot = self.shared_state.select_chat(id);
-        self.chats = snapshot.chats;
-        self.selected_chat = snapshot.selected_chat;
-        self.messages = snapshot.messages;
+        self.apply_snapshot(snapshot);
         self.error = None;
         self.reload_messages(id, cx);
         cx.notify();
@@ -648,8 +676,8 @@ impl ChatsView {
                 match result {
                     Ok(Ok(messages)) => {
                         view.shared_state.publish_messages(id, messages.clone());
-                        view.messages = view.shared_state.snapshot.borrow().messages.clone();
-                        view.transcript_scroll.scroll_to_bottom();
+                        let snapshot = view.shared_state.snapshot.borrow().clone();
+                        view.apply_snapshot(snapshot);
                     }
                     Ok(Err(error)) => view.error = Some(error.to_string()),
                     Err(_) => {
@@ -671,7 +699,8 @@ impl ChatsView {
             return;
         }
 
-        self.composer.clear();
+        self.composer.update(cx, |composer, cx| composer.reset(cx));
+        self.transcript_scroll.scroll_to_bottom();
         self.working = true;
         self.error = None;
         let service = self.conversation_service.clone();
@@ -692,8 +721,7 @@ impl ChatsView {
                     .update(cx, |view, cx| {
                         view.shared_state.publish_conversation_event(event);
                         let snapshot = view.shared_state.snapshot.borrow().clone();
-                        view.messages = snapshot.messages;
-                        view.transcript_scroll.scroll_to_bottom();
+                        view.apply_snapshot(snapshot);
                         cx.notify();
                     })
                     .is_err()
@@ -711,7 +739,7 @@ impl ChatsView {
                         view.reload_messages(chat_id, cx);
                     }
                     Err(_) => {
-                        view.error = Some("The Codex task stopped unexpectedly.".into());
+                        view.error = Some("The agent task stopped unexpectedly.".into());
                         view.reload_messages(chat_id, cx);
                     }
                 }
@@ -719,35 +747,6 @@ impl ChatsView {
             });
         })
         .detach();
-        cx.notify();
-    }
-
-    fn handle_composer_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let keystroke = &event.keystroke;
-        match keystroke.key.as_str() {
-            "enter" if keystroke.modifiers.shift => self.composer.push('\n'),
-            "enter" => self.send_prompt(self.composer.clone(), cx),
-            "backspace" => {
-                self.composer.pop();
-            }
-            "v" if keystroke.modifiers.platform => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.composer.push_str(&text);
-                }
-            }
-            _ if accepts_text_key(keystroke.modifiers) => {
-                if let Some(typed) = &keystroke.key_char {
-                    self.composer.push_str(typed);
-                }
-            }
-            _ => {}
-        }
-        self.composer_focus.focus(window);
         cx.notify();
     }
 
@@ -762,9 +761,7 @@ impl ChatsView {
                 let snapshot = state_updates.borrow_and_update().clone();
                 if this
                     .update(cx, |view, cx| {
-                        view.chats = snapshot.chats;
-                        view.selected_chat = snapshot.selected_chat;
-                        view.messages = snapshot.messages;
+                        view.apply_snapshot(snapshot);
                         cx.notify();
                     })
                     .is_err()
@@ -777,8 +774,8 @@ impl ChatsView {
     }
 }
 
-fn accepts_text_key(modifiers: gpui::Modifiers) -> bool {
-    !modifiers.control && !modifiers.alt && !modifiers.platform && !modifiers.function
+fn follows_transcript(offset: gpui::Pixels, maximum: gpui::Pixels) -> bool {
+    maximum + offset <= px(2.0)
 }
 
 impl Render for ChatsView {
@@ -951,48 +948,15 @@ impl Render for ChatsView {
 
             let composer = div()
                 .id("composer")
-                .track_focus(&self.composer_focus)
                 .flex_1()
-                .min_h(px(54.0))
-                .max_h(px(140.0))
                 .min_w(px(0.0))
-                .flex()
-                .items_center()
                 .px_3()
                 .py_2()
                 .rounded_lg()
                 .border_1()
-                .border_color(if self.composer_focus.is_focused(_window) {
-                    rgb(ACCENT)
-                } else {
-                    rgb(0x3b4049)
-                })
+                .border_color(rgb(0x3b4049))
                 .bg(rgb(PANEL))
-                .cursor(gpui::CursorStyle::IBeam)
-                .on_mouse_down(
-                    MouseButton::Left,
-                    cx.listener(|this, _, window, _| this.composer_focus.focus(window)),
-                )
-                .on_key_down(cx.listener(|this, event, window, cx| {
-                    this.handle_composer_key(event, window, cx)
-                }))
-                .child(
-                    div()
-                        .flex_1()
-                        .w_full()
-                        .min_w(px(0.0))
-                        .whitespace_normal()
-                        .text_color(if self.composer.is_empty() {
-                            rgb(MUTED)
-                        } else {
-                            rgb(TEXT)
-                        })
-                        .child(if self.composer.is_empty() {
-                            "Type a message…".to_owned()
-                        } else {
-                            self.composer.clone()
-                        }),
-                );
+                .child(self.composer.clone());
             let send_button = div()
                 .id("send-message")
                 .px_4()
@@ -1002,9 +966,9 @@ impl Render for ChatsView {
                 .text_color(rgb(0x101715))
                 .cursor_pointer()
                 .child(if self.working { "Sending…" } else { "Send" })
-                .on_click(
-                    cx.listener(|this, _, _, cx| this.send_prompt(this.composer.clone(), cx)),
-                );
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.send_prompt(this.composer.read(cx).content(), cx)
+                }));
 
             detail = detail
                 .child(
@@ -1085,7 +1049,7 @@ mod tests {
 
     use async_trait::async_trait;
     use chrono::{Duration as ChronoDuration, Utc};
-    use gpui::Modifiers;
+    use gpui::px;
     use smaller_talk_application::{
         ChatQueries, ChatService, ChatWrites, DeleteChatOutcome, NewChat, PersistenceError,
     };
@@ -1095,7 +1059,7 @@ mod tests {
     use tokio::{sync::Notify, time::timeout};
 
     use super::{
-        ChatSnapshot, SharedChatState, accepts_text_key, create_and_publish, delete_and_publish,
+        ChatSnapshot, SharedChatState, create_and_publish, delete_and_publish, follows_transcript,
         resolve_codex_executable_from,
     };
     use smaller_talk_domain::{Chat, Message, MessageRole};
@@ -1248,21 +1212,10 @@ mod tests {
     }
 
     #[test]
-    fn shifted_text_is_allowed_without_enabling_shortcut_combinations() {
-        assert!(accepts_text_key(Modifiers::default()));
-        assert!(accepts_text_key(Modifiers {
-            shift: true,
-            ..Default::default()
-        }));
-        assert!(!accepts_text_key(Modifiers {
-            shift: true,
-            platform: true,
-            ..Default::default()
-        }));
-        assert!(!accepts_text_key(Modifiers {
-            control: true,
-            ..Default::default()
-        }));
+    fn streaming_follows_only_the_bottom_of_the_transcript() {
+        assert!(follows_transcript(px(0.), px(0.)));
+        assert!(follows_transcript(px(-100.), px(100.)));
+        assert!(!follows_transcript(px(-50.), px(100.)));
     }
 
     #[test]

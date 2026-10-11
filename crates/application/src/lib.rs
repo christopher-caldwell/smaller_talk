@@ -45,6 +45,12 @@ pub enum DeleteChatOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RenameChatOutcome {
+    Renamed(Chat),
+    NotFound,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NewMessage {
     pub id: Uuid,
     pub chat_id: Uuid,
@@ -63,6 +69,11 @@ pub trait ChatQueries: Send + Sync {
 pub trait ChatWrites: Send + Sync {
     async fn create_chat(&self, chat: NewChat) -> Result<Chat, PersistenceError>;
     async fn delete_chat(&self, id: Uuid) -> Result<DeleteChatOutcome, PersistenceError>;
+    async fn rename_chat(
+        &self,
+        id: Uuid,
+        title: String,
+    ) -> Result<RenameChatOutcome, PersistenceError>;
     async fn save_execution_binding(
         &self,
         id: Uuid,
@@ -185,6 +196,16 @@ pub enum DeleteChatError {
     Storage(#[source] PersistenceError),
     #[error("the selected chat no longer exists")]
     NotFound,
+}
+
+#[derive(Debug, Error)]
+pub enum RenameChatError {
+    #[error("chat storage failed: {0}")]
+    Storage(#[source] PersistenceError),
+    #[error("the selected chat no longer exists")]
+    NotFound,
+    #[error("a chat title cannot be empty")]
+    EmptyTitle,
 }
 
 pub struct ChatService {
@@ -339,7 +360,7 @@ impl ChatService {
         self.writes
             .create_chat(NewChat {
                 id: Uuid::new_v4(),
-                title: "New chat".to_owned(),
+                title: "Untitled".to_owned(),
                 created_at: Utc::now(),
                 binding: None,
             })
@@ -356,6 +377,22 @@ impl ChatService {
         {
             DeleteChatOutcome::Deleted => Ok(()),
             DeleteChatOutcome::NotFound => Err(DeleteChatError::NotFound),
+        }
+    }
+
+    pub async fn rename_chat(&self, id: Uuid, title: String) -> Result<Chat, RenameChatError> {
+        let title = title.trim().to_owned();
+        if title.is_empty() {
+            return Err(RenameChatError::EmptyTitle);
+        }
+        match self
+            .writes
+            .rename_chat(id, title)
+            .await
+            .map_err(RenameChatError::Storage)?
+        {
+            RenameChatOutcome::Renamed(chat) => Ok(chat),
+            RenameChatOutcome::NotFound => Err(RenameChatError::NotFound),
         }
     }
 }

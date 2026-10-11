@@ -1,6 +1,6 @@
 use smaller_talk_application::{
     ChatQueries, ChatWrites, DeleteChatOutcome, MessageQueries, MessageWrites, NewChat, NewMessage,
-    PersistenceError,
+    PersistenceError, RenameChatOutcome,
 };
 use smaller_talk_domain::{Chat, ExecutionBinding, Message, MessageRole};
 use sqlx::SqlitePool;
@@ -177,6 +177,22 @@ impl ChatWrites for SqliteChatStore {
         } else {
             DeleteChatOutcome::NotFound
         })
+    }
+
+    async fn rename_chat(
+        &self,
+        id: Uuid,
+        title: String,
+    ) -> Result<RenameChatOutcome, PersistenceError> {
+        let id = id.to_string();
+        let row = sqlx::query_file_as!(ChatRow, "src/chats/sql/rename_chat.sql", title, id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?;
+        match row {
+            Some(row) => Ok(RenameChatOutcome::Renamed(Chat::try_from(row)?)),
+            None => Ok(RenameChatOutcome::NotFound),
+        }
     }
 
     async fn save_execution_binding(

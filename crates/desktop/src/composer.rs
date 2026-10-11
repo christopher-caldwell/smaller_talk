@@ -37,12 +37,15 @@ actions!(
         SelectHome,
         SelectEnd,
         Submit,
+        Cancel,
         Newline,
     ]
 );
 
 pub struct Submitted;
 impl EventEmitter<Submitted> for Composer {}
+pub struct Canceled;
+impl EventEmitter<Canceled> for Composer {}
 
 #[derive(Clone)]
 struct EditSnapshot {
@@ -64,13 +67,22 @@ pub struct Composer {
     scroll: Point<Pixels>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    single_line: bool,
 }
 
 impl Composer {
     pub fn new(cx: &mut Context<Self>) -> Self {
+        Self::with_content("", false, cx)
+    }
+
+    pub fn new_single_line(cx: &mut Context<Self>) -> Self {
+        Self::with_content("", true, cx)
+    }
+
+    fn with_content(content: &str, single_line: bool, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
-            content: "".into(),
+            content: content.to_owned().into(),
             placeholder: "Type a message…".into(),
             selected_range: 0..0,
             selection_reversed: false,
@@ -78,10 +90,21 @@ impl Composer {
             last_layout: Vec::new(),
             last_bounds: None,
             is_selecting: false,
+            single_line,
             undo: Vec::new(),
             redo: Vec::new(),
             scroll: point(px(0.), px(0.)),
         }
+    }
+
+    pub fn set_content(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.content = content.into();
+        self.selected_range = self.content.len()..self.content.len();
+        self.selection_reversed = false;
+        self.marked_range = None;
+        self.last_layout.clear();
+        self.focus_handle.focus(window);
+        cx.notify();
     }
 
     pub fn content(&self) -> String {
@@ -133,8 +156,16 @@ impl Composer {
         }
     }
 
+    fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
+        if self.single_line {
+            cx.emit(Canceled);
+        }
+    }
+
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
-        self.replace_text_in_range(None, "\n", window, cx);
+        if !self.single_line {
+            self.replace_text_in_range(None, "\n", window, cx);
+        }
     }
 
     fn vertical(&mut self, down: bool, select: bool, cx: &mut Context<Self>) {
@@ -459,6 +490,14 @@ impl EntityInputHandler for Composer {
             .map(|range_utf16| self.range_from_utf16(range_utf16))
             .or(self.marked_range.clone())
             .unwrap_or(self.selected_range.clone());
+
+        let single_line_text;
+        let new_text = if self.single_line {
+            single_line_text = new_text.replace('\n', "").replace('\r', "");
+            single_line_text.as_str()
+        } else {
+            new_text
+        };
 
         if self.marked_range.is_none() {
             self.remember_edit();
@@ -813,6 +852,7 @@ impl Render for Composer {
             .on_action(cx.listener(Self::undo))
             .on_action(cx.listener(Self::redo))
             .on_action(cx.listener(Self::submit))
+            .on_action(cx.listener(Self::cancel))
             .on_action(cx.listener(Self::newline))
             .on_action(cx.listener(Self::up))
             .on_action(cx.listener(Self::down))
@@ -862,6 +902,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-z", Undo, Some("Composer")),
         KeyBinding::new("cmd-shift-z", Redo, Some("Composer")),
         KeyBinding::new("enter", Submit, Some("Composer")),
+        KeyBinding::new("escape", Cancel, Some("Composer")),
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("Composer")),
     ]);

@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE chats\nSET title = ?\nWHERE id = ?\nRETURNING id, title, created_at, adapter_key, native_session_id;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "adapter_key",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "native_session_id",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "9596a9f4b580e340ac94c46124ce3d5c694ec6beea93c6e24ae8670f1b42e8dc"
+}

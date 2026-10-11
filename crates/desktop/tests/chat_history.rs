@@ -145,3 +145,91 @@ async fn sqlite_chat_history_survives_reopen_and_delete_cascades() {
             .is::<sqlx::Error>()
     );
 }
+
+#[tokio::test]
+async fn renaming_preserves_chat_identity_binding_messages_and_survives_reopen() {
+    use smaller_talk_application::{MessageQueries, MessageWrites, NewMessage, RenameChatError};
+    use smaller_talk_domain::MessageRole;
+
+    let directory = tempfile::tempdir().expect("temporary database directory");
+    let path = directory.path().join("chats.sqlite3");
+    create_empty_database(&path).await.expect("create database");
+    migrate_existing(&path).await.expect("migrate database");
+    let store = Arc::new(SqliteChatStore::new(
+        open_existing(&path).await.expect("open database"),
+    ));
+    let queries: Arc<dyn ChatQueries> = store.clone();
+    let writes: Arc<dyn ChatWrites> = store.clone();
+    let service = ChatService::new(queries, writes.clone());
+    let first = service.create_empty_chat().await.expect("create chat");
+    let second = service
+        .create_empty_chat()
+        .await
+        .expect("create second chat");
+    assert_eq!(first.title, "Untitled");
+    assert_eq!(second.title, "Untitled");
+
+    let binding = ExecutionBinding {
+        adapter_key: "codex".into(),
+        native_session_id: "thread-rename-fixture".into(),
+    };
+    writes
+        .save_execution_binding(first.id, binding.clone())
+        .await
+        .expect("save provider binding");
+    store
+        .append_message(NewMessage {
+            id: uuid::Uuid::new_v4(),
+            chat_id: first.id,
+            role: MessageRole::User,
+            body: "keep this prompt".into(),
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("save existing message");
+
+    let renamed = service
+        .rename_chat(first.id, "  Rust refactoring  ".into())
+        .await
+        .expect("rename chat");
+    assert_eq!(renamed.id, first.id);
+    assert_eq!(renamed.title, "Rust refactoring");
+    assert_eq!(renamed.binding.as_ref(), Some(&binding));
+    assert!(matches!(
+        service.rename_chat(first.id, "   ".into()).await,
+        Err(RenameChatError::EmptyTitle)
+    ));
+
+    store.pool().close().await;
+    drop(service);
+    drop(store);
+
+    let reopened = Arc::new(SqliteChatStore::new(
+        open_existing(&path).await.expect("reopen database"),
+    ));
+    let persisted = reopened
+        .list_chats()
+        .await
+        .expect("load chats after restart");
+    let persisted_first = persisted
+        .iter()
+        .find(|chat| chat.id == first.id)
+        .expect("renamed chat is still the same row");
+    assert_eq!(persisted_first.title, "Rust refactoring");
+    assert_eq!(persisted_first.binding.as_ref(), Some(&binding));
+    assert_eq!(
+        persisted
+            .iter()
+            .find(|chat| chat.id == second.id)
+            .expect("second chat remains independent")
+            .title,
+        "Untitled"
+    );
+    let messages = reopened
+        .list_messages(first.id)
+        .await
+        .expect("existing transcript remains attached");
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages[0].body, "keep this prompt");
+    reopened.pool().close().await;
+}

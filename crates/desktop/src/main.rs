@@ -15,7 +15,8 @@ use gpui::{
 };
 use smaller_talk_application::{
     ChatQueries, ChatService, ChatWrites, ConversationEvent, ConversationService, CreateChatError,
-    DeleteChatError, ExecutionAdapter, MessageQueries, MessageWrites, SendMessageInput,
+    DeleteChatError, ExecutionAdapter, MessageQueries, MessageWrites, RenameChatError,
+    SendMessageInput,
 };
 use smaller_talk_database::{
     SqliteChatStore, create_empty_database, migrate_existing, open_existing,
@@ -275,6 +276,18 @@ impl SharedChatState {
         });
     }
 
+    fn publish_renamed_chat(&self, chat: Chat) {
+        self.snapshot.send_modify(|snapshot| {
+            if let Some(stored) = snapshot
+                .chats
+                .iter_mut()
+                .find(|stored| stored.id == chat.id)
+            {
+                *stored = chat;
+            }
+        });
+    }
+
     fn select_chat(&self, id: Uuid) -> ChatSnapshot {
         self.snapshot.send_modify(|snapshot| {
             if snapshot.chats.iter().any(|chat| chat.id == id) {
@@ -420,6 +433,20 @@ async fn delete_and_publish(
     result
 }
 
+async fn rename_and_publish(
+    service: Arc<ChatService>,
+    shared_state: SharedChatState,
+    id: Uuid,
+    title: String,
+) -> Result<Chat, RenameChatError> {
+    let _write_guard = shared_state.write_gate.lock().await;
+    let result = service.rename_chat(id, title).await;
+    if let Ok(chat) = &result {
+        shared_state.publish_renamed_chat(chat.clone());
+    }
+    result
+}
+
 fn open_chat_window(
     cx: &mut App,
     service: Arc<ChatService>,
@@ -438,11 +465,28 @@ fn open_chat_window(
         move |_, cx| {
             cx.new(|view_cx| {
                 let composer = view_cx.new(composer::Composer::new);
+                let rename_editor = view_cx.new(composer::Composer::new_single_line);
                 view_cx
                     .subscribe(
                         &composer,
                         |view: &mut ChatsView, _, _: &composer::Submitted, cx| {
                             view.send_prompt(view.composer.read(cx).content(), cx);
+                        },
+                    )
+                    .detach();
+                view_cx
+                    .subscribe(
+                        &rename_editor,
+                        |view: &mut ChatsView, _, _: &composer::Submitted, cx| {
+                            view.save_rename(cx);
+                        },
+                    )
+                    .detach();
+                view_cx
+                    .subscribe(
+                        &rename_editor,
+                        |view: &mut ChatsView, _, _: &composer::Canceled, cx| {
+                            view.cancel_rename(cx);
                         },
                     )
                     .detach();
@@ -459,6 +503,8 @@ fn open_chat_window(
                     working: false,
                     error: None,
                     composer,
+                    rename_editor,
+                    renaming_chat: None,
                     transcript_scroll: ScrollHandle::new(),
                     code_scroll_handles: HashMap::new(),
                     initial_scroll_done: false,
@@ -483,6 +529,8 @@ struct ChatsView {
     working: bool,
     error: Option<String>,
     composer: Entity<composer::Composer>,
+    rename_editor: Entity<composer::Composer>,
+    renaming_chat: Option<Uuid>,
     transcript_scroll: ScrollHandle,
     code_scroll_handles: HashMap<(Uuid, usize), ScrollHandle>,
     initial_scroll_done: bool,
@@ -777,7 +825,70 @@ impl ChatsView {
         cx.notify();
     }
 
+    fn begin_rename(&mut self, id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+        if self.working {
+            return;
+        }
+        let Some(chat) = self.chats.iter().find(|chat| chat.id == id) else {
+            return;
+        };
+        self.rename_editor.update(cx, |editor, cx| {
+            editor.set_content(chat.title.clone(), window, cx);
+        });
+        self.renaming_chat = Some(id);
+        self.error = None;
+        cx.notify();
+    }
+
+    fn cancel_rename(&mut self, cx: &mut Context<Self>) {
+        if self.renaming_chat.take().is_some() {
+            self.error = None;
+            cx.notify();
+        }
+    }
+
+    fn save_rename(&mut self, cx: &mut Context<Self>) {
+        let Some(id) = self.renaming_chat else {
+            return;
+        };
+        if self.working {
+            return;
+        }
+        self.working = true;
+        self.error = None;
+        let title = self.rename_editor.read(cx).content();
+        let service = self.service.clone();
+        let tokio = self.tokio.clone();
+        let shared_state = self.shared_state.clone();
+        let (sender, receiver) = oneshot::channel();
+        tokio.spawn(async move {
+            let _ = sender.send(rename_and_publish(service, shared_state, id, title).await);
+        });
+        cx.spawn(async move |this, cx| {
+            let result = receiver.await;
+            let _ = this.update(cx, |view, cx| {
+                view.working = false;
+                match result {
+                    Ok(Ok(_)) => {
+                        view.renaming_chat = None;
+                        view.error = None;
+                        let snapshot = view.shared_state.snapshot.borrow().clone();
+                        view.apply_snapshot(snapshot);
+                    }
+                    Ok(Err(error)) => view.error = Some(error.to_string()),
+                    Err(_) => view.error = Some("The database task stopped unexpectedly.".into()),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
     fn select_chat(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if self.renaming_chat != Some(id) {
+            self.renaming_chat = None;
+        }
         let snapshot = self.shared_state.select_chat(id);
         self.apply_snapshot(snapshot);
         self.error = None;
@@ -981,6 +1092,19 @@ impl Render for ChatsView {
                     .bg(rgb(row_background))
                     .child(
                         div()
+                            .id(chat_element_id("rename-chat", id))
+                            .px_2()
+                            .py_1()
+                            .rounded_sm()
+                            .text_color(rgb(ACCENT))
+                            .cursor_pointer()
+                            .child("Rename")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.begin_rename(id, window, cx)
+                            })),
+                    )
+                    .child(
+                        div()
                             .id(chat_element_id("select-chat", id))
                             .flex_1()
                             .cursor_pointer()
@@ -1014,6 +1138,56 @@ impl Render for ChatsView {
             .bg(rgb(BACKGROUND));
 
         if let Some(chat) = selected {
+            let heading = if self.renaming_chat == Some(chat.id) {
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.0))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(0x3b4049))
+                            .bg(rgb(PANEL))
+                            .child(self.rename_editor.clone()),
+                    )
+                    .child(
+                        div()
+                            .id("save-chat-title")
+                            .px_3()
+                            .py_2()
+                            .rounded_md()
+                            .bg(rgb(ACCENT))
+                            .text_color(rgb(0x101715))
+                            .cursor_pointer()
+                            .child("Save")
+                            .on_click(cx.listener(|this, _, _, cx| this.save_rename(cx))),
+                    )
+                    .child(
+                        div()
+                            .id("cancel-chat-title")
+                            .px_2()
+                            .py_2()
+                            .text_color(rgb(MUTED))
+                            .cursor_pointer()
+                            .child("Cancel")
+                            .on_click(cx.listener(|this, _, _, cx| this.cancel_rename(cx))),
+                    )
+            } else {
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .text_2xl()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(rgb(TEXT))
+                    .child(chat.title.clone())
+            };
             let mut transcript = div()
                 .id("transcript")
                 .flex_1()
@@ -1126,13 +1300,7 @@ impl Render for ChatsView {
                         .flex()
                         .items_center()
                         .justify_between()
-                        .child(
-                            div()
-                                .text_2xl()
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
-                                .text_color(rgb(TEXT))
-                                .child(chat.title.clone()),
-                        )
+                        .child(heading)
                         .child(div().text_xs().text_color(rgb(MUTED)).child("Codex")),
                 )
                 .child(transcript)
@@ -1199,6 +1367,7 @@ mod tests {
     use gpui::px;
     use smaller_talk_application::{
         ChatQueries, ChatService, ChatWrites, DeleteChatOutcome, NewChat, PersistenceError,
+        RenameChatOutcome,
     };
     use smaller_talk_database::{
         SqliteChatStore, create_empty_database, migrate_existing, open_existing,
@@ -1247,6 +1416,14 @@ mod tests {
         async fn delete_chat(&self, id: uuid::Uuid) -> Result<DeleteChatOutcome, PersistenceError> {
             self.pause_before_write().await;
             self.store.delete_chat(id).await
+        }
+
+        async fn rename_chat(
+            &self,
+            id: uuid::Uuid,
+            title: String,
+        ) -> Result<RenameChatOutcome, PersistenceError> {
+            self.store.rename_chat(id, title).await
         }
 
         async fn save_execution_binding(

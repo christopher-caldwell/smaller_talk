@@ -1092,21 +1092,9 @@ impl Render for ChatsView {
                     .bg(rgb(row_background))
                     .child(
                         div()
-                            .id(chat_element_id("rename-chat", id))
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_color(rgb(ACCENT))
-                            .cursor_pointer()
-                            .child("Rename")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.begin_rename(id, window, cx)
-                            })),
-                    )
-                    .child(
-                        div()
                             .id(chat_element_id("select-chat", id))
                             .flex_1()
+                            .min_w(px(0.0))
                             .cursor_pointer()
                             .child(div().text_color(rgb(TEXT)).child(title))
                             .child(div().text_xs().text_color(rgb(MUTED)).child(date))
@@ -1114,14 +1102,38 @@ impl Render for ChatsView {
                     )
                     .child(
                         div()
-                            .id(chat_element_id("delete-chat", id))
-                            .px_2()
-                            .py_1()
-                            .rounded_sm()
-                            .text_color(rgb(DANGER))
-                            .cursor_pointer()
-                            .child("Delete")
-                            .on_click(cx.listener(move |this, _, _, cx| this.delete_chat(id, cx))),
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .id(chat_element_id("rename-chat", id))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .text_color(rgb(ACCENT))
+                                    .cursor_pointer()
+                                    .child("Rename")
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.begin_rename(id, window, cx)
+                                    })),
+                            )
+                            .child(
+                                div()
+                                    .id(chat_element_id("delete-chat", id))
+                                    .px_1()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .text_xs()
+                                    .text_color(rgb(DANGER))
+                                    .cursor_pointer()
+                                    .child("Delete")
+                                    .on_click(
+                                        cx.listener(move |this, _, _, cx| this.delete_chat(id, cx)),
+                                    ),
+                            ),
                     ),
             );
         }

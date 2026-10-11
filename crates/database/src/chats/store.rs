@@ -1,7 +1,8 @@
 use smaller_talk_application::{
-    ChatQueries, ChatWrites, DeleteChatOutcome, NewChat, PersistenceError,
+    ChatQueries, ChatWrites, DeleteChatOutcome, MessageQueries, MessageWrites, NewChat, NewMessage,
+    PersistenceError,
 };
-use smaller_talk_domain::{Chat, ExecutionBinding};
+use smaller_talk_domain::{Chat, ExecutionBinding, Message, MessageRole};
 use sqlx::SqlitePool;
 use thiserror::Error;
 use uuid::Uuid;
@@ -29,12 +30,28 @@ struct ChatRow {
     native_session_id: Option<String>,
 }
 
+struct MessageRow {
+    id: String,
+    chat_id: String,
+    role: String,
+    body: String,
+    created_at: i64,
+}
+
 #[derive(Debug, Error)]
 enum ChatRowMappingError {
     #[error("chat has an invalid creation timestamp: {0}")]
     InvalidCreationTimestamp(i64),
     #[error("chat has an incomplete provider binding")]
     IncompleteProviderBinding,
+}
+
+#[derive(Debug, Error)]
+enum MessageRowMappingError {
+    #[error("message has an invalid creation timestamp: {0}")]
+    InvalidCreationTimestamp(i64),
+    #[error("message has an invalid stored role: {0}")]
+    InvalidRole(String),
 }
 
 impl TryFrom<ChatRow> for Chat {
@@ -69,6 +86,34 @@ impl TryFrom<ChatRow> for Chat {
     }
 }
 
+impl TryFrom<MessageRow> for Message {
+    type Error = PersistenceError;
+
+    fn try_from(row: MessageRow) -> Result<Self, Self::Error> {
+        let role = match row.role.as_str() {
+            "user" => MessageRole::User,
+            "assistant" => MessageRole::Assistant,
+            _ => {
+                return Err(PersistenceError::new(MessageRowMappingError::InvalidRole(
+                    row.role,
+                )));
+            }
+        };
+        let created_at = chrono::DateTime::from_timestamp_millis(row.created_at)
+            .ok_or(MessageRowMappingError::InvalidCreationTimestamp(
+                row.created_at,
+            ))
+            .map_err(PersistenceError::new)?;
+        Ok(Message {
+            id: Uuid::parse_str(&row.id).map_err(PersistenceError::new)?,
+            chat_id: Uuid::parse_str(&row.chat_id).map_err(PersistenceError::new)?,
+            role,
+            body: row.body,
+            created_at,
+        })
+    }
+}
+
 #[async_trait::async_trait]
 impl ChatQueries for SqliteChatStore {
     async fn list_chats(&self) -> Result<Vec<Chat>, PersistenceError> {
@@ -78,6 +123,15 @@ impl ChatQueries for SqliteChatStore {
             .map_err(PersistenceError::new)?;
 
         rows.into_iter().map(Chat::try_from).collect()
+    }
+
+    async fn find_chat(&self, id: Uuid) -> Result<Option<Chat>, PersistenceError> {
+        let id = id.to_string();
+        let row = sqlx::query_file_as!(ChatRow, "src/chats/sql/find_chat.sql", id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?;
+        row.map(Chat::try_from).transpose()
     }
 }
 
@@ -123,5 +177,64 @@ impl ChatWrites for SqliteChatStore {
         } else {
             DeleteChatOutcome::NotFound
         })
+    }
+
+    async fn save_execution_binding(
+        &self,
+        id: Uuid,
+        binding: ExecutionBinding,
+    ) -> Result<bool, PersistenceError> {
+        let id = id.to_string();
+        let adapter_key = binding.adapter_key;
+        let native_session_id = binding.native_session_id;
+        let updated_id = sqlx::query_file_scalar!(
+            "src/chats/sql/save_execution_binding.sql",
+            adapter_key,
+            native_session_id,
+            id,
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(PersistenceError::new)?;
+        Ok(updated_id.is_some())
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageQueries for SqliteChatStore {
+    async fn list_messages(&self, chat_id: Uuid) -> Result<Vec<Message>, PersistenceError> {
+        let chat_id = chat_id.to_string();
+        let rows = sqlx::query_file_as!(MessageRow, "src/chats/sql/list_messages.sql", chat_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(PersistenceError::new)?;
+        rows.into_iter().map(Message::try_from).collect()
+    }
+}
+
+#[async_trait::async_trait]
+impl MessageWrites for SqliteChatStore {
+    async fn append_message(&self, message: NewMessage) -> Result<Message, PersistenceError> {
+        let id = message.id.to_string();
+        let chat_id = message.chat_id.to_string();
+        let role = match message.role {
+            MessageRole::User => "user",
+            MessageRole::Assistant => "assistant",
+        };
+        let body = message.body;
+        let created_at = message.created_at.timestamp_millis();
+        let row = sqlx::query_file_as!(
+            MessageRow,
+            "src/chats/sql/insert_message.sql",
+            id,
+            chat_id,
+            role,
+            body,
+            created_at,
+        )
+        .fetch_one(&self.pool)
+        .await
+        .map_err(PersistenceError::new)?;
+        Message::try_from(row)
     }
 }

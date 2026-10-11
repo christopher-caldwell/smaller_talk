@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT id, title, created_at, adapter_key, native_session_id\nFROM chats\nWHERE id = ?;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "adapter_key",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "native_session_id",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      true
+    ]
+  },
+  "hash": "b3dde2b9527fb1a3b0ec35bea45d343916772f951555b3ee587150f9d2b4d2a4"
+}

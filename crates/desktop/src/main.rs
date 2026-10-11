@@ -1,17 +1,22 @@
+mod codex;
+mod markdown;
+
 use std::{path::PathBuf, sync::Arc};
 
 use anyhow::{Context as _, bail};
 use gpui::{
-    App, Application, Bounds, Context, KeyBinding, Menu, MenuItem, Render, Window, WindowBounds,
-    WindowOptions, actions, div, prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, FocusHandle, KeyBinding, KeyDownEvent, Menu, MenuItem,
+    MouseButton, Render, ScrollHandle, StyledText, Window, WindowBounds, WindowOptions, actions,
+    div, prelude::*, px, rgb, size,
 };
 use smaller_talk_application::{
-    ChatQueries, ChatService, ChatWrites, CreateChatError, DeleteChatError,
+    ChatQueries, ChatService, ChatWrites, ConversationEvent, ConversationService, CreateChatError,
+    DeleteChatError, ExecutionAdapter, MessageQueries, MessageWrites,
 };
 use smaller_talk_database::{
     SqliteChatStore, create_empty_database, migrate_existing, open_existing,
 };
-use smaller_talk_domain::Chat;
+use smaller_talk_domain::{Chat, Message, MessageRole};
 use tokio::{
     runtime::Builder,
     sync::{oneshot, watch},
@@ -79,14 +84,36 @@ fn main() -> anyhow::Result<()> {
     let store = Arc::new(SqliteChatStore::new(pool));
     let queries: Arc<dyn ChatQueries> = store.clone();
     let writes: Arc<dyn ChatWrites> = store.clone();
+    let conversation_chats = queries.clone();
+    let conversation_writes = writes.clone();
     let service = Arc::new(ChatService::new(queries, writes));
     let chats = runtime
         .block_on(service.list_chats())
         .context("could not load chats; run `cargo run -p smaller-talk-desktop -- db-migrate`")?;
+    let messages: Arc<dyn MessageQueries> = store.clone();
+    let message_writes: Arc<dyn MessageWrites> = store.clone();
+    let execution_adapter: Arc<dyn ExecutionAdapter> =
+        Arc::new(codex::CodexAdapter::from_environment());
+    let conversation_service = Arc::new(ConversationService::new(
+        conversation_chats,
+        conversation_writes,
+        messages,
+        message_writes,
+        execution_adapter,
+        std::env::current_dir().context("could not read the launch working directory")?,
+    ));
+    let initial_selected_chat = chats.first().map(|chat| chat.id);
+    let initial_messages = match initial_selected_chat {
+        Some(chat_id) => runtime
+            .block_on(conversation_service.list_messages(chat_id))
+            .context("could not load the selected chat transcript")?,
+        None => Vec::new(),
+    };
     let tokio = runtime.handle().clone();
     let (snapshot, _) = watch::channel(ChatSnapshot {
-        selected_chat: chats.first().map(|chat| chat.id),
+        selected_chat: initial_selected_chat,
         chats,
+        messages: initial_messages,
     });
     let shared_state = SharedChatState {
         snapshot,
@@ -94,6 +121,7 @@ fn main() -> anyhow::Result<()> {
     };
     let app = Application::new();
     let reopen_service = service.clone();
+    let reopen_conversation_service = conversation_service.clone();
     let reopen_tokio = tokio.clone();
     let reopen_state = shared_state.clone();
     app.on_reopen(move |cx| {
@@ -101,6 +129,7 @@ fn main() -> anyhow::Result<()> {
             open_chat_window(
                 cx,
                 reopen_service.clone(),
+                reopen_conversation_service.clone(),
                 reopen_tokio.clone(),
                 reopen_state.clone(),
             );
@@ -119,7 +148,7 @@ fn main() -> anyhow::Result<()> {
             name: "Smaller Talk".into(),
             items: vec![MenuItem::action("Quit Smaller Talk", Quit)],
         }]);
-        open_chat_window(cx, service, tokio, shared_state);
+        open_chat_window(cx, service, conversation_service, tokio, shared_state);
     });
 
     Ok(())
@@ -133,6 +162,7 @@ fn quit(_: &Quit, cx: &mut App) {
 struct ChatSnapshot {
     chats: Vec<Chat>,
     selected_chat: Option<Uuid>,
+    messages: Vec<Message>,
 }
 
 #[derive(Clone)]
@@ -152,6 +182,7 @@ impl SharedChatState {
                     .then_with(|| right.id.cmp(&left.id))
             });
             snapshot.selected_chat = Some(chat.id);
+            snapshot.messages.clear();
         });
     }
 
@@ -160,6 +191,7 @@ impl SharedChatState {
             snapshot.chats.retain(|chat| chat.id != id);
             if snapshot.selected_chat == Some(id) {
                 snapshot.selected_chat = snapshot.chats.first().map(|chat| chat.id);
+                snapshot.messages.clear();
             }
         });
     }
@@ -167,10 +199,74 @@ impl SharedChatState {
     fn select_chat(&self, id: Uuid) -> ChatSnapshot {
         self.snapshot.send_modify(|snapshot| {
             if snapshot.chats.iter().any(|chat| chat.id == id) {
+                if snapshot.selected_chat != Some(id) {
+                    snapshot.messages.clear();
+                }
                 snapshot.selected_chat = Some(id);
             }
         });
         self.snapshot.borrow().clone()
+    }
+
+    fn publish_messages(&self, id: Uuid, messages: Vec<Message>) {
+        self.snapshot.send_if_modified(|snapshot| {
+            if snapshot.selected_chat != Some(id) {
+                return false;
+            }
+            snapshot.messages = messages;
+            true
+        });
+    }
+
+    fn publish_conversation_event(&self, event: ConversationEvent) {
+        self.snapshot.send_modify(|snapshot| match event {
+            ConversationEvent::UserMessage(message)
+                if snapshot.selected_chat == Some(message.chat_id) =>
+            {
+                if !snapshot
+                    .messages
+                    .iter()
+                    .any(|stored| stored.id == message.id)
+                {
+                    snapshot.messages.push(message);
+                }
+            }
+            ConversationEvent::AssistantDelta {
+                chat_id,
+                message_id,
+                delta,
+            } if snapshot.selected_chat == Some(chat_id) => {
+                if let Some(message) = snapshot
+                    .messages
+                    .iter_mut()
+                    .find(|message| message.id == message_id)
+                {
+                    message.body.push_str(&delta);
+                } else {
+                    snapshot.messages.push(Message {
+                        id: message_id,
+                        chat_id,
+                        role: MessageRole::Assistant,
+                        body: delta,
+                        created_at: chrono::Utc::now(),
+                    });
+                }
+            }
+            ConversationEvent::AssistantMessage(message)
+                if snapshot.selected_chat == Some(message.chat_id) =>
+            {
+                if let Some(stored) = snapshot
+                    .messages
+                    .iter_mut()
+                    .find(|stored| stored.id == message.id)
+                {
+                    *stored = message;
+                } else {
+                    snapshot.messages.push(message);
+                }
+            }
+            _ => {}
+        });
     }
 }
 
@@ -202,6 +298,7 @@ async fn delete_and_publish(
 fn open_chat_window(
     cx: &mut App,
     service: Arc<ChatService>,
+    conversation_service: Arc<ConversationService>,
     tokio: tokio::runtime::Handle,
     shared_state: SharedChatState,
 ) {
@@ -214,16 +311,22 @@ fn open_chat_window(
             ..Default::default()
         },
         move |_, cx| {
-            cx.new(|_| ChatsView {
+            cx.new(|view_cx| ChatsView {
                 service,
+                conversation_service,
                 tokio,
                 chats: snapshot.chats,
                 selected_chat: snapshot.selected_chat,
+                messages: snapshot.messages,
                 shared_state,
                 state_updates,
                 state_listener_started: false,
                 working: false,
                 error: None,
+                composer: String::new(),
+                composer_focus: view_cx.focus_handle(),
+                transcript_scroll: ScrollHandle::new(),
+                initial_scroll_done: false,
             })
         },
     )
@@ -233,19 +336,97 @@ fn open_chat_window(
 
 struct ChatsView {
     service: Arc<ChatService>,
+    conversation_service: Arc<ConversationService>,
     tokio: tokio::runtime::Handle,
     chats: Vec<Chat>,
     selected_chat: Option<Uuid>,
+    messages: Vec<Message>,
     shared_state: SharedChatState,
     state_updates: watch::Receiver<ChatSnapshot>,
     state_listener_started: bool,
     working: bool,
     error: Option<String>,
+    composer: String,
+    composer_focus: FocusHandle,
+    transcript_scroll: ScrollHandle,
+    initial_scroll_done: bool,
 }
 
 fn chat_element_id(kind: &'static str, id: Uuid) -> gpui::ElementId {
     let (high, low) = id.as_u64_pair();
     (gpui::ElementId::from((kind, high)), low.to_string()).into()
+}
+
+fn render_markdown(body: &str) -> impl IntoElement {
+    let mut content = div().flex().flex_col().gap_3().w_full();
+    for block in markdown::parse_markdown(body) {
+        match block.kind {
+            markdown::MarkdownBlockKind::Rule => {
+                content = content.child(div().h(px(1.0)).w_full().bg(rgb(0x3b4049)));
+            }
+            markdown::MarkdownBlockKind::Code(language) => {
+                let mut code = div().w_full().p_3().rounded_md().bg(rgb(0x191c22));
+                if !language.is_empty() {
+                    code = code.child(
+                        div()
+                            .mb_2()
+                            .text_xs()
+                            .text_color(rgb(MUTED))
+                            .child(language),
+                    );
+                }
+                let mut code_lines = div().w_full().flex().flex_col();
+                for line in block.text.trim_end_matches('\n').split('\n') {
+                    let line = line.replace('\t', "    ").replace(' ', " ");
+                    code_lines = code_lines.child(
+                        div()
+                            .w_full()
+                            .font_family("Menlo")
+                            .text_sm()
+                            .text_color(rgb(0xd5d9e0))
+                            .child(if line.is_empty() {
+                                " ".to_owned()
+                            } else {
+                                line
+                            }),
+                    );
+                }
+                let code = code.child(code_lines);
+                content = content.child(code);
+            }
+            kind => {
+                let text = StyledText::new(block.text).with_highlights(
+                    block
+                        .highlights
+                        .into_iter()
+                        .map(|(range, style)| (range, gpui::HighlightStyle::from(style))),
+                );
+                let element = match kind {
+                    markdown::MarkdownBlockKind::Heading(1) => div()
+                        .text_xl()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(text),
+                    markdown::MarkdownBlockKind::Heading(2) => div()
+                        .text_lg()
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(text),
+                    markdown::MarkdownBlockKind::Heading(_) => div()
+                        .text_base()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child(text),
+                    markdown::MarkdownBlockKind::Quote => div()
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(rgb(ACCENT))
+                        .child(text),
+                    _ => div().text_base().child(text),
+                }
+                .text_color(rgb(TEXT));
+                content = content.child(element);
+            }
+        }
+    }
+    content
 }
 
 impl ChatsView {
@@ -298,7 +479,15 @@ impl ChatsView {
             let _ = this.update(cx, |view, cx| {
                 view.working = false;
                 match result {
-                    Ok(Ok(())) | Ok(Err(DeleteChatError::NotFound)) => {}
+                    Ok(Ok(())) | Ok(Err(DeleteChatError::NotFound)) => {
+                        let selected_chat = view.shared_state.snapshot.borrow().selected_chat;
+                        view.chats = view.shared_state.snapshot.borrow().chats.clone();
+                        view.selected_chat = selected_chat;
+                        view.messages = view.shared_state.snapshot.borrow().messages.clone();
+                        if let Some(selected_chat) = selected_chat {
+                            view.reload_messages(selected_chat, cx);
+                        }
+                    }
                     Ok(Err(error)) => view.error = Some(error.to_string()),
                     Err(_) => view.error = Some("The database task stopped unexpectedly.".into()),
                 }
@@ -313,7 +502,128 @@ impl ChatsView {
         let snapshot = self.shared_state.select_chat(id);
         self.chats = snapshot.chats;
         self.selected_chat = snapshot.selected_chat;
+        self.messages = snapshot.messages;
         self.error = None;
+        self.reload_messages(id, cx);
+        cx.notify();
+    }
+
+    fn reload_messages(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let service = self.conversation_service.clone();
+        let tokio = self.tokio.clone();
+        let (sender, receiver) = oneshot::channel();
+        tokio.spawn(async move {
+            let _ = sender.send(service.list_messages(id).await);
+        });
+        cx.spawn(async move |this, cx| {
+            let result = receiver.await;
+            let _ = this.update(cx, |view, cx| {
+                if view.selected_chat != Some(id) {
+                    return;
+                }
+                match result {
+                    Ok(Ok(messages)) => {
+                        view.shared_state.publish_messages(id, messages.clone());
+                        view.messages = messages;
+                        view.transcript_scroll.scroll_to_bottom();
+                    }
+                    Ok(Err(error)) => view.error = Some(error.to_string()),
+                    Err(_) => {
+                        view.error = Some("The transcript task stopped unexpectedly.".into());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn send_prompt(&mut self, prompt: String, cx: &mut Context<Self>) {
+        let Some(chat_id) = self.selected_chat else {
+            return;
+        };
+        let prompt = prompt.trim().to_owned();
+        if prompt.is_empty() || self.working {
+            return;
+        }
+
+        self.composer.clear();
+        self.working = true;
+        self.error = None;
+        let service = self.conversation_service.clone();
+        let tokio = self.tokio.clone();
+        let (event_sender, mut event_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (result_sender, result_receiver) = oneshot::channel();
+        tokio.spawn(async move {
+            let result = service
+                .send_message(chat_id, prompt, event_sender)
+                .await
+                .map_err(|error| error.to_string());
+            let _ = result_sender.send(result);
+        });
+
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = event_receiver.recv().await {
+                if this
+                    .update(cx, |view, cx| {
+                        view.shared_state.publish_conversation_event(event);
+                        let snapshot = view.shared_state.snapshot.borrow().clone();
+                        view.messages = snapshot.messages;
+                        view.transcript_scroll.scroll_to_bottom();
+                        cx.notify();
+                    })
+                    .is_err()
+                {
+                    return;
+                }
+            }
+            let result = result_receiver.await;
+            let _ = this.update(cx, |view, cx| {
+                view.working = false;
+                match result {
+                    Ok(Ok(())) => {}
+                    Ok(Err(error)) => {
+                        view.error = Some(error);
+                        view.reload_messages(chat_id, cx);
+                    }
+                    Err(_) => {
+                        view.error = Some("The Codex task stopped unexpectedly.".into());
+                        view.reload_messages(chat_id, cx);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn handle_composer_key(
+        &mut self,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let keystroke = &event.keystroke;
+        match keystroke.key.as_str() {
+            "enter" if keystroke.modifiers.shift => self.composer.push('\n'),
+            "enter" => self.send_prompt(self.composer.clone(), cx),
+            "backspace" => {
+                self.composer.pop();
+            }
+            "v" if keystroke.modifiers.platform => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.composer.push_str(&text);
+                }
+            }
+            _ if !keystroke.modifiers.modified() => {
+                if let Some(typed) = &keystroke.key_char {
+                    self.composer.push_str(typed);
+                }
+            }
+            _ => {}
+        }
+        self.composer_focus.focus(window);
         cx.notify();
     }
 
@@ -330,6 +640,7 @@ impl ChatsView {
                     .update(cx, |view, cx| {
                         view.chats = snapshot.chats;
                         view.selected_chat = snapshot.selected_chat;
+                        view.messages = snapshot.messages;
                         cx.notify();
                     })
                     .is_err()
@@ -345,6 +656,10 @@ impl ChatsView {
 impl Render for ChatsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_state_listener(cx);
+        if !self.initial_scroll_done {
+            self.transcript_scroll.scroll_to_bottom();
+            self.initial_scroll_done = true;
+        }
         let selected = self
             .selected_chat
             .and_then(|id| self.chats.iter().find(|chat| chat.id == id));
@@ -448,29 +763,154 @@ impl Render for ChatsView {
             .bg(rgb(BACKGROUND));
 
         if let Some(chat) = selected {
-            detail = detail
-                .child(
-                    div()
-                        .text_2xl()
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .text_color(rgb(TEXT))
-                        .child(chat.title.clone()),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(rgb(MUTED))
-                        .child("This conversation is ready for its first message."),
-                )
-                .child(
+            let mut transcript = div()
+                .id("transcript")
+                .flex_1()
+                .w_full()
+                .overflow_y_scroll()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .py_2()
+                .track_scroll(&self.transcript_scroll);
+            if self.messages.is_empty() {
+                transcript = transcript.child(
                     div()
                         .flex_1()
-                        .w_full()
                         .flex()
                         .items_center()
                         .justify_center()
                         .text_color(rgb(MUTED))
-                        .child("No messages yet"),
+                        .child("Ask Codex something to start the conversation."),
+                );
+            } else {
+                for message in &self.messages {
+                    match message.role {
+                        MessageRole::User => {
+                            transcript = transcript.child(
+                                div().w_full().flex().justify_end().child(
+                                    div()
+                                        .max_w(px(650.0))
+                                        .px_4()
+                                        .py_3()
+                                        .rounded_lg()
+                                        .bg(rgb(PANEL_HOVER))
+                                        .text_color(rgb(TEXT))
+                                        .child(message.body.clone()),
+                                ),
+                            );
+                        }
+                        MessageRole::Assistant => {
+                            transcript = transcript.child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .flex_col()
+                                    .gap_2()
+                                    .child(
+                                        div()
+                                            .text_xs()
+                                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                                            .text_color(rgb(ACCENT))
+                                            .child("CODEX"),
+                                    )
+                                    .child(render_markdown(&message.body)),
+                            );
+                        }
+                    }
+                }
+            }
+
+            let composer = div()
+                .id("composer")
+                .track_focus(&self.composer_focus)
+                .flex_1()
+                .min_h(px(54.0))
+                .max_h(px(140.0))
+                .min_w(px(0.0))
+                .flex()
+                .items_center()
+                .px_3()
+                .py_2()
+                .rounded_lg()
+                .border_1()
+                .border_color(if self.composer_focus.is_focused(_window) {
+                    rgb(ACCENT)
+                } else {
+                    rgb(0x3b4049)
+                })
+                .bg(rgb(PANEL))
+                .cursor(gpui::CursorStyle::IBeam)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, window, _| this.composer_focus.focus(window)),
+                )
+                .on_key_down(cx.listener(|this, event, window, cx| {
+                    this.handle_composer_key(event, window, cx)
+                }))
+                .child(
+                    div()
+                        .flex_1()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .whitespace_normal()
+                        .text_color(if self.composer.is_empty() {
+                            rgb(MUTED)
+                        } else {
+                            rgb(TEXT)
+                        })
+                        .child(if self.composer.is_empty() {
+                            "Type a message…".to_owned()
+                        } else {
+                            self.composer.clone()
+                        }),
+                );
+            let send_button = div()
+                .id("send-message")
+                .px_4()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(if self.working { PANEL_HOVER } else { ACCENT }))
+                .text_color(rgb(0x101715))
+                .cursor_pointer()
+                .child(if self.working { "Sending…" } else { "Send" })
+                .on_click(
+                    cx.listener(|this, _, _, cx| this.send_prompt(this.composer.clone(), cx)),
+                );
+
+            detail = detail
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_2xl()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .text_color(rgb(TEXT))
+                                .child(chat.title.clone()),
+                        )
+                        .child(div().text_xs().text_color(rgb(MUTED)).child("Codex")),
+                )
+                .child(transcript)
+                .child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.0))
+                        .flex()
+                        .items_end()
+                        .gap_2()
+                        .child(composer)
+                        .child(send_button),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(MUTED))
+                        .child("Enter to send · Shift+Enter for a new line"),
                 );
         } else if self.chats.is_empty() {
             detail = detail.child(
@@ -553,6 +993,14 @@ mod tests {
             self.pause_before_write().await;
             self.store.delete_chat(id).await
         }
+
+        async fn save_execution_binding(
+            &self,
+            id: uuid::Uuid,
+            binding: smaller_talk_domain::ExecutionBinding,
+        ) -> Result<bool, PersistenceError> {
+            self.store.save_execution_binding(id, binding).await
+        }
     }
 
     #[tokio::test]
@@ -585,6 +1033,7 @@ mod tests {
         let (snapshot, _) = tokio::sync::watch::channel(ChatSnapshot {
             chats: vec![existing.clone()],
             selected_chat: Some(existing.id),
+            messages: Vec::new(),
         });
         let shared_state = SharedChatState {
             snapshot,

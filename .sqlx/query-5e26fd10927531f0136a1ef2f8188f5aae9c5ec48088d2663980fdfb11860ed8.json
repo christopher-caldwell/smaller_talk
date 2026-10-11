@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO messages (id, chat_id, role, body, created_at)\nVALUES (?, ?, ?, ?, ?)\nRETURNING id, chat_id, role, body, created_at;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "chat_id",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "role",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "body",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "created_at",
+        "ordinal": 4,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "5e26fd10927531f0136a1ef2f8188f5aae9c5ec48088d2663980fdfb11860ed8"
+}

@@ -1,9 +1,10 @@
-use std::{error::Error, fmt, sync::Arc};
+use std::{error::Error, fmt, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use smaller_talk_domain::{Chat, ExecutionBinding};
+use smaller_talk_domain::{Chat, ExecutionBinding, Message, MessageRole};
 use thiserror::Error;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 /// An adapter failure with its original diagnostic retained behind an application-owned type.
@@ -43,15 +44,108 @@ pub enum DeleteChatOutcome {
     NotFound,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NewMessage {
+    pub id: Uuid,
+    pub chat_id: Uuid,
+    pub role: MessageRole,
+    pub body: String,
+    pub created_at: DateTime<Utc>,
+}
+
 #[async_trait]
 pub trait ChatQueries: Send + Sync {
     async fn list_chats(&self) -> Result<Vec<Chat>, PersistenceError>;
+    async fn find_chat(&self, id: Uuid) -> Result<Option<Chat>, PersistenceError>;
 }
 
 #[async_trait]
 pub trait ChatWrites: Send + Sync {
     async fn create_chat(&self, chat: NewChat) -> Result<Chat, PersistenceError>;
     async fn delete_chat(&self, id: Uuid) -> Result<DeleteChatOutcome, PersistenceError>;
+    async fn save_execution_binding(
+        &self,
+        id: Uuid,
+        binding: ExecutionBinding,
+    ) -> Result<bool, PersistenceError>;
+}
+
+#[async_trait]
+pub trait MessageQueries: Send + Sync {
+    async fn list_messages(&self, chat_id: Uuid) -> Result<Vec<Message>, PersistenceError>;
+}
+
+#[async_trait]
+pub trait MessageWrites: Send + Sync {
+    async fn append_message(&self, message: NewMessage) -> Result<Message, PersistenceError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExecutionRequest {
+    pub chat_id: Uuid,
+    pub binding: Option<ExecutionBinding>,
+    pub workspace: PathBuf,
+    pub prompt: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ExecutionEvent {
+    BindingEstablished(ExecutionBinding),
+    TextDelta(String),
+}
+
+#[derive(Debug, Error)]
+#[error("{message}")]
+pub struct ExecutionError {
+    message: String,
+}
+
+impl ExecutionError {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait]
+pub trait ExecutionAdapter: Send + Sync {
+    async fn execute(
+        &self,
+        request: ExecutionRequest,
+        events: mpsc::UnboundedSender<ExecutionEvent>,
+    ) -> Result<(), ExecutionError>;
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConversationEvent {
+    UserMessage(Message),
+    AssistantDelta {
+        chat_id: Uuid,
+        message_id: Uuid,
+        delta: String,
+    },
+    AssistantMessage(Message),
+}
+
+#[derive(Debug, Error)]
+pub enum SendMessageError {
+    #[error("the selected chat no longer exists")]
+    ChatNotFound,
+    #[error("chat storage failed: {0}")]
+    Storage(#[source] PersistenceError),
+    #[error("Codex execution failed: {0}")]
+    Execution(#[source] ExecutionError),
+    #[error("the Codex execution task stopped unexpectedly: {0}")]
+    Task(String),
+    #[error("Codex completed without an assistant response")]
+    EmptyResponse,
+}
+
+#[derive(Debug, Error)]
+pub enum ListMessagesError {
+    #[error("message storage failed: {0}")]
+    Storage(#[source] PersistenceError),
 }
 
 #[derive(Debug, Error)]
@@ -77,6 +171,137 @@ pub enum DeleteChatError {
 pub struct ChatService {
     queries: Arc<dyn ChatQueries>,
     writes: Arc<dyn ChatWrites>,
+}
+
+pub struct ConversationService {
+    chats: Arc<dyn ChatQueries>,
+    chat_writes: Arc<dyn ChatWrites>,
+    messages: Arc<dyn MessageQueries>,
+    message_writes: Arc<dyn MessageWrites>,
+    executor: Arc<dyn ExecutionAdapter>,
+    workspace: PathBuf,
+}
+
+impl ConversationService {
+    pub fn new(
+        chats: Arc<dyn ChatQueries>,
+        chat_writes: Arc<dyn ChatWrites>,
+        messages: Arc<dyn MessageQueries>,
+        message_writes: Arc<dyn MessageWrites>,
+        executor: Arc<dyn ExecutionAdapter>,
+        workspace: PathBuf,
+    ) -> Self {
+        Self {
+            chats,
+            chat_writes,
+            messages,
+            message_writes,
+            executor,
+            workspace,
+        }
+    }
+
+    pub async fn list_messages(&self, chat_id: Uuid) -> Result<Vec<Message>, ListMessagesError> {
+        self.messages
+            .list_messages(chat_id)
+            .await
+            .map_err(ListMessagesError::Storage)
+    }
+
+    pub async fn send_message(
+        &self,
+        chat_id: Uuid,
+        prompt: String,
+        output: mpsc::UnboundedSender<ConversationEvent>,
+    ) -> Result<(), SendMessageError> {
+        let chat = self
+            .chats
+            .find_chat(chat_id)
+            .await
+            .map_err(SendMessageError::Storage)?
+            .ok_or(SendMessageError::ChatNotFound)?;
+        let user_message = self
+            .message_writes
+            .append_message(NewMessage {
+                id: Uuid::new_v4(),
+                chat_id,
+                role: MessageRole::User,
+                body: prompt.clone(),
+                created_at: Utc::now(),
+            })
+            .await
+            .map_err(SendMessageError::Storage)?;
+        let user_created_at = user_message.created_at;
+        let _ = output.send(ConversationEvent::UserMessage(user_message));
+
+        let (provider_events, mut provider_stream) = mpsc::unbounded_channel();
+        let executor = self.executor.clone();
+        let request = ExecutionRequest {
+            chat_id,
+            binding: chat.binding.clone(),
+            workspace: self.workspace.clone(),
+            prompt,
+        };
+        let task = tokio::spawn(async move { executor.execute(request, provider_events).await });
+        let assistant_id = Uuid::new_v4();
+        let assistant_created_at =
+            Utc::now().max(user_created_at + chrono::Duration::milliseconds(1));
+        let mut response = String::new();
+
+        while let Some(event) = provider_stream.recv().await {
+            match event {
+                ExecutionEvent::BindingEstablished(binding) => {
+                    let saved = match self
+                        .chat_writes
+                        .save_execution_binding(chat_id, binding)
+                        .await
+                    {
+                        Ok(saved) => saved,
+                        Err(error) => {
+                            task.abort();
+                            let _ = task.await;
+                            return Err(SendMessageError::Storage(error));
+                        }
+                    };
+                    if !saved {
+                        task.abort();
+                        let _ = task.await;
+                        return Err(SendMessageError::ChatNotFound);
+                    }
+                }
+                ExecutionEvent::TextDelta(delta) if !delta.is_empty() => {
+                    response.push_str(&delta);
+                    let _ = output.send(ConversationEvent::AssistantDelta {
+                        chat_id,
+                        message_id: assistant_id,
+                        delta,
+                    });
+                }
+                ExecutionEvent::TextDelta(_) => {}
+            }
+        }
+
+        task.await
+            .map_err(|error| SendMessageError::Task(error.to_string()))?
+            .map_err(SendMessageError::Execution)?;
+        if response.is_empty() {
+            return Err(SendMessageError::EmptyResponse);
+        }
+
+        let assistant_message = self
+            .message_writes
+            .append_message(NewMessage {
+                id: assistant_id,
+                chat_id,
+                role: MessageRole::Assistant,
+                body: response,
+                created_at: assistant_created_at,
+            })
+            .await
+            .map_err(SendMessageError::Storage)?;
+        let _ = output.send(ConversationEvent::AssistantMessage(assistant_message));
+        Ok(())
+    }
 }
 
 impl ChatService {

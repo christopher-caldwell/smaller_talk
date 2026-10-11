@@ -11,3 +11,4 @@ chrono = { workspace = true, features = ["clock"] }
 smaller-talk-domain = { path = "../domain" }
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v4"] }
+tokio.workspace = true

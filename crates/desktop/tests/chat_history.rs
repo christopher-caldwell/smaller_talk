@@ -1,11 +1,14 @@
-use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+use std::{error::Error, sync::Arc};
 
-use smaller_talk_application::{ChatQueries, ChatService, ChatWrites};
+use chrono::Utc;
+use smaller_talk_application::{
+    ChatQueries, ChatService, ChatWrites, DeleteChatError, NewChat, PersistenceError,
+};
 use smaller_talk_database::{
     SqliteChatStore, create_empty_database, migrate_existing, open_existing,
 };
-use smaller_talk_domain::{Chat, ExecutionBinding};
+use smaller_talk_domain::ExecutionBinding;
 
 #[tokio::test]
 async fn sqlite_chat_history_survives_reopen_and_delete_cascades() {
@@ -31,15 +34,25 @@ async fn sqlite_chat_history_survives_reopen_and_delete_cascades() {
         .expect("create second chat");
     assert_eq!(service.list_chats().await.expect("list chats").len(), 2);
 
-    let mut bound_chat = Chat::new();
-    bound_chat.binding = Some(ExecutionBinding {
-        adapter_key: "test-adapter".to_owned(),
-        native_session_id: "test-session".to_owned(),
-    });
+    let proposed_created_at = Utc::now();
+    let bound_chat = NewChat {
+        id: uuid::Uuid::new_v4(),
+        title: "Bound fixture".to_owned(),
+        created_at: proposed_created_at,
+        binding: Some(ExecutionBinding {
+            adapter_key: "test-adapter".to_owned(),
+            native_session_id: "test-session".to_owned(),
+        }),
+    };
     let bound_chat = store
         .create_chat(bound_chat)
         .await
         .expect("store opaque provider binding fixture");
+    assert_eq!(
+        bound_chat.created_at,
+        chrono::DateTime::from_timestamp_millis(proposed_created_at.timestamp_millis())
+            .expect("proposed time can be stored by SQLite")
+    );
 
     let message_id = uuid::Uuid::new_v4().to_string();
     sqlx::query("INSERT INTO messages (id, chat_id, role, body, created_at) VALUES (?, ?, 'user', 'stored text', ?)")
@@ -89,6 +102,10 @@ async fn sqlite_chat_history_survives_reopen_and_delete_cascades() {
         .delete_chat(first.id)
         .await
         .expect("delete first chat");
+    assert!(matches!(
+        reopened_service.delete_chat(first.id).await,
+        Err(DeleteChatError::NotFound)
+    ));
     let message_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM messages WHERE chat_id = ?")
         .bind(first.id.to_string())
         .fetch_one(reopened_store.pool())
@@ -109,4 +126,22 @@ async fn sqlite_chat_history_survives_reopen_and_delete_cascades() {
     assert_eq!(remaining.len(), 2);
     assert!(remaining.iter().any(|chat| chat.id == second.id));
     assert!(remaining.iter().any(|chat| chat.id == bound_chat.id));
+
+    final_store.pool().close().await;
+    let storage_error = final_service
+        .list_chats()
+        .await
+        .expect_err("closed database reports a storage error");
+    let persistence_source =
+        Error::source(&storage_error).expect("service preserves adapter error");
+    assert!(
+        persistence_source
+            .downcast_ref::<PersistenceError>()
+            .is_some()
+    );
+    assert!(
+        Error::source(persistence_source)
+            .expect("persistence error preserves SQLx source")
+            .is::<sqlx::Error>()
+    );
 }

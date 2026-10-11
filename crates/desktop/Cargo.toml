@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 anyhow = "1"
-chrono.workspace = true
+chrono = { workspace = true, features = ["clock"] }
 gpui.workspace = true
 smaller-talk-application = { path = "../application" }
 smaller-talk-database = { path = "../database" }
@@ -18,3 +18,4 @@ uuid.workspace = true
 [dev-dependencies]
 sqlx.workspace = true
 tempfile = "3"
+uuid = { workspace = true, features = ["v4"] }

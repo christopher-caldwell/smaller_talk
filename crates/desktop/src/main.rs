@@ -1,17 +1,22 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use anyhow::{Context as _, bail};
 use gpui::{
-    App, Application, Bounds, Context, Render, Window, WindowBounds, WindowOptions, div,
-    prelude::*, px, rgb, size,
+    App, Application, Bounds, Context, KeyBinding, Menu, MenuItem, Render, Window, WindowBounds,
+    WindowOptions, actions, div, prelude::*, px, rgb, size,
 };
-use smaller_talk_application::{ChatQueries, ChatService, ChatServiceError, ChatWrites};
+use smaller_talk_application::{ChatQueries, ChatService, ChatWrites, DeleteChatError};
 use smaller_talk_database::{
     SqliteChatStore, create_empty_database, migrate_existing, open_existing,
 };
 use smaller_talk_domain::Chat;
 use tokio::{runtime::Builder, sync::oneshot};
 use uuid::Uuid;
+
+actions!(smaller_talk, [CloseWindow, Quit]);
 
 const BACKGROUND: u32 = 0x111318;
 const PANEL: u32 = 0x191c22;
@@ -76,32 +81,84 @@ fn main() -> anyhow::Result<()> {
     let chats = runtime
         .block_on(service.list_chats())
         .context("could not load chats; run `cargo run -p smaller-talk-desktop -- db-migrate`")?;
-    let selected_chat = chats.first().map(|chat| chat.id);
     let tokio = runtime.handle().clone();
+    let shared_state = Arc::new(Mutex::new(ChatSnapshot {
+        selected_chat: chats.first().map(|chat| chat.id),
+        chats,
+    }));
+    let app = Application::new();
+    let reopen_service = service.clone();
+    let reopen_tokio = tokio.clone();
+    let reopen_state = shared_state.clone();
+    app.on_reopen(move |cx| {
+        if cx.windows().is_empty() {
+            open_chat_window(
+                cx,
+                reopen_service.clone(),
+                reopen_tokio.clone(),
+                reopen_state.clone(),
+            );
+        } else {
+            cx.activate(true);
+        }
+    });
 
-    Application::new().run(move |cx: &mut App| {
-        let bounds = Bounds::centered(None, size(px(1000.0), px(680.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |_, cx| {
-                cx.new(|_| ChatsView {
-                    service,
-                    tokio,
-                    chats,
-                    selected_chat,
-                    working: false,
-                    error: None,
-                })
-            },
-        )
-        .expect("could not open Smaller Talk window");
-        cx.activate(true);
+    app.run(move |cx: &mut App| {
+        cx.on_action(quit);
+        cx.bind_keys([
+            KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-w", CloseWindow, None),
+        ]);
+        cx.set_menus(vec![Menu {
+            name: "Smaller Talk".into(),
+            items: vec![MenuItem::action("Quit Smaller Talk", Quit)],
+        }]);
+        open_chat_window(cx, service, tokio, shared_state);
     });
 
     Ok(())
+}
+
+fn quit(_: &Quit, cx: &mut App) {
+    cx.quit();
+}
+
+#[derive(Clone, Default)]
+struct ChatSnapshot {
+    chats: Vec<Chat>,
+    selected_chat: Option<Uuid>,
+}
+
+fn open_chat_window(
+    cx: &mut App,
+    service: Arc<ChatService>,
+    tokio: tokio::runtime::Handle,
+    shared_state: Arc<Mutex<ChatSnapshot>>,
+) {
+    let snapshot = shared_state
+        .lock()
+        .expect("chat snapshot mutex poisoned")
+        .clone();
+    let bounds = Bounds::centered(None, size(px(1000.0), px(680.0)), cx);
+    cx.open_window(
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            ..Default::default()
+        },
+        move |_, cx| {
+            cx.new(|_| ChatsView {
+                service,
+                tokio,
+                chats: snapshot.chats,
+                selected_chat: snapshot.selected_chat,
+                shared_state,
+                working: false,
+                error: None,
+            })
+        },
+    )
+    .expect("could not open Smaller Talk window");
+    cx.activate(true);
 }
 
 struct ChatsView {
@@ -109,6 +166,7 @@ struct ChatsView {
     tokio: tokio::runtime::Handle,
     chats: Vec<Chat>,
     selected_chat: Option<Uuid>,
+    shared_state: Arc<Mutex<ChatSnapshot>>,
     working: bool,
     error: Option<String>,
 }
@@ -140,6 +198,7 @@ impl ChatsView {
                     Ok(Ok(chat)) => {
                         view.selected_chat = Some(chat.id);
                         view.chats.insert(0, chat);
+                        view.save_snapshot();
                     }
                     Ok(Err(error)) => view.error = Some(error.to_string()),
                     Err(_) => view.error = Some("The database task stopped unexpectedly.".into()),
@@ -169,11 +228,12 @@ impl ChatsView {
             let _ = this.update(cx, |view, cx| {
                 view.working = false;
                 match result {
-                    Ok(Ok(())) | Ok(Err(ChatServiceError::NotFound)) => {
+                    Ok(Ok(())) | Ok(Err(DeleteChatError::NotFound)) => {
                         view.chats.retain(|chat| chat.id != id);
                         if view.selected_chat == Some(id) {
                             view.selected_chat = view.chats.first().map(|chat| chat.id);
                         }
+                        view.save_snapshot();
                     }
                     Ok(Err(error)) => view.error = Some(error.to_string()),
                     Err(_) => view.error = Some("The database task stopped unexpectedly.".into()),
@@ -188,7 +248,17 @@ impl ChatsView {
     fn select_chat(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.selected_chat = Some(id);
         self.error = None;
+        self.save_snapshot();
         cx.notify();
+    }
+
+    fn save_snapshot(&self) {
+        let mut snapshot = self
+            .shared_state
+            .lock()
+            .expect("chat snapshot mutex poisoned");
+        snapshot.chats.clone_from(&self.chats);
+        snapshot.selected_chat = self.selected_chat;
     }
 }
 
@@ -356,5 +426,6 @@ impl Render for ChatsView {
             .bg(rgb(BACKGROUND))
             .child(sidebar)
             .child(detail)
+            .on_action(|_: &CloseWindow, window, _| window.remove_window())
     }
 }

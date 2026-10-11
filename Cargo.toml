@@ -15,12 +15,11 @@ license = "MIT"
 
 [workspace.dependencies]
 async-trait = "0.1"
-chrono = { version = "0.4", features = ["serde"] }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 gpui = { version = "=0.2.2", default-features = false, features = [
     "font-kit",
     "runtime_shaders",
 ] }
-serde = { version = "1", features = ["derive"] }
 sqlx = { version = "=0.8.6", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",
@@ -29,4 +28,4 @@ sqlx = { version = "=0.8.6", default-features = false, features = [
 ] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
-uuid = { version = "1", features = ["serde", "v4"] }
+uuid = "1"

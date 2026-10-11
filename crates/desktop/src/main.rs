@@ -460,6 +460,7 @@ fn open_chat_window(
                     error: None,
                     composer,
                     transcript_scroll: ScrollHandle::new(),
+                    code_scroll_handles: HashMap::new(),
                     initial_scroll_done: false,
                 }
             })
@@ -483,6 +484,7 @@ struct ChatsView {
     error: Option<String>,
     composer: Entity<composer::Composer>,
     transcript_scroll: ScrollHandle,
+    code_scroll_handles: HashMap<(Uuid, usize), ScrollHandle>,
     initial_scroll_done: bool,
 }
 
@@ -491,15 +493,31 @@ fn chat_element_id(kind: &'static str, id: Uuid) -> gpui::ElementId {
     (gpui::ElementId::from((kind, high)), low.to_string()).into()
 }
 
-fn render_markdown(body: &str, conversation_width: gpui::Pixels) -> impl IntoElement {
+fn render_markdown(
+    body: &str,
+    message_id: Uuid,
+    conversation_width: gpui::Pixels,
+    code_scroll_handles: &mut HashMap<(Uuid, usize), ScrollHandle>,
+    window: &mut Window,
+) -> impl IntoElement {
     let mut content = div().flex().flex_col().gap_3().w_full().min_w(px(0.0));
-    for block in markdown::parse_markdown(body) {
+    for (block_index, block) in markdown::parse_markdown(body).into_iter().enumerate() {
         match block.kind {
             markdown::MarkdownBlockKind::Rule => {
                 content = content.child(div().h(px(1.0)).w_full().bg(rgb(0x3b4049)));
             }
             markdown::MarkdownBlockKind::Code(language) => {
+                let scroll_handle = code_scroll_handles
+                    .entry((message_id, block_index))
+                    .or_default();
                 let mut code = div()
+                    .id((
+                        chat_element_id("code-scroll", message_id),
+                        block_index.to_string(),
+                    ))
+                    .overflow_x_scroll()
+                    .items_start()
+                    .track_scroll(scroll_handle)
                     .w(conversation_width)
                     .max_w(conversation_width)
                     .min_w(px(0.0))
@@ -515,19 +533,59 @@ fn render_markdown(body: &str, conversation_width: gpui::Pixels) -> impl IntoEle
                             .child(language),
                     );
                 }
-                let mut code_lines = div().flex().flex_col().items_start();
-                for line in block.text.trim_end_matches('\n').split('\n') {
-                    let line = line.replace('\t', "    ").replace(' ', " ");
+                let mut code_text_style = window.text_style();
+                code_text_style.font_family = "Menlo".into();
+                code_text_style.font_size = gpui::rems(0.875).into();
+                let font_size = code_text_style.font_size.to_pixels(window.rem_size());
+                let line_height = code_text_style
+                    .line_height
+                    .to_pixels(font_size.into(), window.rem_size());
+                let lines = block
+                    .text
+                    .trim_end_matches('\n')
+                    .split('\n')
+                    .map(|line| {
+                        let line = line.replace('\t', "    ").replace(' ', " ");
+                        if line.is_empty() {
+                            " ".to_owned()
+                        } else {
+                            line
+                        }
+                    })
+                    .map(|display_line| {
+                        let line_width = window
+                            .text_system()
+                            .shape_text(
+                                display_line.clone().into(),
+                                font_size,
+                                &[code_text_style.to_run(display_line.len())],
+                                None,
+                                None,
+                            )
+                            .ok()
+                            .and_then(|lines| {
+                                lines.iter().map(|line| line.size(line_height).width).max()
+                            })
+                            .unwrap_or(px(0.0));
+                        (display_line, line_width)
+                    })
+                    .collect::<Vec<_>>();
+                let code_width = lines
+                    .iter()
+                    .map(|(_, line_width)| *line_width)
+                    .max()
+                    .unwrap_or(px(0.0));
+                let mut code_lines = div().flex().flex_col().items_start().w(code_width);
+                for (display_line, line_width) in lines {
                     code_lines = code_lines.child(
                         div()
+                            .flex_shrink_0()
+                            .w(line_width)
                             .font_family("Menlo")
                             .text_sm()
+                            .whitespace_nowrap()
                             .text_color(rgb(0xd5d9e0))
-                            .child(if line.is_empty() {
-                                " ".to_owned()
-                            } else {
-                                line
-                            }),
+                            .child(display_line),
                     );
                 }
                 let code = code.child(code_lines);
@@ -952,7 +1010,10 @@ impl Render for ChatsView {
                                     )
                                     .child(render_markdown(
                                         &message.body,
+                                        message.id,
                                         (window.bounds().size.width - px(344.0)).max(px(120.0)),
+                                        &mut self.code_scroll_handles,
+                                        window,
                                     )),
                             );
                         }

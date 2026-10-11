@@ -1,0 +1,12 @@
+[package]
+name = "smaller-talk-application"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+smaller-talk-domain = { path = "../domain" }
+thiserror.workspace = true
+uuid.workspace = true

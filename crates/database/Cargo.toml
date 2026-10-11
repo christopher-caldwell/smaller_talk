@@ -1,0 +1,15 @@
+[package]
+name = "smaller-talk-database"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait.workspace = true
+chrono.workspace = true
+smaller-talk-application = { path = "../application" }
+smaller-talk-domain = { path = "../domain" }
+sqlx.workspace = true
+thiserror.workspace = true
+uuid.workspace = true

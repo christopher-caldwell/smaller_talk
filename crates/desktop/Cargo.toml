@@ -1,0 +1,20 @@
+[package]
+name = "smaller-talk-desktop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = "1"
+chrono.workspace = true
+gpui.workspace = true
+smaller-talk-application = { path = "../application" }
+smaller-talk-database = { path = "../database" }
+smaller-talk-domain = { path = "../domain" }
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+sqlx.workspace = true
+tempfile = "3"

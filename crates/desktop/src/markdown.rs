@@ -18,6 +18,16 @@ pub struct MarkdownBlock {
     pub kind: MarkdownBlockKind,
     pub text: String,
     pub highlights: Vec<(Range<usize>, InlineStyle)>,
+    pub code_highlights: Vec<(Range<usize>, CodeToken)>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CodeToken {
+    Keyword,
+    String,
+    Comment,
+    Number,
+    Punctuation,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -129,6 +139,7 @@ impl BlockBuilder {
                 kind,
                 text: std::mem::take(&mut self.text),
                 highlights: std::mem::take(&mut self.highlights),
+                code_highlights: Vec::new(),
             });
             self.marks.clear();
         }
@@ -192,7 +203,206 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
         }
     }
     current.finish(&mut blocks);
+    for block in &mut blocks {
+        if let MarkdownBlockKind::Code(language) = &block.kind {
+            block.code_highlights = highlight_code(language, &block.text);
+        }
+    }
     blocks
+}
+
+fn language_family(language: &str) -> Option<&'static str> {
+    match language.trim().to_ascii_lowercase().as_str() {
+        "rs" | "rust" => Some("rust"),
+        "ts" | "tsx" | "typescript" | "js" | "jsx" | "javascript" | "mjs" | "cjs" => {
+            Some("javascript")
+        }
+        "py" | "python" | "py3" => Some("python"),
+        "sql" => Some("sql"),
+        "json" | "jsonc" => Some("json"),
+        "sh" | "bash" | "shell" | "zsh" => Some("shell"),
+        _ => None,
+    }
+}
+
+fn highlight_code(language: &str, source: &str) -> Vec<(Range<usize>, CodeToken)> {
+    let Some(family) = language_family(language) else {
+        return Vec::new();
+    };
+    let mut result = Vec::new();
+    let mut index = 0;
+    while index < source.len() {
+        let rest = &source[index..];
+        let ch = rest
+            .chars()
+            .next()
+            .expect("index is on a character boundary");
+        let next = rest[ch.len_utf8()..].chars().next();
+        let start = index;
+        let token = if matches!(ch, '\'' | '"' | '`')
+            && !(ch == '`' && family != "javascript")
+            && !(ch == '`' && family == "shell")
+        {
+            index += ch.len_utf8();
+            let mut escaped = false;
+            while index < source.len() {
+                let current = source[index..]
+                    .chars()
+                    .next()
+                    .expect("valid character boundary");
+                index += current.len_utf8();
+                if escaped {
+                    escaped = false;
+                } else if current == '\\' {
+                    escaped = true;
+                } else if current == ch {
+                    break;
+                }
+            }
+            Some(CodeToken::String)
+        } else if (ch == '#' && family == "python")
+            || (ch == '#' && family == "shell")
+            || (ch == '-' && next == Some('-') && family == "sql")
+            || (ch == '/' && next == Some('/') && matches!(family, "rust" | "javascript"))
+        {
+            index += ch.len_utf8();
+            index += source[index..]
+                .chars()
+                .take_while(|c| *c != '\n')
+                .map(char::len_utf8)
+                .sum::<usize>();
+            Some(CodeToken::Comment)
+        } else if ch == '/' && next == Some('*') && matches!(family, "rust" | "javascript" | "sql")
+        {
+            index += 2;
+            if let Some(close) = source[index..].find("*/") {
+                index += close + 2;
+            } else {
+                index = source.len();
+            }
+            Some(CodeToken::Comment)
+        } else if ch.is_ascii_digit() {
+            index += ch.len_utf8();
+            while index < source.len() {
+                let current = source[index..]
+                    .chars()
+                    .next()
+                    .expect("valid character boundary");
+                if current.is_ascii_alphanumeric() || matches!(current, '_' | '.') {
+                    index += current.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            Some(CodeToken::Number)
+        } else if ch == '_' || ch.is_ascii_alphabetic() {
+            index += ch.len_utf8();
+            while index < source.len() {
+                let current = source[index..]
+                    .chars()
+                    .next()
+                    .expect("valid character boundary");
+                if current == '_' || current.is_ascii_alphanumeric() {
+                    index += current.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            let word = &source[start..index];
+            is_keyword(family, word).then_some(CodeToken::Keyword)
+        } else if "{}[]().,:;+-*/%=<>!&|^~?@".contains(ch) {
+            index += ch.len_utf8();
+            Some(CodeToken::Punctuation)
+        } else {
+            index += ch.len_utf8();
+            None
+        };
+        if let Some(token) = token {
+            result.push((start..index, token));
+        }
+    }
+    result
+}
+
+fn is_keyword(family: &str, word: &str) -> bool {
+    let words: &[&str] = match family {
+        "rust" => &[
+            "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+            "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod",
+            "move", "mut", "pub", "ref", "return", "self", "Self", "static", "struct", "super",
+            "trait", "true", "type", "unsafe", "use", "where", "while",
+        ],
+        "javascript" => &[
+            "async",
+            "await",
+            "break",
+            "case",
+            "catch",
+            "class",
+            "const",
+            "continue",
+            "debugger",
+            "default",
+            "delete",
+            "do",
+            "else",
+            "export",
+            "extends",
+            "false",
+            "finally",
+            "for",
+            "from",
+            "function",
+            "if",
+            "import",
+            "in",
+            "instanceof",
+            "let",
+            "new",
+            "null",
+            "of",
+            "return",
+            "static",
+            "super",
+            "switch",
+            "this",
+            "throw",
+            "true",
+            "try",
+            "typeof",
+            "undefined",
+            "var",
+            "void",
+            "while",
+            "yield",
+        ],
+        "python" => &[
+            "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
+            "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import",
+            "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return",
+            "True", "try", "while", "with", "yield",
+        ],
+        "sql" => &[
+            "all", "alter", "and", "as", "asc", "between", "by", "case", "cast", "create",
+            "delete", "desc", "distinct", "drop", "else", "end", "exists", "from", "group",
+            "having", "in", "inner", "insert", "into", "is", "join", "left", "like", "limit",
+            "not", "null", "on", "or", "order", "outer", "right", "select", "set", "table", "then",
+            "union", "update", "values", "when", "where",
+        ],
+        "json" => &["true", "false", "null"],
+        "shell" => &[
+            "case", "do", "done", "elif", "else", "esac", "export", "fi", "for", "function", "if",
+            "in", "local", "readonly", "return", "select", "then", "time", "until", "while",
+        ],
+        _ => &[],
+    };
+    if family == "sql" {
+        words
+            .iter()
+            .any(|keyword| word.eq_ignore_ascii_case(keyword))
+    } else {
+        words.contains(&word)
+    }
 }
 
 fn heading_level(level: HeadingLevel) -> u8 {
@@ -214,7 +424,7 @@ fn remove_last_mark(marks: &mut Vec<InlineMark>, style: InlineMark) {
 
 #[cfg(test)]
 mod tests {
-    use super::{InlineStyle, MarkdownBlock, MarkdownBlockKind, parse_markdown};
+    use super::{CodeToken, InlineStyle, MarkdownBlock, MarkdownBlockKind, parse_markdown};
 
     fn style_at(block: &MarkdownBlock, byte: usize) -> InlineStyle {
         block
@@ -288,5 +498,59 @@ mod tests {
 
         let reloaded = parse_markdown(&streamed);
         assert_eq!(reloaded, blocks);
+    }
+
+    #[test]
+    fn highlights_supported_languages_and_leaves_unknown_or_unlabeled_code_plain() {
+        let markdown = "```rs\nfn main() { // note\n let s = \"hello\"; }\n```\n```typescript\nconst count = 42;\n```\n```python\n# note\nprint('ok')\n```\n```sql\nSELECT 1 FROM items;\n```\n```json\n{\"ok\": true}\n```\n```bash\necho \"ok\" # note\n```\n```nonsense\nfn ordinary() {}\n```\n```\nplain code\n```";
+        let blocks = parse_markdown(markdown);
+        assert_eq!(blocks.len(), 8);
+        let rust = &blocks[0];
+        assert!(
+            rust.code_highlights
+                .iter()
+                .any(|(_, token)| *token == CodeToken::Keyword)
+        );
+        assert!(
+            rust.code_highlights
+                .iter()
+                .any(|(_, token)| *token == CodeToken::Comment)
+        );
+        assert!(
+            rust.code_highlights
+                .iter()
+                .any(|(_, token)| *token == CodeToken::String)
+        );
+        assert!(
+            blocks[1]
+                .code_highlights
+                .iter()
+                .any(|(_, token)| *token == CodeToken::Keyword)
+        );
+        for block in &blocks[2..6] {
+            assert!(!block.code_highlights.is_empty());
+        }
+        assert!(blocks[6].code_highlights.is_empty());
+        assert!(blocks[7].code_highlights.is_empty());
+        for block in &blocks[..6] {
+            for (range, _) in &block.code_highlights {
+                assert!(block.text.is_char_boundary(range.start));
+                assert!(block.text.is_char_boundary(range.end));
+                assert!(block.text.get(range.clone()).is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn incomplete_streaming_code_is_safe_and_highlights_available_tokens() {
+        let blocks = parse_markdown("```rust\nfn mai");
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0].kind, MarkdownBlockKind::Code(_)));
+        assert!(
+            blocks[0]
+                .code_highlights
+                .iter()
+                .any(|(_, token)| *token == CodeToken::Keyword)
+        );
     }
 }

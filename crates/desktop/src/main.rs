@@ -544,15 +544,21 @@ fn render_markdown(
                     .text
                     .trim_end_matches('\n')
                     .split('\n')
-                    .map(|line| {
-                        let line = line.replace('\t', "    ").replace(' ', " ");
+                    .scan(0usize, |offset, line| {
+                        let line_start = *offset;
+                        *offset += line.len() + 1;
+                        Some((line, line_start))
+                    })
+                    .map(|(line, line_start)| {
+                        let (line, highlights) =
+                            display_code_line(line, line_start, &block.code_highlights);
                         if line.is_empty() {
-                            " ".to_owned()
+                            (" ".to_owned(), Vec::new())
                         } else {
-                            line
+                            (line, highlights)
                         }
                     })
-                    .map(|display_line| {
+                    .map(|(display_line, highlights)| {
                         let line_width = window
                             .text_system()
                             .shape_text(
@@ -567,16 +573,21 @@ fn render_markdown(
                                 lines.iter().map(|line| line.size(line_height).width).max()
                             })
                             .unwrap_or(px(0.0));
-                        (display_line, line_width)
+                        (display_line, highlights, line_width)
                     })
                     .collect::<Vec<_>>();
                 let code_width = lines
                     .iter()
-                    .map(|(_, line_width)| *line_width)
+                    .map(|(_, _, line_width)| *line_width)
                     .max()
                     .unwrap_or(px(0.0));
                 let mut code_lines = div().flex().flex_col().items_start().w(code_width);
-                for (display_line, line_width) in lines {
+                for (display_line, highlights, line_width) in lines {
+                    let styled = StyledText::new(display_line).with_highlights(
+                        highlights
+                            .into_iter()
+                            .map(|(range, token)| (range, code_token_style(token))),
+                    );
                     code_lines = code_lines.child(
                         div()
                             .flex_shrink_0()
@@ -585,7 +596,7 @@ fn render_markdown(
                             .text_sm()
                             .whitespace_nowrap()
                             .text_color(rgb(0xd5d9e0))
-                            .child(display_line),
+                            .child(styled),
                     );
                 }
                 let code = code.child(code_lines);
@@ -624,6 +635,57 @@ fn render_markdown(
         }
     }
     content
+}
+
+fn code_token_style(token: markdown::CodeToken) -> gpui::HighlightStyle {
+    let color = match token {
+        markdown::CodeToken::Keyword => 0xc792ea,
+        markdown::CodeToken::String => 0xc3e88d,
+        markdown::CodeToken::Comment => 0x7f8999,
+        markdown::CodeToken::Number => 0xf78c6c,
+        markdown::CodeToken::Punctuation => 0x89ddff,
+    };
+    gpui::HighlightStyle {
+        color: Some(rgb(color).into()),
+        ..Default::default()
+    }
+}
+
+fn display_code_line(
+    line: &str,
+    source_offset: usize,
+    highlights: &[(std::ops::Range<usize>, markdown::CodeToken)],
+) -> (String, Vec<(std::ops::Range<usize>, markdown::CodeToken)>) {
+    let mut displayed = String::with_capacity(line.len());
+    let mut mapped = Vec::new();
+    let mut previous: Option<(usize, markdown::CodeToken)> = None;
+    for (offset, character) in line.char_indices() {
+        let token = highlights
+            .iter()
+            .find(|(range, _)| range.contains(&(source_offset + offset)))
+            .map(|(_, token)| *token);
+        let start = displayed.len();
+        match character {
+            ' ' => displayed.push(' '),
+            '\t' => displayed.push_str("    "),
+            _ => displayed.push(character),
+        }
+        let end = displayed.len();
+        if let Some(token) = token {
+            if let Some((last, last_token)) = previous.as_mut()
+                && *last == start
+                && *last_token == token
+            {
+                *last = end;
+            } else {
+                mapped.push((start..end, token));
+                previous = Some((end, token));
+            }
+        } else {
+            previous = None;
+        }
+    }
+    (displayed, mapped)
 }
 
 impl ChatsView {
@@ -1129,6 +1191,7 @@ impl Render for ChatsView {
 
 #[cfg(test)]
 mod tests {
+    use crate::markdown;
     use std::{collections::HashMap, path::PathBuf, sync::Arc, time::Duration};
 
     use async_trait::async_trait;
@@ -1143,8 +1206,8 @@ mod tests {
     use tokio::{sync::Notify, time::timeout};
 
     use super::{
-        ChatSnapshot, SharedChatState, create_and_publish, delete_and_publish, follows_transcript,
-        resolve_codex_executable_from,
+        ChatSnapshot, SharedChatState, create_and_publish, delete_and_publish, display_code_line,
+        follows_transcript, resolve_codex_executable_from,
     };
     use smaller_talk_domain::{Chat, Message, MessageRole};
 
@@ -1300,6 +1363,23 @@ mod tests {
         assert!(follows_transcript(px(0.), px(0.)));
         assert!(follows_transcript(px(-100.), px(100.)));
         assert!(!follows_transcript(px(-50.), px(100.)));
+    }
+
+    #[test]
+    fn displayed_code_whitespace_keeps_token_ranges_aligned() {
+        let source = "\tlet value = \"café\";";
+        let tokens = markdown::parse_markdown(&format!("```rust\n{source}\n```"));
+        let (displayed, ranges) = display_code_line(source, 0, &tokens[0].code_highlights);
+        assert_eq!(displayed, "    let value = \"café\";");
+        let let_start = displayed.find("let").expect("keyword is displayed");
+        assert!(ranges.iter().any(|(range, token)| {
+            range.contains(&let_start) && *token == markdown::CodeToken::Keyword
+        }));
+        for (range, _) in ranges {
+            assert!(displayed.is_char_boundary(range.start));
+            assert!(displayed.is_char_boundary(range.end));
+            assert!(displayed.get(range).is_some());
+        }
     }
 
     #[test]

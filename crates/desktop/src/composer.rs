@@ -7,7 +7,7 @@ use gpui::{
     App, Bounds, ClipboardItem, Context, CursorStyle, ElementId, ElementInputHandler, Entity,
     EntityInputHandler, EventEmitter, FocusHandle, Focusable, GlobalElementId, KeyBinding,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point,
-    ShapedLine, SharedString, Style, TextRun, UTF16Selection, Window, actions, div, fill, point,
+    SharedString, Style, TextRun, UTF16Selection, Window, WrappedLine, actions, div, fill, point,
     prelude::*, px, relative, rgb, rgba, size,
 };
 use unicode_segmentation::*;
@@ -58,7 +58,7 @@ pub struct Composer {
     selected_range: Range<usize>,
     selection_reversed: bool,
     marked_range: Option<Range<usize>>,
-    last_layout: Vec<(usize, ShapedLine, Point<Pixels>)>,
+    last_layout: Vec<(usize, WrappedLine, Point<Pixels>)>,
     undo: Vec<EditSnapshot>,
     redo: Vec<EditSnapshot>,
     scroll: Point<Pixels>,
@@ -318,7 +318,13 @@ impl Composer {
         else {
             return 0;
         };
-        start + line.closest_index_for_x(position.x - origin.x)
+        let local = line
+            .closest_index_for_position(
+                point(position.x - origin.x, position.y - origin.y),
+                px(24.),
+            )
+            .unwrap_or_else(|index| index);
+        start + local
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
@@ -526,11 +532,14 @@ impl EntityInputHandler for Composer {
             .iter()
             .rev()
             .find(|(start, _, _)| *start <= range.start)?;
+        let local_start = range.start.saturating_sub(*start).min(line.text.len());
+        let local_end = range.end.saturating_sub(*start).min(line.text.len());
+        let left = line.position_for_index(local_start, px(24.))?;
+        let right = line.position_for_index(local_end, px(24.))?;
         Some(Bounds::new(
-            point(origin.x + line.x_for_index(range.start - start), origin.y),
+            point(origin.x + left.x, origin.y + left.y),
             size(
-                line.x_for_index(range.end.min(start + line.text.len()) - start)
-                    - line.x_for_index(range.start - start),
+                (right.x - left.x).max(px(1.)),
                 bounds.size.height.min(px(24.)),
             ),
         ))
@@ -551,7 +560,7 @@ struct TextElement {
 }
 
 struct PrepaintState {
-    lines: Vec<(usize, ShapedLine, Point<Pixels>)>,
+    lines: Vec<(usize, WrappedLine, Point<Pixels>)>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
 }
@@ -585,7 +594,35 @@ impl Element for TextElement {
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut style = Style::default();
         style.size.width = relative(1.).into();
-        style.size.height = px(96.).into();
+        let input = self.input.read(cx);
+        let text = if input.content.is_empty() {
+            input.placeholder.clone()
+        } else {
+            input.content.clone()
+        };
+        let text_style = window.text_style();
+        let run = TextRun {
+            len: text.len(),
+            font: text_style.font(),
+            color: text_style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let available_width = (window.bounds().size.width - px(368.)).max(px(120.));
+        let visual_lines = window
+            .text_system()
+            .shape_text(text, font_size, &[run], Some(available_width), None)
+            .map(|lines| {
+                lines
+                    .iter()
+                    .map(|line| line.wrap_boundaries().len() + 1)
+                    .sum::<usize>()
+            })
+            .unwrap_or(1)
+            .max(1);
+        style.size.height = px((visual_lines.min(7) as f32 * 24.0).max(24.0)).into();
         (window.request_layout(style, [], cx), ())
     }
 
@@ -605,7 +642,7 @@ impl Element for TextElement {
         } else {
             input.content.clone()
         };
-        let mut lines = Vec::new();
+        let mut lines: Vec<(usize, WrappedLine, Point<Pixels>)> = Vec::new();
         let mut start = 0;
         let font_size = style.font_size.to_pixels(window.rem_size());
         for text in text.split('\n') {
@@ -621,31 +658,41 @@ impl Element for TextElement {
                 underline: None,
                 strikethrough: None,
             };
-            let line =
-                window
-                    .text_system()
-                    .shape_line(text.to_owned().into(), font_size, &[run], None);
+            let line = window
+                .text_system()
+                .shape_text(
+                    text.to_owned().into(),
+                    font_size,
+                    &[run],
+                    Some(bounds.size.width),
+                    None,
+                )
+                .ok()
+                .and_then(|mut lines| lines.pop())
+                .unwrap_or_default();
+            let row = lines
+                .iter()
+                .map(|(_, line, _)| line.wrap_boundaries().len() + 1)
+                .sum::<usize>();
             lines.push((
                 start,
                 line,
-                point(bounds.left(), bounds.top() + px(24.) * lines.len() as f32),
+                point(bounds.left(), bounds.top() + px(24.) * row as f32),
             ));
             start += text.len() + 1;
         }
         let cursor = input.cursor_offset();
-        let row = lines
+        let line_index = lines
             .iter()
             .rposition(|(start, _, _)| *start <= cursor)
             .unwrap_or(0);
-        let cursor_x = lines[row].1.x_for_index(cursor - lines[row].0);
-        let cursor_y = px(24.) * row as f32;
+        let cursor_position = lines[line_index]
+            .1
+            .position_for_index(cursor.saturating_sub(lines[line_index].0), px(24.))
+            .unwrap_or_default();
+        let cursor_y = lines[line_index].2.y - bounds.top() + cursor_position.y;
         let mut scroll = input.scroll;
-        if cursor_x < scroll.x {
-            scroll.x = cursor_x;
-        }
-        if cursor_x + px(2.) > scroll.x + bounds.size.width {
-            scroll.x = (cursor_x + px(2.) - bounds.size.width).max(px(0.));
-        }
+        scroll.x = px(0.);
         if cursor_y < scroll.y {
             scroll.y = cursor_y;
         }
@@ -655,26 +702,33 @@ impl Element for TextElement {
         let mut selections = Vec::new();
         for (start, line, origin) in &mut lines {
             *origin -= scroll;
-            let end = *start + line.text.len();
-            let selection = &input.selected_range;
-            if selection.start <= end && selection.end > *start {
-                let left =
-                    line.x_for_index(selection.start.saturating_sub(*start).min(line.text.len()));
-                let right =
-                    line.x_for_index(selection.end.saturating_sub(*start).min(line.text.len()));
-                selections.push(fill(
-                    Bounds::new(
-                        point(origin.x + left, origin.y),
-                        size((right - left).max(px(2.)), px(24.)),
-                    ),
-                    rgba(0x84d7c155),
-                ));
+            for (offset, character) in line.text.char_indices() {
+                let index = *start + offset;
+                if index >= input.selected_range.start && index < input.selected_range.end {
+                    let next = offset + character.len_utf8();
+                    let Some(left) = line.position_for_index(offset, px(24.)) else {
+                        continue;
+                    };
+                    let Some(right) = line.position_for_index(next, px(24.)) else {
+                        continue;
+                    };
+                    selections.push(fill(
+                        Bounds::new(
+                            point(origin.x + left.x, origin.y + left.y),
+                            size((right.x - left.x).max(px(2.)), px(24.)),
+                        ),
+                        rgba(0x84d7c155),
+                    ));
+                }
             }
         }
         let cursor = input.selected_range.is_empty().then(|| {
             fill(
                 Bounds::new(
-                    point(lines[row].2.x + cursor_x, lines[row].2.y),
+                    point(
+                        lines[line_index].2.x + cursor_position.x,
+                        lines[line_index].2.y + cursor_position.y,
+                    ),
                     size(px(2.), px(24.)),
                 ),
                 rgb(super::ACCENT),
@@ -709,8 +763,15 @@ impl Element for TextElement {
                 window.paint_quad(selection);
             }
             for (_, line, origin) in &prepaint.lines {
-                line.paint(*origin, px(24.), window, cx)
-                    .expect("composer text paint");
+                line.paint(
+                    *origin,
+                    px(24.),
+                    gpui::TextAlign::Left,
+                    Some(bounds),
+                    window,
+                    cx,
+                )
+                .expect("composer text paint");
             }
             if focus_handle.is_focused(window) {
                 if let Some(cursor) = prepaint.cursor.take() {
@@ -764,12 +825,7 @@ impl Render for Composer {
             .text_color(rgb(super::TEXT))
             .line_height(px(24.))
             .text_size(px(16.))
-            .child(
-                div()
-                    .h(px(96.))
-                    .w_full()
-                    .child(TextElement { input: cx.entity() }),
-            )
+            .child(div().w_full().child(TextElement { input: cx.entity() }))
     }
 }
 

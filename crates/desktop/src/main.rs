@@ -491,15 +491,21 @@ fn chat_element_id(kind: &'static str, id: Uuid) -> gpui::ElementId {
     (gpui::ElementId::from((kind, high)), low.to_string()).into()
 }
 
-fn render_markdown(body: &str) -> impl IntoElement {
-    let mut content = div().flex().flex_col().gap_3().w_full();
+fn render_markdown(body: &str, conversation_width: gpui::Pixels) -> impl IntoElement {
+    let mut content = div().flex().flex_col().gap_3().w_full().min_w(px(0.0));
     for block in markdown::parse_markdown(body) {
         match block.kind {
             markdown::MarkdownBlockKind::Rule => {
                 content = content.child(div().h(px(1.0)).w_full().bg(rgb(0x3b4049)));
             }
             markdown::MarkdownBlockKind::Code(language) => {
-                let mut code = div().w_full().p_3().rounded_md().bg(rgb(0x191c22));
+                let mut code = div()
+                    .w(conversation_width)
+                    .max_w(conversation_width)
+                    .min_w(px(0.0))
+                    .p_3()
+                    .rounded_md()
+                    .bg(rgb(0x191c22));
                 if !language.is_empty() {
                     code = code.child(
                         div()
@@ -509,12 +515,11 @@ fn render_markdown(body: &str) -> impl IntoElement {
                             .child(language),
                     );
                 }
-                let mut code_lines = div().w_full().flex().flex_col();
+                let mut code_lines = div().flex().flex_col().items_start();
                 for line in block.text.trim_end_matches('\n').split('\n') {
                     let line = line.replace('\t', "    ").replace(' ', " ");
                     code_lines = code_lines.child(
                         div()
-                            .w_full()
                             .font_family("Menlo")
                             .text_sm()
                             .text_color(rgb(0xd5d9e0))
@@ -779,7 +784,7 @@ fn follows_transcript(offset: gpui::Pixels, maximum: gpui::Pixels) -> bool {
 }
 
 impl Render for ChatsView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.start_state_listener(cx);
         if !self.initial_scroll_done {
             self.transcript_scroll.scroll_to_bottom();
@@ -881,6 +886,7 @@ impl Render for ChatsView {
         let mut detail = div()
             .flex_1()
             .h_full()
+            .min_h(px(0.0))
             .flex()
             .flex_col()
             .p_8()
@@ -892,6 +898,8 @@ impl Render for ChatsView {
                 .id("transcript")
                 .flex_1()
                 .w_full()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
                 .overflow_y_scroll()
                 .flex()
                 .flex_col()
@@ -913,9 +921,11 @@ impl Render for ChatsView {
                     match message.role {
                         MessageRole::User => {
                             transcript = transcript.child(
-                                div().w_full().flex().justify_end().child(
+                                div().w_full().min_w(px(0.0)).flex().justify_end().child(
                                     div()
+                                        .w_full()
                                         .max_w(px(650.0))
+                                        .min_w(px(0.0))
                                         .px_4()
                                         .py_3()
                                         .rounded_lg()
@@ -929,6 +939,7 @@ impl Render for ChatsView {
                             transcript = transcript.child(
                                 div()
                                     .w_full()
+                                    .min_w(px(0.0))
                                     .flex()
                                     .flex_col()
                                     .gap_2()
@@ -939,24 +950,16 @@ impl Render for ChatsView {
                                             .text_color(rgb(ACCENT))
                                             .child("CODEX"),
                                     )
-                                    .child(render_markdown(&message.body)),
+                                    .child(render_markdown(
+                                        &message.body,
+                                        (window.bounds().size.width - px(344.0)).max(px(120.0)),
+                                    )),
                             );
                         }
                     }
                 }
             }
 
-            let composer = div()
-                .id("composer")
-                .flex_1()
-                .min_w(px(0.0))
-                .px_3()
-                .py_2()
-                .rounded_lg()
-                .border_1()
-                .border_color(rgb(0x3b4049))
-                .bg(rgb(PANEL))
-                .child(self.composer.clone());
             let send_button = div()
                 .id("send-message")
                 .px_4()
@@ -969,6 +972,28 @@ impl Render for ChatsView {
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.send_prompt(this.composer.read(cx).content(), cx)
                 }));
+            let action_row = div()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_between()
+                .child(div().flex_1().min_w(px(0.0)))
+                .child(send_button);
+            let composer = div()
+                .id("composer")
+                .min_w(px(0.0))
+                .w_full()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .px_3()
+                .py_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(0x3b4049))
+                .bg(rgb(PANEL))
+                .child(self.composer.clone())
+                .child(action_row);
 
             detail = detail
                 .child(
@@ -994,9 +1019,7 @@ impl Render for ChatsView {
                         .min_w(px(0.0))
                         .flex()
                         .items_end()
-                        .gap_2()
-                        .child(composer)
-                        .child(send_button),
+                        .child(composer),
                 )
                 .child(
                     div()

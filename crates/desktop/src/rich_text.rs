@@ -58,6 +58,9 @@ impl RichText {
             .last()
             .unwrap_or(0)
     }
+    pub fn has_selection(&self) -> bool {
+        self.anchor != self.caret || self.dragging
+    }
     fn selection(&self) -> Range<usize> {
         self.anchor.min(self.caret)..self.anchor.max(self.caret)
     }

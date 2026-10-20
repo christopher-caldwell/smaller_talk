@@ -28,6 +28,7 @@ pub fn button_with_hover(
     label: impl Into<String>,
     hover: u32,
 ) -> Stateful<gpui::Div> {
+    let label = label.into();
     div()
         .id(id)
         .tab_index(0)
@@ -41,7 +42,7 @@ pub fn button_with_hover(
         .text_color(rgb(TEXT))
         .cursor_pointer()
         .hover(move |s| s.bg(rgb(hover)))
-        .child(label.into())
+        .when(!label.is_empty(), |button| button.child(label))
 }
 pub fn muted(text: impl Into<String>) -> AnyElement {
     div()
@@ -166,6 +167,7 @@ impl gpui::AssetSource for Icons {
             "trash" => include_bytes!("../assets/icons/trash.svg"),
             "chevron" => include_bytes!("../assets/icons/chevron.svg"),
             "compose" => include_bytes!("../assets/icons/compose.svg"),
+            "queue" => include_bytes!("../assets/icons/queue.svg"),
             "copy" => include_bytes!("../assets/icons/copy.svg"),
             _ => return Ok(None),
         };

@@ -30,7 +30,8 @@ actions!(
         NextTab,
         PreviousTab,
         ToggleSidebar,
-        SearchChats
+        SearchChats,
+        OpenSettings
     ]
 );
 struct Root(gpui::Entity<shell::ChatsView>);
@@ -89,7 +90,8 @@ fn main() -> anyhow::Result<()> {
             )
         })?,
     ));
-    let chats = Arc::new(ChatService::new(store.clone(), store.clone()));
+    let chats =
+        Arc::new(ChatService::new(store.clone(), store.clone()).with_setup_store(store.clone()));
     let workspace = Arc::new(WorkspaceService::new(store.clone(), store.clone()));
     let initial_chats = runtime
         .block_on(chats.list_chats())
@@ -101,21 +103,46 @@ fn main() -> anyhow::Result<()> {
         .block_on(workspace.session())
         .context("Could not load the workspace; run `just db-migrate`.")?;
     let projects = runtime.block_on(workspace.list_projects())?;
+    let settings = Arc::new(SettingsService::new(store.clone(), store.clone()));
+    let app_settings = runtime
+        .block_on(settings.load())
+        .context("Could not load settings; run `just db-migrate`.")?;
     let router = AgentRouter::new(
         CodexAdapter::new(startup::codex_executable()),
         ClaudeAdapter::new(startup::claude_executable()),
     );
+    for provider in smaller_talk_domain::PROVIDERS {
+        let prefs = app_settings.provider(provider);
+        router.configure(
+            provider,
+            startup::provider_executable(provider, &prefs),
+            prefs.enabled,
+        );
+    }
     let conversation = Arc::new(
         ConversationService::new(
             store.clone(),
             store.clone(),
             store.clone(),
             store.clone(),
-            router,
+            router.clone(),
             std::env::current_dir()?,
         )
-        .with_workspace(store.clone(), store.clone()),
+        .with_workspace(store.clone(), store.clone())
+        .with_steered_input_store(store.clone())
+        .with_settings(store.clone())
+        .with_display(store.clone()),
     );
+    runtime.block_on(store.recover_queues())?;
+    let (queue_output, queue_events) = tokio::sync::mpsc::unbounded_channel();
+    let queue = runtime.block_on(async {
+        QueueCoordinator::start(
+            store.clone(),
+            store.clone(),
+            conversation.clone(),
+            queue_output,
+        )
+    });
     let attachment_storage: Arc<dyn AttachmentStorage> = Arc::new(LocalAttachments::new(
         path.parent()
             .context("database has no parent")?
@@ -126,9 +153,30 @@ fn main() -> anyhow::Result<()> {
         attachment_storage
             .collect_unreferenced(runtime.block_on(workspace.attachment_references())?),
     )?;
+    let rewriter = Arc::new(RewriteService::new(
+        Arc::new(smaller_talk_infrastructure::CliTextGenerator::new(
+            router.clone(),
+            path.parent()
+                .context("database has no parent")?
+                .join("rewrite"),
+            startup::managed_claude_policy_paths(),
+        )),
+        store.clone(),
+        store.clone(),
+    ));
     let services = shell::Services {
+        display: store.clone(),
+        rewriter,
+        settings,
+        providers: router,
+        repositories: Arc::new(smaller_talk_infrastructure::GitRepositoryReader::new(
+            "git".into(),
+            "gh".into(),
+        )),
+        launch_folder: std::env::current_dir()?,
         chats,
         conversation,
+        queue,
         workspace,
         attachments: attachment_storage,
         runtime: runtime.handle().clone(),
@@ -147,6 +195,7 @@ fn main() -> anyhow::Result<()> {
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
             KeyBinding::new("cmd-q", Quit, None),
+            KeyBinding::new("cmd-,", OpenSettings, None),
             KeyBinding::new("cmd-w", CloseTab, None),
             KeyBinding::new("cmd-t", NewChat, None),
             KeyBinding::new("cmd-n", NewChat, None),
@@ -160,6 +209,8 @@ fn main() -> anyhow::Result<()> {
         cx.set_menus(vec![Menu {
             name: "Smaller Talk".into(),
             items: vec![
+                MenuItem::action("Settings…", OpenSettings),
+                MenuItem::separator(),
                 MenuItem::action("New Chat", NewChat),
                 MenuItem::action("Search Chats", SearchChats),
                 MenuItem::action("Toggle Sidebar", ToggleSidebar),
@@ -168,8 +219,17 @@ fn main() -> anyhow::Result<()> {
                 MenuItem::action("Quit Smaller Talk", Quit),
             ],
         }]);
-        let view =
-            cx.new(|cx| shell::ChatsView::new(services, initial_chats, projects, session, cx));
+        let view = cx.new(|cx| {
+            shell::ChatsView::new(
+                services,
+                initial_chats,
+                projects,
+                session,
+                app_settings,
+                queue_events,
+                cx,
+            )
+        });
         cx.set_global(Root(view));
         let root = cx.global::<Root>().0.clone();
         cx.on_app_quit(move |cx| {

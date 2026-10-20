@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT ti.message_id\nFROM turn_inputs ti\nJOIN turns t ON t.id = ti.turn_id\nJOIN messages m ON m.id = ti.message_id\nWHERE t.chat_id = ?\n  AND t.user_message_id = ?\n  AND t.status IN ('interrupted', 'failed')\nORDER BY m.created_at, m.rowid;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "350dc816d42ae345e4cdd06756442e5674a3e08b7e83f4ed1b3b386b46fe1bd5"
+}

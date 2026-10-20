@@ -28,14 +28,14 @@ impl ChatsView {
             .max_w(px(800.))
             .max_h(max_height)
             .overflow_y_scroll()
-            .p_4()
+            .p_3()
             .rounded_lg()
             .border_1()
             .border_color(rgb(BORDER))
             .bg(rgb(PANEL))
             .flex()
             .flex_col()
-            .gap_3()
+            .gap_2()
             .child(
                 div()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -102,11 +102,35 @@ impl ChatsView {
                         .on_click(cx.listener(move |this, _, _, cx| this.respond(id, true, cx))),
                 );
             }
-            InteractionKind::Approval { detail } => {
-                card = card.child(div().text_sm().child(detail.clone())).child(
+            InteractionKind::Approval(presentation) => {
+                for field in &presentation.fields {
+                    card = card.child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(rgb(MUTED))
+                                    .child(field.label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .when(field.monospace, |d| d.font_family("Menlo"))
+                                    .child(field.value.clone()),
+                            ),
+                    );
+                }
+                if let Some(explanation) = &presentation.explanation {
+                    card = card.child(div().text_sm().child(explanation.clone()));
+                }
+                let expanded = pending.details;
+                card = card.child(
                     row()
                         .child(
-                            button("approve-request", "Approve once")
+                            button("approve-request", presentation.allow_label.clone())
                                 .bg(rgb(PANEL_HOVER))
                                 .on_click(
                                     cx.listener(move |this, _, _, cx| this.respond(id, true, cx)),
@@ -114,8 +138,40 @@ impl ChatsView {
                         )
                         .child(button("decline-request", "Decline").on_click(
                             cx.listener(move |this, _, _, cx| this.respond(id, false, cx)),
-                        )),
+                        ))
+                        .child(div().flex_1())
+                        .child(
+                            button(
+                                "approval-details",
+                                if expanded { "Hide details" } else { "Details" },
+                            )
+                            .text_xs()
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if let Some(pending) =
+                                        this.states.get_mut(&id).and_then(|s| s.pending.as_mut())
+                                    {
+                                        pending.details = !pending.details;
+                                    }
+                                    cx.notify();
+                                },
+                            )),
+                        ),
                 );
+                if expanded {
+                    card = card.child(
+                        div()
+                            .id("approval-json")
+                            .max_h(px(160.))
+                            .overflow_y_scroll()
+                            .p_2()
+                            .rounded_md()
+                            .bg(rgb(BACKGROUND))
+                            .font_family("Menlo")
+                            .text_xs()
+                            .child(presentation.raw_arguments.clone()),
+                    );
+                }
             }
             InteractionKind::LeavePlan { detail } => {
                 card = card.child(div().text_sm().child(detail.clone())).child(

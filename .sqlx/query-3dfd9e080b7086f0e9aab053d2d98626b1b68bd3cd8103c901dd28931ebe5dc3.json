@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO queue_state (chat_id, reason) SELECT DISTINCT chat_id, 'Queue restored. Resume when ready.' FROM message_queue WHERE true\nON CONFLICT(chat_id) DO UPDATE SET reason = excluded.reason;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "3dfd9e080b7086f0e9aab053d2d98626b1b68bd3cd8103c901dd28931ebe5dc3"
+}

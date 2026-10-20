@@ -4,6 +4,8 @@ use sqlx::{SqlitePool, sqlite::SqliteConnectOptions, sqlite::SqlitePoolOptions};
 use thiserror::Error;
 
 mod chats;
+mod queue;
+mod settings;
 mod workspace;
 pub use chats::SqliteChatStore;
 

@@ -1,9 +1,12 @@
+use crate::ApprovalPresentation;
 use std::{collections::BTreeMap, path::PathBuf};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+#[derive(
+    Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum Provider {
     #[default]
@@ -140,7 +143,7 @@ pub struct Question {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum InteractionKind {
-    Approval { detail: String },
+    Approval(ApprovalPresentation),
     Questions(Vec<Question>),
     LeavePlan { detail: String },
 }
@@ -175,4 +178,21 @@ pub struct TurnSummary {
     pub user_message_id: Uuid,
     pub status: String,
     pub error: Option<String>,
+}
+
+/// Unsent content owned by the durable queue, not by conversation history.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct QueuedMessage {
+    pub id: uuid::Uuid,
+    pub chat_id: uuid::Uuid,
+    pub draft: Draft,
+    pub state: String,
+    pub error: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct MessageQueue {
+    pub steer_available: bool,
+    pub entries: Vec<QueuedMessage>,
+    pub paused: Option<String>,
 }

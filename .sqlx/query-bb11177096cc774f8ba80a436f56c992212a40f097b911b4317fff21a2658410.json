@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE message_queue SET state = ?, error = ? WHERE id = ? AND state = ?;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "bb11177096cc774f8ba80a436f56c992212a40f097b911b4317fff21a2658410"
+}

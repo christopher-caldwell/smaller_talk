@@ -64,7 +64,36 @@ impl ChatsView {
             .min_w(px(0.))
             .w_full()
             .overflow_hidden()
+            .relative()
             .child(conversation)
+            .when(!state.follow, |view| {
+                view.child(
+                    div()
+                        .absolute()
+                        .bottom(px(10.))
+                        .left_0()
+                        .w_full()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            button("return-to-latest", "↓  Latest")
+                                .bg(rgb(PANEL))
+                                .border_color(rgb(BORDER))
+                                .tooltip(hint("Return to the latest message and follow new output"))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if let Some(state) = this.states.get_mut(&id) {
+                                        state.follow = true;
+                                        state.list.scroll_to(gpui::ListOffset {
+                                            item_ix: state.messages.len(),
+                                            offset_in_item: px(0.),
+                                        });
+                                    }
+                                    this.save_session();
+                                    cx.notify();
+                                })),
+                        ),
+                )
+            })
             .into_any_element()
     }
 
@@ -98,9 +127,10 @@ impl ChatsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some(message) = self.states[&chat].messages.get(index).cloned() else {
+        let Some(mut message) = self.states[&chat].messages.get(index).cloned() else {
             return div().into_any_element();
         };
+        message.body = self.displayed_response_body(&message);
         let files = self.states[&chat]
             .files
             .get(&message.id)
@@ -137,7 +167,13 @@ impl ChatsView {
                     .child(text),
             );
         } else {
-            body = body.child(div().text_xs().text_color(rgb(MUTED)).child("Assistant"));
+            body = body.child(div().text_xs().text_color(rgb(MUTED)).child(
+                if self.showing_shortened(message.id) {
+                    "Assistant · Shortened"
+                } else {
+                    "Assistant"
+                },
+            ));
             let blocks = self
                 .states
                 .get_mut(&chat)
@@ -175,7 +211,10 @@ impl ChatsView {
             );
         }
         if message.role == MessageRole::Assistant {
+            body = body.child(self.render_rewrite_controls(chat, message.id, cx));
             let source = message.body.clone();
+            let message_id = message.id;
+            let copied = self.states[&chat].copied == Some(message_id);
             body = body.child(
                 row().child(
                     button(element_id("copy-response", message.id), "")
@@ -188,10 +227,31 @@ impl ChatsView {
                         .justify_center()
                         .flex_shrink_0()
                         .tooltip(hint("Copy response"))
-                        .child(icon("copy").text_color(rgb(MUTED)))
-                        .on_click(move |_, _, cx| {
+                        .when(copied, |b| {
+                            b.child(div().text_color(rgb(ACCENT)).child("✓"))
+                        })
+                        .when(!copied, |b| b.child(icon("copy").text_color(rgb(MUTED))))
+                        .on_click(cx.listener(move |this, _, _, cx| {
                             cx.write_to_clipboard(gpui::ClipboardItem::new_string(source.clone()));
-                        }),
+                            if let Some(state) = this.states.get_mut(&chat) {
+                                state.copied = Some(message_id);
+                            }
+                            cx.notify();
+                            cx.spawn(async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(std::time::Duration::from_secs(2))
+                                    .await;
+                                let _ = this.update(cx, |this, cx| {
+                                    if let Some(state) = this.states.get_mut(&chat)
+                                        && state.copied == Some(message_id)
+                                    {
+                                        state.copied = None;
+                                    }
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
+                        })),
                 ),
             );
         }

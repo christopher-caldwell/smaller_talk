@@ -24,7 +24,32 @@ impl ChatsView {
             .on_click(|_, _, cx| cx.stop_propagation());
         match *popup {
             Popup::Models | Popup::Effort => {
+                if matches!(popup, Popup::Models) {
+                    content = content.child(
+                        row()
+                            .px_2()
+                            .py_1()
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(self.model_search.clone()),
+                            )
+                            .child(button("clear-model-search", "×").on_click(cx.listener(
+                                |this, _, window, cx| {
+                                    this.model_search.update(cx, |e, cx| {
+                                        e.set_content(String::new(), window, cx)
+                                    });
+                                    this.model_query.clear();
+                                    this.popup_index = 0;
+                                    this.model_search.focus_handle(cx).focus(window);
+                                    cx.notify();
+                                },
+                            ))),
+                    );
+                }
                 let choices = self.picker_choices();
+                let no_choices = choices.is_empty();
                 let mut items = div()
                     .id("picker-items")
                     .overflow_y_scroll()
@@ -60,11 +85,22 @@ impl ChatsView {
                     );
                 }
                 if matches!(popup, Popup::Models) {
+                    if no_choices {
+                        items = items.child(div().p_2().child(muted("No matching models")));
+                    }
                     for provider in [Provider::Codex, Provider::Claude] {
+                        if !self.app_settings.provider(provider).enabled {
+                            continue;
+                        }
                         match self.catalogs.get(&provider) {
                             None => {
-                                items = items
-                                    .child(muted(format!("Loading {} models…", provider.label())));
+                                let status = self
+                                    .provider_status
+                                    .get(&provider)
+                                    .map(|s| s.label())
+                                    .unwrap_or("Checking sign-in…");
+                                items =
+                                    items.child(muted(format!("{}: {status}", provider.label())));
                             }
                             Some(Err(error)) => {
                                 items = items.child(
@@ -88,6 +124,15 @@ impl ChatsView {
                         },
                     ))
                     .child(items);
+                if matches!(popup, Popup::Models) {
+                    content = content.child(
+                        button("manage-models", "Manage models…")
+                            .text_xs()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
+                    );
+                }
             }
             Popup::Chat(id) => {
                 let busy = self.states.get(&id).is_some_and(|s| s.activity.is_some());

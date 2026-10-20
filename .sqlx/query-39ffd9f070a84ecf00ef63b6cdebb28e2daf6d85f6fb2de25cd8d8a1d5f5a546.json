@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO message_queue (id, chat_id, payload, state) VALUES (?, ?, ?, 'pending');\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "39ffd9f070a84ecf00ef63b6cdebb28e2daf6d85f6fb2de25cd8d8a1d5f5a546"
+}

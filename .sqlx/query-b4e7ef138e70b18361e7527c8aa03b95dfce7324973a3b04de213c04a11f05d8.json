@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM message_queue WHERE id = ? AND chat_id = ? AND state IN ('pending','failed','uncertain');\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "b4e7ef138e70b18361e7527c8aa03b95dfce7324973a3b04de213c04a11f05d8"
+}

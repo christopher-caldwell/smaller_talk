@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
 use smaller_talk_application::{
-    ExecutionAdapter, ExecutionError, ExecutionEvent, ExecutionRequest,
+    ExecutionAdapter, ExecutionError, ExecutionEvent, ExecutionRequest, SteerCommand, SteerOutcome,
 };
 use smaller_talk_domain::*;
 use tokio::{
@@ -19,6 +19,9 @@ pub struct ClaudeAdapter {
     executable: PathBuf,
 }
 impl ClaudeAdapter {
+    pub(crate) fn executable(&self) -> &std::path::Path {
+        &self.executable
+    }
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
@@ -37,6 +40,7 @@ impl ClaudeAdapter {
             "stream-json",
             "--verbose",
             "--include-partial-messages",
+            "--replay-user-messages",
             "--permission-prompt-tool",
             "stdio",
         ])
@@ -129,6 +133,7 @@ impl ClaudeAdapter {
         request: ExecutionRequest,
         events: mpsc::UnboundedSender<ExecutionEvent>,
         mut responses: mpsc::UnboundedReceiver<InteractionResponse>,
+        mut controls: mpsc::UnboundedReceiver<SteerCommand>,
     ) -> Result<(), ExecutionError> {
         let (mut child, mut stdin, mut stdout) = self.start(Some(&request)).await?;
         Self::initialize(&mut stdin, &mut stdout).await?;
@@ -145,12 +150,56 @@ impl ClaudeAdapter {
             }
             content.push(json!({ "type": "image", "source": { "type": "base64", "media_type": image.mime_type, "data": STANDARD.encode(bytes) } }));
         }
-        write(&mut stdin, &json!({ "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": request.binding.as_ref().map(|b| &b.native_session_id) })).await?;
+        let initial_id = uuid::Uuid::new_v4().to_string();
+        write(&mut stdin, &json!({ "uuid": initial_id, "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": request.binding.as_ref().map(|b| &b.native_session_id) })).await?;
         let _ = events.send(ExecutionEvent::Activity(Activity::Working));
         let mut streamed_ids = HashSet::new();
+        let mut outstanding_results = 1usize;
+        let mut pending_steer: Option<SteerCommand> = None;
+        let mut controls_open = true;
+        let mut replay_verified = false;
+        let (frames, mut incoming) = mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                let frame = read(&mut stdout).await;
+                let failed = frame.is_err();
+                if frames.send(frame).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
         let mut bound = false;
         loop {
-            let value = read(&mut stdout).await?;
+            let value = tokio::select! {
+                frame = incoming.recv() => frame.ok_or_else(|| ExecutionError::new("Claude disconnected"))??,
+                command = controls.recv(), if controls_open && pending_steer.is_none() => {
+                    let Some(command) = command else { controls_open = false; continue; };
+                    if !replay_verified { let _ = command.result.send(SteerOutcome::Rejected("This Claude version has not verified input acknowledgements. The message remains queued.".into())); continue; }
+                    if let Err(error) = crate::steering::validate(&command.input).await { let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue; }
+                    let mut content = vec![json!({"type":"text", "text":command.input.text_with_files()})];
+                    for file in command.input.attachments.iter().filter(|f| f.is_image()) {
+                        let bytes = tokio::fs::read(&file.path).await.map_err(|e| ExecutionError::with_source("Could not read steered image", e))?;
+                        content.push(json!({"type":"image", "source":{"type":"base64", "media_type":file.mime_type, "data": STANDARD.encode(bytes)}}));
+                    }
+                    write(&mut stdin, &json!({"type":"user", "uuid":command.input.id.to_string(), "message":{"role":"user", "content":content}, "parent_tool_use_id":null})).await?;
+                    outstanding_results += 1;
+                    pending_steer = Some(command);
+                    continue;
+                }
+            };
+            if value["type"] == "user" {
+                if value["uuid"].as_str() == Some(initial_id.as_str()) {
+                    replay_verified = true;
+                    let _ = events.send(ExecutionEvent::SteeringAvailable(true));
+                }
+                if pending_steer.as_ref().is_some_and(|command| {
+                    value["uuid"].as_str() == Some(command.input.id.to_string().as_str())
+                }) {
+                    let command = pending_steer.take().expect("matching input");
+                    let _ = events.send(ExecutionEvent::InputAccepted(command.input));
+                    let _ = command.result.send(SteerOutcome::Accepted);
+                }
+            }
             if !bound && let Some(session) = value["session_id"].as_str() {
                 let _ = events.send(ExecutionEvent::BindingEstablished(ExecutionBinding {
                     adapter_key: "claude".into(),
@@ -220,13 +269,31 @@ impl ClaudeAdapter {
                                 .unwrap_or_else(|| value["errors"].to_string())
                         )));
                     }
-                    break;
+                    outstanding_results = outstanding_results.saturating_sub(1);
+                    if outstanding_results == 0 {
+                        if !request.settings.plan_mode
+                            && let Some(text) =
+                                value["result"].as_str().filter(|s| !s.trim().is_empty())
+                        {
+                            let _ = events.send(ExecutionEvent::FinalAnswerText(text.to_owned()));
+                        }
+                        break;
+                    }
                 }
                 Some("system") if value["subtype"] == "error" => {
                     return Err(ExecutionError::new(format!("Claude: {}", value["message"])));
                 }
                 _ => {}
             }
+        }
+        if let Some(command) = pending_steer {
+            let _ = command.result.send(SteerOutcome::Uncertain(
+                "Claude finished without acknowledging the message. Review the conversation."
+                    .into(),
+            ));
+        }
+        while let Ok(command) = controls.try_recv() {
+            let _ = command.result.send(SteerOutcome::NotRunning);
         }
         drop(stdin);
         if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
@@ -301,7 +368,17 @@ impl ExecutionAdapter for ClaudeAdapter {
         events: mpsc::UnboundedSender<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
         let (_, responses) = mpsc::unbounded_channel();
-        self.run(request, events, responses).await
+        let (_, controls) = mpsc::unbounded_channel();
+        self.run(request, events, responses, controls).await
+    }
+    async fn execute_controlled(
+        &self,
+        request: ExecutionRequest,
+        events: mpsc::UnboundedSender<ExecutionEvent>,
+        responses: mpsc::UnboundedReceiver<InteractionResponse>,
+        controls: mpsc::UnboundedReceiver<SteerCommand>,
+    ) -> Result<(), ExecutionError> {
+        self.run(request, events, responses, controls).await
     }
     async fn execute_interactive(
         &self,
@@ -309,7 +386,8 @@ impl ExecutionAdapter for ClaudeAdapter {
         events: mpsc::UnboundedSender<ExecutionEvent>,
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
     ) -> Result<(), ExecutionError> {
-        self.run(request, events, responses).await
+        let (_, controls) = mpsc::unbounded_channel();
+        self.run(request, events, responses, controls).await
     }
 }
 
@@ -343,12 +421,7 @@ async fn handle_interaction(
                 .unwrap_or("Allow Claude to leave Plan mode and continue with this plan?")
                 .into(),
         },
-        _ => InteractionKind::Approval {
-            detail: format!(
-                "{tool}\\n{}",
-                serde_json::to_string_pretty(input).unwrap_or_default()
-            ),
-        },
+        _ => InteractionKind::Approval(crate::approvals::present(tool, input, false)),
     };
     if matches!(&kind, InteractionKind::Questions(questions) if questions.is_empty()) {
         return Err(ExecutionError::new("Claude sent an empty question request"));

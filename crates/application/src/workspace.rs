@@ -11,6 +11,11 @@ use crate::PersistenceError;
 pub trait WorkspaceQueries: Send + Sync {
     async fn chat_previews(&self) -> Result<Vec<(Uuid, String)>, PersistenceError>;
     async fn last_turn(&self, chat_id: Uuid) -> Result<Option<TurnSummary>, PersistenceError>;
+    async fn accepted_turn_inputs(
+        &self,
+        chat_id: Uuid,
+        original_message_id: Uuid,
+    ) -> Result<Vec<Uuid>, PersistenceError>;
     async fn list_projects(&self) -> Result<Vec<Project>, PersistenceError>;
     async fn preferences(&self, chat_id: Uuid) -> Result<ChatPreferences, PersistenceError>;
     async fn draft(&self, chat_id: Uuid) -> Result<Draft, PersistenceError>;
@@ -40,7 +45,21 @@ pub trait WorkspaceWrites: Send + Sync {
         message_id: Uuid,
         attachments: &[Attachment],
     ) -> Result<(), PersistenceError>;
+    async fn save_turn_input(&self, turn: Uuid, message: Uuid) -> Result<(), PersistenceError>;
     async fn save_turn(&self, turn: &TurnRecord) -> Result<(), PersistenceError>;
+}
+
+#[async_trait]
+pub trait SteeredInputStore: Send + Sync {
+    /// Persist the assistant segment and accepted steering input as one atomic
+    /// local mutation, including its attachments and turn association.
+    async fn persist_steered_input(
+        &self,
+        assistant: Option<crate::NewMessage>,
+        user: crate::NewMessage,
+        attachments: &[Attachment],
+        turn: Uuid,
+    ) -> Result<(Option<Message>, Message), PersistenceError>;
 }
 
 #[async_trait]

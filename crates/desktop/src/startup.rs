@@ -101,6 +101,36 @@ pub fn claude_executable() -> PathBuf {
     PathBuf::from(name)
 }
 
+/// Resolve user-controlled paths at the desktop composition boundary.
+pub fn provider_executable(
+    provider: smaller_talk_domain::Provider,
+    prefs: &smaller_talk_domain::ProviderPreferences,
+) -> PathBuf {
+    let key = match provider {
+        smaller_talk_domain::Provider::Codex => "SMALLER_TALK_CODEX_BIN",
+        smaller_talk_domain::Provider::Claude => "SMALLER_TALK_CLAUDE_BIN",
+    };
+    if let Some(value) = std::env::var_os(key) {
+        return value.into();
+    }
+    if let Some(value) = &prefs.executable {
+        return value.clone();
+    }
+    match provider {
+        smaller_talk_domain::Provider::Codex => codex_executable(),
+        smaller_talk_domain::Provider::Claude => claude_executable(),
+    }
+}
+
+pub fn managed_claude_policy_paths() -> Vec<PathBuf> {
+    vec![
+        PathBuf::from("/Library/Application Support/ClaudeCode/managed-settings.json"),
+        PathBuf::from("/Library/Application Support/ClaudeCode/managed-mcp.json"),
+        PathBuf::from("/etc/claude-code/managed-settings.json"),
+        PathBuf::from("/etc/claude-code/managed-mcp.json"),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     #[test]

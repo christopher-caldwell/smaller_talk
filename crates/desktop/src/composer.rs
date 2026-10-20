@@ -49,6 +49,8 @@ pub struct Submitted;
 impl EventEmitter<Submitted> for Composer {}
 pub struct Canceled;
 impl EventEmitter<Canceled> for Composer {}
+pub struct Navigate(pub i8);
+impl EventEmitter<Navigate> for Composer {}
 
 #[derive(Clone)]
 struct EditSnapshot {
@@ -70,6 +72,7 @@ pub struct Composer {
     scroll: Point<Pixels>,
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
+    picker_navigation: bool,
     single_line: bool,
     max_rows: usize,
     content_height: Pixels,
@@ -96,6 +99,7 @@ impl Composer {
             last_layout: Vec::new(),
             last_bounds: None,
             is_selecting: false,
+            picker_navigation: false,
             single_line,
             max_rows: 7,
             content_height: px(24.),
@@ -266,10 +270,21 @@ impl Composer {
             }
         }
     }
+    pub fn set_picker_navigation(&mut self, enabled: bool) {
+        self.picker_navigation = enabled;
+    }
     fn up(&mut self, _: &Up, _: &mut Window, cx: &mut Context<Self>) {
+        if self.picker_navigation {
+            cx.emit(Navigate(-1));
+            return;
+        }
         self.vertical(false, false, cx);
     }
     fn down(&mut self, _: &Down, _: &mut Window, cx: &mut Context<Self>) {
+        if self.picker_navigation {
+            cx.emit(Navigate(1));
+            return;
+        }
         self.vertical(true, false, cx);
     }
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -1073,6 +1088,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("cmd-z", Undo, Some("Composer")),
         KeyBinding::new("cmd-shift-z", Redo, Some("Composer")),
         KeyBinding::new("enter", Submit, Some("Composer")),
+        KeyBinding::new("cmd-enter", Submit, Some("Composer")),
         KeyBinding::new("escape", Cancel, Some("Composer")),
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("Composer")),

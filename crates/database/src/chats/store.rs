@@ -1,6 +1,6 @@
 use smaller_talk_application::{
-    ChatQueries, ChatWrites, DeleteChatOutcome, MessageQueries, MessageWrites, NewChat, NewMessage,
-    PersistenceError, RenameChatOutcome,
+    ChatQueries, ChatSetupStore, ChatWrites, DeleteChatOutcome, MessageQueries, MessageWrites,
+    NewChat, NewMessage, PersistenceError, RenameChatOutcome,
 };
 use smaller_talk_domain::{Chat, ExecutionBinding, Message, MessageRole};
 use sqlx::SqlitePool;
@@ -213,6 +213,56 @@ impl ChatWrites for SqliteChatStore {
         .await
         .map_err(PersistenceError::new)?;
         Ok(updated_id.is_some())
+    }
+}
+
+#[async_trait::async_trait]
+impl ChatSetupStore for SqliteChatStore {
+    async fn create_chat_with_preferences(
+        &self,
+        chat: NewChat,
+        preferences: Option<smaller_talk_domain::ChatPreferences>,
+    ) -> Result<Chat, PersistenceError> {
+        let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
+        let id = chat.id.to_string();
+        let title = chat.title;
+        let created_at = chat.created_at.timestamp_millis();
+        let adapter_key = chat
+            .binding
+            .as_ref()
+            .map(|binding| binding.adapter_key.clone());
+        let native_session_id = chat
+            .binding
+            .as_ref()
+            .map(|binding| binding.native_session_id.clone());
+        let row = sqlx::query_file_as!(
+            ChatRow,
+            "src/chats/sql/insert_chat.sql",
+            id,
+            title,
+            created_at,
+            adapter_key,
+            native_session_id,
+        )
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(PersistenceError::new)?;
+        let created = Chat::try_from(row)?;
+        if let Some(preferences) = preferences {
+            let payload = serde_json::to_string(&preferences).map_err(PersistenceError::new)?;
+            let id = created.id.to_string();
+            sqlx::query_file!(
+                "src/workspace/sql/save_preferences.sql",
+                preferences.project_id,
+                payload,
+                id
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(PersistenceError::new)?;
+        }
+        tx.commit().await.map_err(PersistenceError::new)?;
+        Ok(created)
     }
 }
 

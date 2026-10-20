@@ -11,5 +11,8 @@ chrono = { workspace = true, features = ["clock"] }
 smaller-talk-domain = { path = "../domain" }
 thiserror.workspace = true
 uuid = { workspace = true, features = ["v4"] }
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 serde_json.workspace = true
+
+sha2 = "0.10"
+pulldown-cmark = "0.13"

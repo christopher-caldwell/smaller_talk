@@ -121,6 +121,52 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
+async fn codex_completed_text_items_keep_markdown_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = executable(
+        temp.path(),
+        "codex-item-boundaries",
+        r##"#!/usr/bin/env python3
+import json,sys
+send=lambda value:print(json.dumps(value),flush=True)
+for line in sys.stdin:
+ r=json.loads(line);m=r.get('method')
+ if m=='initialize':send({'id':r['id'],'result':{}})
+ elif m=='thread/start':send({'id':r['id'],'result':{'thread':{'id':'thread'}}})
+ elif m=='turn/start':
+  send({'id':r['id'],'result':{'turn':{'id':'turn'}}})
+  send({'method':'item/agentMessage/delta','params':{'threadId':'thread','itemId':'first','delta':'First paragraph.'}})
+  send({'method':'item/completed','params':{'item':{'id':'first','type':'agentMessage','text':'First paragraph.'}}})
+  send({'method':'item/agentMessage/delta','params':{'threadId':'thread','itemId':'second','delta':'# Final answer'}})
+  send({'method':'item/completed','params':{'item':{'id':'second','type':'agentMessage','text':'# Final answer'}}})
+  send({'method':'turn/completed','params':{'threadId':'thread','turn':{'status':'completed'}}})
+"##,
+    );
+    let events = run(
+        CodexAdapter::new(script),
+        request(temp.path(), Provider::Codex),
+    )
+    .await;
+    assert!(events.contains(&ExecutionEvent::TextSnapshot(
+        "First paragraph.\n\n# Final answer".into()
+    )));
+    let mut visible = String::new();
+    let mut heading_streamed_with_boundary = false;
+    for event in &events {
+        match event {
+            ExecutionEvent::TextDelta(delta) => visible.push_str(delta),
+            ExecutionEvent::TextSnapshot(snapshot) => visible.clone_from(snapshot),
+            _ => {}
+        }
+        if visible.contains("# Final answer") {
+            heading_streamed_with_boundary = visible.contains("First paragraph.\n\n# Final answer");
+            break;
+        }
+    }
+    assert!(heading_streamed_with_boundary, "{visible:?}");
+}
+
+#[tokio::test]
 async fn claude_native_images_metadata_questions_plan_exit_and_stream_deduplication() {
     let temp = tempfile::tempdir().unwrap();
     let script = executable(
@@ -227,4 +273,124 @@ for line in sys.stdin:
     assert!(events.contains(&ExecutionEvent::TextSnapshot(
         "Final authoritative plan".into()
     )));
+}
+
+#[tokio::test]
+async fn codex_steering_uses_expected_turn_and_structured_images() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = executable(
+        temp.path(),
+        "steer-codex",
+        r##"#!/usr/bin/env python3
+import json,sys
+send=lambda v:print(json.dumps(v),flush=True)
+for line in sys.stdin:
+ r=json.loads(line);m=r.get('method')
+ if m=='initialize':send({'id':r['id'],'result':{}})
+ elif m=='thread/start':send({'id':r['id'],'result':{'thread':{'id':'thread'}}})
+ elif m=='turn/start':
+  send({'id':r['id'],'result':{'turn':{'id':'native-turn'}}})
+  send({'method':'item/agentMessage/delta','params':{'threadId':'thread','itemId':'before','delta':'Before'}})
+ elif m=='turn/steer':
+  assert r['params']['expectedTurnId']=='native-turn'
+  assert r['params']['input'][1]['type']=='localImage'
+  send({'id':r['id'],'result':{'turnId':'native-turn'}})
+  send({'method':'item/completed','params':{'item':{'id':'before','type':'agentMessage','text':'Before'}}})
+  send({'method':'item/agentMessage/delta','params':{'threadId':'thread','itemId':'after','delta':'After'}})
+  send({'method':'item/completed','params':{'item':{'id':'after','type':'agentMessage','text':'After'}}})
+  send({'method':'turn/completed','params':{'threadId':'thread','turn':{'status':'completed'}}})
+"##,
+    );
+    verify_steering(
+        CodexAdapter::new(script),
+        request(temp.path(), Provider::Codex),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn claude_steering_waits_for_replayed_uuid_and_both_result_boundaries() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = executable(
+        temp.path(),
+        "steer-claude",
+        r##"#!/usr/bin/env python3
+import json,sys
+assert '--replay-user-messages' in sys.argv
+send=lambda v:print(json.dumps(v),flush=True)
+initial=True
+for line in sys.stdin:
+ r=json.loads(line)
+ if r.get('type')=='control_request':send({'type':'control_response','response':{'subtype':'success','request_id':'initialize','response':{}}})
+ elif r.get('type')=='user':
+  send({'type':'user','uuid':r['uuid'],'message':r['message'],'session_id':'native'})
+  if initial:
+   initial=False
+   send({'type':'assistant','message':{'id':'before','content':[{'type':'text','text':'Before'}]}})
+  else:
+   assert r['message']['content'][1]['type']=='image'
+   assert r['message']['content'][1]['source']['type']=='base64'
+   send({'type':'result','is_error':False})
+   send({'type':'assistant','message':{'id':'after','content':[{'type':'text','text':'After'}]}})
+   send({'type':'result','is_error':False})
+"##,
+    );
+    verify_steering(
+        ClaudeAdapter::new(script),
+        request(temp.path(), Provider::Claude),
+    )
+    .await;
+}
+
+async fn verify_steering(agent: impl ExecutionAdapter + 'static, request: ExecutionRequest) {
+    use smaller_talk_application::{SteerCommand, SteerInput, SteerOutcome};
+    let files = request.attachments.clone();
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let (_, responses) = mpsc::unbounded_channel();
+    let (controls, control_rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        agent
+            .execute_controlled(request, events, responses, control_rx)
+            .await
+    });
+    let id = Uuid::new_v4();
+    let mut submitted = false;
+    let mut accepted = false;
+    let mut after = false;
+    while let Some(event) = tokio::time::timeout(Duration::from_secs(10), receiver.recv())
+        .await
+        .unwrap()
+    {
+        match event {
+            ExecutionEvent::TextDelta(ref text) if text == "Before" && !submitted => {
+                let (result, rx) = tokio::sync::oneshot::channel();
+                controls
+                    .send(SteerCommand {
+                        input: SteerInput {
+                            id,
+                            prompt: "Correction".into(),
+                            attachments: files.clone(),
+                        },
+                        result,
+                    })
+                    .unwrap_or_else(|_| panic!("steering channel closed"));
+                tokio::spawn(async move {
+                    assert!(matches!(rx.await.unwrap(), SteerOutcome::Accepted));
+                });
+                submitted = true;
+            }
+            ExecutionEvent::InputAccepted(input) => {
+                assert_eq!(input.id, id);
+                accepted = true;
+            }
+            ExecutionEvent::TextDelta(text) if text == "After" => {
+                assert!(accepted);
+                after = true;
+            }
+            ExecutionEvent::TextSnapshot(text) if accepted => assert!(!text.contains("Before")),
+            _ => {}
+        }
+    }
+    task.await.unwrap().unwrap();
+    assert!(submitted && accepted && after);
 }

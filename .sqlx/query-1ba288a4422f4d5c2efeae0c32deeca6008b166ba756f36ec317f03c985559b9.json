@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO turn_inputs (turn_id, message_id) VALUES (?, ?) ON CONFLICT DO NOTHING;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "1ba288a4422f4d5c2efeae0c32deeca6008b166ba756f36ec317f03c985559b9"
+}

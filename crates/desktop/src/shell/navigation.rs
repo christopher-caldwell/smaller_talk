@@ -28,13 +28,22 @@ impl ChatsView {
                     button("rail-new-chat", "+")
                         .tooltip(hint("New chat (⌘N)"))
                         .on_click(cx.listener(|this, _, _, _| {
-                            let _ = this.persist.send(Persist::CreateChat);
+                            let _ = this
+                                .persist
+                                .send(Persist::CreateChat(this.new_chat_settings()));
                         })),
                 )
                 .child(
                     button("rail-search", "⌕")
                         .tooltip(hint("Search chats (⌘F)"))
                         .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx))),
+                )
+                .child(
+                    button("rail-settings", "⚙")
+                        .tooltip(hint("Settings (⌘,)"))
+                        .on_click(
+                            cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                        ),
                 )
                 .into_any_element();
         }
@@ -59,6 +68,13 @@ impl ChatsView {
                             .child("Smaller Talk"),
                     )
                     .child(
+                        button("settings", "⚙")
+                            .tooltip(hint("Settings (⌘,)"))
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
+                            ),
+                    )
+                    .child(
                         button("collapse-sidebar", "☰")
                             .tooltip(hint("Collapse sidebar (⌘B)"))
                             .on_click(cx.listener(|this, _, _, cx| {
@@ -78,7 +94,9 @@ impl ChatsView {
                         .child(icon("compose"))
                         .child("New chat")
                         .on_click(cx.listener(|this, _, _, _| {
-                            let _ = this.persist.send(Persist::CreateChat);
+                            let _ = this
+                                .persist
+                                .send(Persist::CreateChat(this.new_chat_settings()));
                         })),
                 ),
             )
@@ -406,7 +424,9 @@ impl ChatsView {
                 .tooltip(hint("New chat (⌘N)"))
                 .mr_2()
                 .on_click(cx.listener(|this, _, _, _| {
-                    let _ = this.persist.send(Persist::CreateChat);
+                    let _ = this
+                        .persist
+                        .send(Persist::CreateChat(this.new_chat_settings()));
                 })),
         );
         tabs.into_any_element()

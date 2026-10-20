@@ -71,10 +71,20 @@ impl ChatsView {
         match self.popup {
             Some(Popup::Models) => [Provider::Codex, Provider::Claude]
                 .into_iter()
+                .filter(|provider| self.app_settings.provider(*provider).enabled)
                 .flat_map(|provider| match self.catalogs.get(&provider) {
                     Some(Ok(catalog)) => catalog
                         .models
                         .iter()
+                        .filter(|model| {
+                            self.app_settings.visible(provider, &model.id)
+                                && model_matches(
+                                    &self.model_query,
+                                    provider,
+                                    &model.label,
+                                    &model.id,
+                                )
+                        })
                         .map(|model| PickerChoice {
                             label: format!("{} · {}", provider.label(), model.label),
                             selected: settings.provider == provider
@@ -124,6 +134,13 @@ impl ChatsView {
         cx: &mut Context<Self>,
     ) {
         self.popup_return_focus = window.focused(cx);
+        if matches!(popup, Popup::Models) {
+            self.model_query.clear();
+            self.model_search.update(cx, |e, cx| {
+                e.set_picker_navigation(true);
+                e.set_content(String::new(), window, cx);
+            });
+        }
         self.popup = Some(popup);
         self.popup_scroll = ScrollHandle::new();
         self.popup_index = self
@@ -132,7 +149,11 @@ impl ChatsView {
             .position(|c| c.selected)
             .unwrap_or(0);
         self.popup_scroll.scroll_to_item(self.popup_index);
-        self.popup_focus.focus(window);
+        if matches!(popup, Popup::Models) {
+            self.model_search.focus_handle(cx).focus(window);
+        } else {
+            self.popup_focus.focus(window);
+        }
         cx.notify();
     }
 
@@ -188,6 +209,12 @@ impl ChatsView {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
+        if self.settings_open && self.popup.is_none() && key == "escape" {
+            self.close_settings(window, cx);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         if self.popup.is_some() && key == "escape" {
             self.dismiss_popup(window, cx);
             window.prevent_default();
@@ -195,6 +222,10 @@ impl ChatsView {
             return;
         }
         if matches!(self.popup, Some(Popup::Models | Popup::Effort)) {
+            let searching = matches!(self.popup, Some(Popup::Models));
+            if searching && !matches!(key, "up" | "down" | "enter" | "tab") {
+                return;
+            }
             let choices = self.picker_choices();
             if !choices.is_empty() {
                 self.popup_index = self.popup_index.min(choices.len() - 1);
@@ -267,7 +298,32 @@ pub(super) fn composer_rows(height: f32, pending: bool) -> usize {
     } else {
         7
     };
-    if pending { rows.min(2) } else { rows }
+    if pending && height < 600. {
+        1
+    } else if pending {
+        rows.min(2)
+    } else {
+        rows
+    }
+}
+
+pub(super) fn error_summary(error: &str, settings: bool, pending: bool) -> String {
+    if settings {
+        return "Couldn’t save chat settings. Choose the model or mode again before sending."
+            .into();
+    }
+    if pending {
+        return "This request needs attention. Review the details and answer above to continue."
+            .into();
+    }
+    if error.len() <= 200
+        && !error.contains("database")
+        && !error.contains("(code:")
+        && !error.contains("{\"")
+    {
+        return error.into();
+    }
+    "Couldn’t complete this operation. Your message is retained. Review the details before trying again.".into()
 }
 
 #[cfg(test)]

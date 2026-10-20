@@ -1,0 +1,50 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT v.message_id, v.source_hash, v.provider, v.model, v.prompt_version, v.text\nFROM response_variants v JOIN messages m ON m.id = v.message_id\nWHERE m.chat_id = ? ORDER BY v.rowid\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "source_hash",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "provider",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "model",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "prompt_version",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "text",
+        "ordinal": 5,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "39eb872f0047ea055b0521965ec888c799ceaadd825fba9e7b626e7fdc1fffbc"
+}

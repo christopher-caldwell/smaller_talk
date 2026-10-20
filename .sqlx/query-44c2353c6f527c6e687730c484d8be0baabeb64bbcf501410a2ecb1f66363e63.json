@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO final_answers (message_id, text) VALUES (?, ?)\nON CONFLICT(message_id) DO UPDATE SET text = excluded.text\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "44c2353c6f527c6e687730c484d8be0baabeb64bbcf501410a2ecb1f66363e63"
+}

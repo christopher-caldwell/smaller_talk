@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO global_settings (id, payload) VALUES (1, ?)\nON CONFLICT(id) DO UPDATE SET payload = excluded.payload\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": []
+  },
+  "hash": "da637a7be13bc0ad40aee39c4fd9199ff1980ccdcce608d23f05d19e610fcf56"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO response_variants (message_id, source_hash, provider, model, prompt_version, text)\nVALUES (?, ?, ?, ?, ?, ?)\nON CONFLICT(message_id, source_hash, provider, model, prompt_version) DO UPDATE SET text = excluded.text\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "be6120cc685e7d20fadc83a2c79ee36e1a6f9ae47cf8df5e30702761d597378d"
+}

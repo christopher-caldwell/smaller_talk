@@ -61,7 +61,7 @@ The authenticated test passed Codex → Claude → Codex using GPT-6 Luna and Cl
 
 A local debug-build RSS comparison used the original repository HEAD and the expanded app with the same synthetic history and streaming fixture. The original app peaked at 127,776 KiB native RSS (145,152 KiB including its fixture child). The expanded app peaked at 130,320 KiB (146,240 KiB combined), with other tabs retained. These are single-run observations, not a performance guarantee or an acceptance threshold. Clearing caches need not immediately return allocator pages to macOS.
 
-The OS file picker and native image import were exercised directly; the external-file drop handler uses GPUI’s native `ExternalPaths` interface. Broad accessibility, native IME/dictation, and other platforms were not exhaustively exercised. Browsers, diff viewers, embedded editors, and terminals are outside this chat-focused expansion.
+The OS file picker and native image import were exercised directly; the external-file drop handler uses GPUI’s native `ExternalPaths` interface. Broad accessibility, native IME/dictation, and other platforms were not exhaustively exercised. Browsers, embedded editors, and terminals remain outside this chat-focused expansion. Read-only Git review is now available; see [Settings, Git review, and response display](settings-git-response-display.md).
 
 ### Compact composer and scrolling polish
 
@@ -76,3 +76,11 @@ Native verification used a disposable database at the 480-logical-pixel minimum 
 The interface now uses a deep-purple navigation surface, charcoal conversation/composer surfaces, neutral gray outlines and focus borders, and a green active-chat highlight. Purple stays in navigation; the chat header remains charcoal. Navigation structure is unchanged. New chat has a compose icon and highlights on hover or keyboard focus rather than a permanent fill. The composer keeps attachment and Chat/Plan controls on the left, with adjacent model/effort controls and a circular send action on the right. Provider details remain in the model tooltip; microphone and access-policy controls were not added.
 
 Chat actions and project choices use compact row-anchored menus, icon labels, and a separated destructive action. Rename and deletion confirmation stay explicit dialogs. The skill research is documented in [design options](skills-design-options.md); no skill interface or invocation behavior was added in this pass.
+
+### Durable follow-ups
+
+Message queuing and verified native steering are implemented. See [message queue behavior, recovery, and verification](message-queue.md). Enter and Cmd+Enter send or queue; Shift+Enter remains newline. Pending requests keep a compact composer available for queued follow-ups.
+
+### Settings, Git review, and answer shortening
+
+Global provider/model settings, model search, structured approvals, aligned activity, read-only Git review, and opt-in response shortening are documented in [the feature guide](settings-git-response-display.md). Upgrade existing databases with `just db-migrate` before starting this build.

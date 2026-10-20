@@ -3,7 +3,7 @@ use std::{path::PathBuf, process::Stdio, time::Duration};
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use smaller_talk_application::{
-    ExecutionAdapter, ExecutionError, ExecutionEvent, ExecutionRequest,
+    ExecutionAdapter, ExecutionError, ExecutionEvent, ExecutionRequest, SteerCommand, SteerOutcome,
 };
 use smaller_talk_domain::*;
 use tokio::{
@@ -24,6 +24,9 @@ pub struct CodexAdapter {
 }
 
 impl CodexAdapter {
+    pub(crate) fn executable(&self) -> &std::path::Path {
+        &self.executable
+    }
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
@@ -75,6 +78,7 @@ impl CodexAdapter {
         request: ExecutionRequest,
         events: mpsc::UnboundedSender<ExecutionEvent>,
         mut responses: mpsc::UnboundedReceiver<InteractionResponse>,
+        mut controls: mpsc::UnboundedReceiver<SteerCommand>,
     ) -> Result<(), ExecutionError> {
         let mut command = Command::new(&self.executable);
         command
@@ -192,10 +196,63 @@ impl CodexAdapter {
         let _ = events.send(ExecutionEvent::Activity(Activity::Working));
 
         let mut text_items: Vec<(String, String)> = Vec::new();
+        let mut offsets = std::collections::HashMap::<String, usize>::new();
+        let mut native_turn: Option<String> = None;
+        let mut pending_steer: Option<SteerCommand> = None;
+        let mut controls_open = true;
+        // A dedicated reader avoids cancelling read_line midway through a JSON frame.
+        let (frames, mut incoming) = mpsc::channel(64);
+        tokio::spawn(async move {
+            loop {
+                let frame = read_message(&mut stdout).await;
+                let failed = frame.is_err();
+                if frames.send(frame).await.is_err() || failed {
+                    break;
+                }
+            }
+        });
         let mut turn_response_received = false;
         let mut turn_completed = false;
+        let mut final_text = None;
         while !turn_completed {
-            let value = read_message(&mut stdout).await?;
+            let value = tokio::select! {
+                frame = incoming.recv() => frame.ok_or_else(|| ExecutionError::new("Codex disconnected"))??,
+                command = controls.recv(), if controls_open && pending_steer.is_none() => {
+                    let Some(command) = command else { controls_open = false; continue; };
+                    let Some(turn_id) = native_turn.as_ref() else { let _ = command.result.send(SteerOutcome::NotRunning); continue; };
+                    if let Err(error) = crate::steering::validate(&command.input).await {
+                        let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue;
+                    }
+                    let mut input = vec![json!({"type":"text", "text":command.input.text_with_files(), "text_elements":[]})];
+                    for file in command.input.attachments.iter().filter(|f| f.is_image()) { input.push(json!({"type":"localImage", "path":file.path})); }
+                    send_request(&mut stdin, 4, "turn/steer", json!({"threadId": thread_id, "expectedTurnId": turn_id, "input":input})).await?;
+                    pending_steer = Some(command);
+                    continue;
+                }
+            };
+            if value.get("id") == Some(&json!(4)) {
+                if let Some(command) = pending_steer.take() {
+                    if value.get("error").is_some() {
+                        let _ = command
+                            .result
+                            .send(SteerOutcome::Rejected(rpc_error(&value).to_string()));
+                    } else if value.pointer("/result/turnId").and_then(Value::as_str)
+                        == native_turn.as_deref()
+                    {
+                        for (id, text) in &text_items {
+                            *offsets.entry(id.clone()).or_default() += text.len();
+                        }
+                        text_items.clear();
+                        let _ = events.send(ExecutionEvent::InputAccepted(command.input));
+                        let _ = command.result.send(SteerOutcome::Accepted);
+                    } else {
+                        let _ = command.result.send(SteerOutcome::Uncertain(
+                            "Codex did not acknowledge the expected turn.".into(),
+                        ));
+                    }
+                }
+                continue;
+            }
             if value.get("method").is_some() && value.get("id").is_some() {
                 handle_interaction(&mut stdin, &value, &events, &mut responses).await?;
                 continue;
@@ -205,54 +262,90 @@ impl CodexAdapter {
             }
             if value.get("id") == Some(&json!(3)) {
                 turn_response_received = true;
+                native_turn = value
+                    .pointer("/result/turn/id")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned)
+                    .or(native_turn);
+                let _ = events.send(ExecutionEvent::SteeringAvailable(native_turn.is_some()));
                 continue;
             }
 
             match value.get("method").and_then(Value::as_str) {
+                Some("turn/started") => {
+                    native_turn = value
+                        .pointer("/params/turn/id")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned)
+                        .or(native_turn);
+                    let _ = events.send(ExecutionEvent::SteeringAvailable(native_turn.is_some()));
+                }
                 Some("item/agentMessage/delta" | "item/plan/delta") => {
                     let params = &value["params"];
                     if params["threadId"].as_str() == Some(thread_id.as_str())
                         && let Some(delta) = params["delta"].as_str()
                     {
+                        let item_id = params["itemId"].as_str().unwrap_or("answer").to_owned();
+                        let is_new_item = !text_items.iter().any(|(key, _)| *key == item_id);
+                        let has_prior_text = text_items
+                            .iter()
+                            .any(|(key, text)| key != &item_id && !text.is_empty());
+                        if let Some((_, text)) =
+                            text_items.iter_mut().find(|(key, _)| *key == item_id)
+                        {
+                            text.push_str(delta);
+                        } else {
+                            text_items.push((item_id, delta.to_owned()));
+                        }
                         let _ = events.send(ExecutionEvent::Activity(Activity::Responding));
-                        events
-                            .send(ExecutionEvent::TextDelta(delta.to_owned()))
-                            .map_err(|error| {
-                                ExecutionError::with_source(
-                                    format!(
-                                        "conversation stopped while Codex was responding: {error}"
-                                    ),
-                                    error,
-                                )
-                            })?;
+                        let event = if is_new_item && has_prior_text {
+                            ExecutionEvent::TextSnapshot(
+                                text_items
+                                    .iter()
+                                    .map(|(_, text)| text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n"),
+                            )
+                        } else {
+                            ExecutionEvent::TextDelta(delta.to_owned())
+                        };
+                        events.send(event).map_err(|error| {
+                            ExecutionError::with_source(
+                                format!("conversation stopped while Codex was responding: {error}"),
+                                error,
+                            )
+                        })?;
                     }
                 }
                 Some("item/completed") => {
                     let item = &value["params"]["item"];
+                    if item["type"] == "agentMessage"
+                        && item["phase"].as_str().is_none_or(|p| p == "final_answer")
+                    {
+                        final_text = item["text"].as_str().map(str::to_owned);
+                    } else {
+                        final_text = None;
+                    }
                     if matches!(item["type"].as_str(), Some("plan" | "agentMessage"))
                         && let Some(text) = item["text"].as_str()
                     {
                         let id = item["id"].as_str().unwrap_or("answer").to_owned();
+                        let text = text
+                            .get(offsets.get(&id).copied().unwrap_or(0)..)
+                            .unwrap_or("");
                         if let Some((_, old)) = text_items.iter_mut().find(|(key, _)| *key == id) {
-                            if *old != text {
-                                *old = text.into();
-                                let full = text_items
-                                    .iter()
-                                    .map(|(_, text)| text.as_str())
-                                    .collect::<Vec<_>>()
-                                    .join("\n\n");
-                                let _ = events.send(ExecutionEvent::TextSnapshot(full));
-                            }
+                            *old = text.into();
                         } else {
-                            // Completion-only messages (and the final proposed plan) must not disappear.
                             text_items.push((id, text.into()));
-                            let full = text_items
-                                .iter()
-                                .map(|(_, text)| text.as_str())
-                                .collect::<Vec<_>>()
-                                .join("\n\n");
-                            let _ = events.send(ExecutionEvent::TextSnapshot(full));
                         }
+                        // Completion is the authoritative item boundary. Publish the joined
+                        // snapshot even when the completed text equals its streamed deltas.
+                        let full = text_items
+                            .iter()
+                            .map(|(_, text)| text.as_str())
+                            .collect::<Vec<_>>()
+                            .join("\n\n");
+                        let _ = events.send(ExecutionEvent::TextSnapshot(full));
                     }
                 }
                 Some("item/reasoning/summaryTextDelta" | "item/reasoning/textDelta") => {
@@ -296,6 +389,14 @@ impl CodexAdapter {
             }
         }
 
+        if let Some(command) = pending_steer {
+            let _ = command.result.send(SteerOutcome::Uncertain(
+                "Codex finished before confirming steering. Review the conversation.".into(),
+            ));
+        }
+        while let Ok(command) = controls.try_recv() {
+            let _ = command.result.send(SteerOutcome::NotRunning);
+        }
         // The app-server exits after stdin closes. Bound shutdown in case a future version keeps
         // ancillary work alive after its turn has completed.
         drop(stdin);
@@ -327,6 +428,11 @@ impl CodexAdapter {
                 let _ = child.wait().await;
             }
         }
+        if !request.settings.plan_mode
+            && let Some(text) = final_text
+        {
+            let _ = events.send(ExecutionEvent::FinalAnswerText(text));
+        }
         if !turn_response_received {
             return Err(ExecutionError::new(
                 "Codex completed a turn without acknowledging turn/start",
@@ -344,13 +450,23 @@ impl ExecutionAdapter for CodexAdapter {
     ) -> Result<ProviderCapabilities, ExecutionError> {
         self.discover_models().await
     }
+    async fn execute_controlled(
+        &self,
+        request: ExecutionRequest,
+        events: mpsc::UnboundedSender<ExecutionEvent>,
+        responses: mpsc::UnboundedReceiver<InteractionResponse>,
+        controls: mpsc::UnboundedReceiver<SteerCommand>,
+    ) -> Result<(), ExecutionError> {
+        self.run_turn(request, events, responses, controls).await
+    }
     async fn execute_interactive(
         &self,
         request: ExecutionRequest,
         events: mpsc::UnboundedSender<ExecutionEvent>,
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
     ) -> Result<(), ExecutionError> {
-        self.run_turn(request, events, responses).await
+        let (_, controls) = mpsc::unbounded_channel();
+        self.run_turn(request, events, responses, controls).await
     }
     async fn execute(
         &self,
@@ -358,7 +474,8 @@ impl ExecutionAdapter for CodexAdapter {
         events: mpsc::UnboundedSender<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
         let (_, responses) = mpsc::unbounded_channel();
-        self.run_turn(request, events, responses).await
+        let (_, controls) = mpsc::unbounded_channel();
+        self.run_turn(request, events, responses, controls).await
     }
 }
 
@@ -460,9 +577,11 @@ async fn handle_interaction(
         | "item/fileChange/requestApproval"
         | "item/permissions/requestApproval"
         | "applyPatchApproval"
-        | "execCommandApproval" => InteractionKind::Approval {
-            detail: describe_approval(params),
-        },
+        | "execCommandApproval" => InteractionKind::Approval(crate::approvals::present(
+            method,
+            params,
+            method == "item/permissions/requestApproval",
+        )),
         _ => {
             write_message(stdin, &json!({ "id": request["id"], "error": { "code": -32601, "message": "Smaller Talk does not support this interaction" } })).await?;
             return Err(ExecutionError::new(format!(
@@ -516,31 +635,6 @@ async fn handle_interaction(
     write_message(stdin, &json!({ "id": request["id"], "result": result })).await?;
     let _ = events.send(ExecutionEvent::Activity(Activity::Working));
     Ok(())
-}
-
-fn describe_approval(params: &Value) -> String {
-    let mut lines = Vec::new();
-    for (key, label) in [
-        ("command", "Command"),
-        ("cwd", "Working folder"),
-        ("reason", "Reason"),
-        ("grantRoot", "Requested folder"),
-        ("permissions", "Requested permissions"),
-        ("networkApprovalContext", "Network access"),
-    ] {
-        if let Some(value) = params.get(key).filter(|v| !v.is_null()) {
-            let value = value
-                .as_str()
-                .map(str::to_owned)
-                .unwrap_or_else(|| serde_json::to_string_pretty(value).unwrap_or_default());
-            lines.push(format!("{label}:\n{value}"));
-        }
-    }
-    if lines.is_empty() {
-        "Allow the agent’s requested action for this turn?".into()
-    } else {
-        lines.join("\n\n")
-    }
 }
 
 pub(crate) fn parse_questions(value: &Value) -> Vec<Question> {

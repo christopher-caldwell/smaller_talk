@@ -7,8 +7,14 @@ use thiserror::Error;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+mod queue;
 mod workspace;
+pub use queue::*;
 pub use workspace::*;
+mod settings;
+pub use settings::*;
+mod repository;
+pub use repository::*;
 
 /// An adapter failure with its original diagnostic retained behind an application-owned type.
 #[derive(Debug)]
@@ -85,6 +91,15 @@ pub trait ChatWrites: Send + Sync {
 }
 
 #[async_trait]
+pub trait ChatSetupStore: Send + Sync {
+    async fn create_chat_with_preferences(
+        &self,
+        chat: NewChat,
+        preferences: Option<ChatPreferences>,
+    ) -> Result<Chat, PersistenceError>;
+}
+
+#[async_trait]
 pub trait MessageQueries: Send + Sync {
     async fn list_messages(&self, chat_id: Uuid) -> Result<Vec<Message>, PersistenceError>;
 }
@@ -127,8 +142,11 @@ impl ExecutionRequest {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionEvent {
     BindingEstablished(ExecutionBinding),
+    InputAccepted(SteerInput),
+    SteeringAvailable(bool),
     TextDelta(String),
     TextSnapshot(String),
+    FinalAnswerText(String),
     Activity(Activity),
     Interaction(Interaction),
 }
@@ -176,6 +194,25 @@ pub trait ExecutionAdapter: Send + Sync {
             "Model discovery is unavailable for this agent",
         ))
     }
+    async fn execute_controlled(
+        &self,
+        request: ExecutionRequest,
+        events: mpsc::UnboundedSender<ExecutionEvent>,
+        responses: mpsc::UnboundedReceiver<InteractionResponse>,
+        mut controls: mpsc::UnboundedReceiver<SteerCommand>,
+    ) -> Result<(), ExecutionError> {
+        let reject = tokio::spawn(async move {
+            while let Some(command) = controls.recv().await {
+                let _ = command.result.send(SteerOutcome::Rejected(
+                    "This provider does not support verified steering. The message remains queued."
+                        .into(),
+                ));
+            }
+        });
+        let result = self.execute_interactive(request, events, responses).await;
+        reject.abort();
+        result
+    }
     async fn execute_interactive(
         &self,
         request: ExecutionRequest,
@@ -193,6 +230,10 @@ pub trait ExecutionAdapter: Send + Sync {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationEvent {
+    SteeringAvailable {
+        chat_id: Uuid,
+        available: bool,
+    },
     UserMessage(Message),
     AssistantDelta {
         chat_id: Uuid,
@@ -200,6 +241,10 @@ pub enum ConversationEvent {
         delta: String,
     },
     AssistantMessage(Message),
+    FinalAnswer {
+        chat_id: Uuid,
+        answer: FinalAnswer,
+    },
     AssistantSnapshot {
         chat_id: Uuid,
         message_id: Uuid,
@@ -268,6 +313,7 @@ pub enum RenameChatError {
 pub struct ChatService {
     queries: Arc<dyn ChatQueries>,
     writes: Arc<dyn ChatWrites>,
+    setup: Option<Arc<dyn ChatSetupStore>>,
 }
 
 pub struct ConversationService {
@@ -278,6 +324,9 @@ pub struct ConversationService {
     executor: Arc<dyn ExecutionAdapter>,
     workspace: PathBuf,
     workspace_data: Option<(Arc<dyn WorkspaceQueries>, Arc<dyn WorkspaceWrites>)>,
+    steered_input_store: Option<Arc<dyn SteeredInputStore>>,
+    settings_store: Option<Arc<dyn SettingsQueries>>,
+    display_store: Option<Arc<dyn DisplayWrites>>,
     active: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
 }
 
@@ -288,6 +337,13 @@ pub struct SendTurnInput {
     pub attachments: Vec<Attachment>,
     /// Reuse the already-persisted user message after a failed attempt.
     pub retry_of: Option<Uuid>,
+}
+
+struct AbortExecution(tokio::task::AbortHandle);
+impl Drop for AbortExecution {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 struct ActiveTurnGuard {
@@ -319,6 +375,9 @@ impl ConversationService {
             executor,
             workspace,
             workspace_data: None,
+            steered_input_store: None,
+            settings_store: None,
+            display_store: None,
             active: Arc::default(),
         }
     }
@@ -329,6 +388,39 @@ impl ConversationService {
         writes: Arc<dyn WorkspaceWrites>,
     ) -> Self {
         self.workspace_data = Some((queries, writes));
+        self
+    }
+
+    pub fn with_steered_input_store(mut self, store: Arc<dyn SteeredInputStore>) -> Self {
+        self.steered_input_store = Some(store);
+        self
+    }
+
+    pub fn with_display(mut self, store: Arc<dyn DisplayWrites>) -> Self {
+        self.display_store = Some(store);
+        self
+    }
+    pub async fn check_provider_enabled(&self, chat_id: Uuid) -> Result<(), ExecutionError> {
+        if let (Some(settings), Some((queries, _))) = (&self.settings_store, &self.workspace_data) {
+            let prefs = queries
+                .preferences(chat_id)
+                .await
+                .map_err(|e| ExecutionError::with_source("Could not load chat settings", e))?;
+            let settings = settings
+                .app_settings()
+                .await
+                .map_err(|e| ExecutionError::with_source("Could not load provider settings", e))?;
+            if !settings.provider(prefs.execution.provider).enabled {
+                return Err(ExecutionError::new(
+                    "This provider is disabled. Enable it in Settings or choose another model. Queued messages are preserved.",
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn with_settings(mut self, store: Arc<dyn SettingsQueries>) -> Self {
+        self.settings_store = Some(store);
         self
     }
 
@@ -370,6 +462,31 @@ impl ConversationService {
         input: SendTurnInput,
         output: mpsc::UnboundedSender<ConversationEvent>,
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
+    ) -> Result<(), SendMessageError> {
+        let (_, controls) = mpsc::unbounded_channel();
+        self.send_turn_internal(input, None, output, responses, controls)
+            .await
+    }
+
+    pub async fn send_queued_turn(
+        &self,
+        input: SendTurnInput,
+        message_id: Uuid,
+        output: mpsc::UnboundedSender<ConversationEvent>,
+        responses: mpsc::UnboundedReceiver<InteractionResponse>,
+        controls: mpsc::UnboundedReceiver<SteerCommand>,
+    ) -> Result<(), SendMessageError> {
+        self.send_turn_internal(input, Some(message_id), output, responses, controls)
+            .await
+    }
+
+    async fn send_turn_internal(
+        &self,
+        mut input: SendTurnInput,
+        stable_id: Option<Uuid>,
+        output: mpsc::UnboundedSender<ConversationEvent>,
+        responses: mpsc::UnboundedReceiver<InteractionResponse>,
+        controls: mpsc::UnboundedReceiver<SteerCommand>,
     ) -> Result<(), SendMessageError> {
         let chat_id = input.chat_id;
         {
@@ -428,6 +545,18 @@ impl ConversationService {
                     "The working folder is not a directory",
                 )));
             }
+            if let Some(store) = &self.settings_store {
+                let settings = store
+                    .app_settings()
+                    .await
+                    .map_err(SendMessageError::Storage)?;
+                if !settings.provider(preferences.execution.provider).enabled {
+                    return Err(SendMessageError::Execution(ExecutionError::new(format!(
+                        "{} is disabled. Enable it in Settings or select another model. Queued messages are preserved.",
+                        preferences.execution.provider.label()
+                    ))));
+                }
+            }
             let caps = self
                 .executor
                 .capabilities(preferences.execution.provider)
@@ -461,6 +590,11 @@ impl ConversationService {
             .list_messages(chat_id)
             .await
             .map_err(SendMessageError::Storage)?;
+        if let Some(id) = stable_id
+            && history.iter().any(|m| m.id == id)
+        {
+            input.retry_of = Some(id);
+        }
         let binding = chat.binding.filter(|binding| {
             input.retry_of.is_none()
                 && !preferences.new_session
@@ -470,6 +604,13 @@ impl ConversationService {
                     .as_ref()
                     .is_none_or(|old| *old == workspace)
         });
+        let accepted_retry_inputs = match (input.retry_of, &self.workspace_data) {
+            (Some(original_message_id), Some((queries, _))) => queries
+                .accepted_turn_inputs(chat_id, original_message_id)
+                .await
+                .map_err(SendMessageError::Storage)?,
+            _ => Vec::new(),
+        };
         let mut attachments = input.attachments.clone();
         let prior_context = if binding.is_none() && !history.is_empty() {
             let mut context = String::from(
@@ -481,6 +622,20 @@ impl ConversationService {
                 }
                 context.push_str(&format!("\n{:?}:\n{}\n", message.role, message.body));
             }
+            if !accepted_retry_inputs.is_empty() {
+                context.push_str(&format!(
+                    "\nConfirmed user steering accepted for interrupted turn {}. Apply these instructions after the original user request, in chronological order:\n",
+                    input.retry_of.expect("accepted inputs only exist for a retry")
+                ));
+                for id in &accepted_retry_inputs {
+                    if let Some(message) = history.iter().find(|message| message.id == *id) {
+                        context.push_str(&format!(
+                            "\nAccepted steering message ID: {}\n{}\n",
+                            message.id, message.body
+                        ));
+                    }
+                }
+            }
             if let Some((queries, _)) = &self.workspace_data {
                 for (message, file) in queries
                     .message_attachments(chat_id)
@@ -491,11 +646,11 @@ impl ConversationService {
                         .retry_of
                         .and_then(|id| history.iter().position(|m| m.id == id))
                         .unwrap_or(history.len());
-                    if history
+                    let before_retry = history
                         .iter()
                         .position(|m| m.id == message)
-                        .is_some_and(|i| i < retry_start)
-                    {
+                        .is_some_and(|i| i < retry_start);
+                    if before_retry || accepted_retry_inputs.contains(&message) {
                         context.push_str(&format!(
                             "\nAttachment for message {}: {:?}, {}\n",
                             message,
@@ -522,8 +677,7 @@ impl ConversationService {
         let user_message = match input.retry_of {
             Some(id) => history
                 .iter()
-                .rfind(|m| m.role == MessageRole::User)
-                .filter(|m| m.id == id && m.body == input.prompt)
+                .find(|m| m.role == MessageRole::User && m.id == id && m.body == input.prompt)
                 .cloned()
                 .ok_or_else(|| {
                     SendMessageError::Task(
@@ -533,7 +687,7 @@ impl ConversationService {
             None => self
                 .message_writes
                 .append_message(NewMessage {
-                    id: Uuid::new_v4(),
+                    id: stable_id.unwrap_or_else(Uuid::new_v4),
                     chat_id,
                     role: MessageRole::User,
                     body: input.prompt.clone(),
@@ -578,14 +732,17 @@ impl ConversationService {
         };
         let task = tokio::spawn(async move {
             executor
-                .execute_interactive(request, events, responses)
+                .execute_controlled(request, events, responses, controls)
                 .await
         });
-        let assistant_id = Uuid::new_v4();
-        let assistant_created_at =
+        let _abort_on_exit = AbortExecution(task.abort_handle());
+        let mut assistant_id = Uuid::new_v4();
+        let mut assistant_created_at =
             Utc::now().max(user_created_at + chrono::Duration::milliseconds(1));
         let mut response = String::new();
+        let mut final_text = None;
         let mut storage_error = None;
+        let mut had_output = false;
         while let Some(event) = stream.recv().await {
             match event {
                 ExecutionEvent::BindingEstablished(binding) => {
@@ -619,7 +776,63 @@ impl ConversationService {
                         break;
                     }
                 }
+                ExecutionEvent::SteeringAvailable(available) => {
+                    let _ =
+                        output.send(ConversationEvent::SteeringAvailable { chat_id, available });
+                }
+                ExecutionEvent::InputAccepted(input) => {
+                    final_text = None;
+                    // Finish the preceding assistant segment before inserting the new user input.
+                    let assistant = (!response.is_empty()).then(|| NewMessage {
+                        id: assistant_id,
+                        chat_id,
+                        role: MessageRole::Assistant,
+                        body: response.clone(),
+                        created_at: assistant_created_at,
+                    });
+                    let user = NewMessage {
+                        id: input.id,
+                        chat_id,
+                        role: MessageRole::User,
+                        body: input.prompt,
+                        created_at: Utc::now()
+                            .max(assistant_created_at + chrono::Duration::milliseconds(1)),
+                    };
+                    let persisted = if let Some(store) = &self.steered_input_store {
+                        store
+                            .persist_steered_input(assistant, user, &input.attachments, turn.id)
+                            .await
+                    } else {
+                        async {
+                            let assistant = match assistant {
+                                Some(message) => {
+                                    Some(self.message_writes.append_message(message).await?)
+                                }
+                                None => None,
+                            };
+                            let user = self.message_writes.append_message(user).await?;
+                            Ok::<_, PersistenceError>((assistant, user))
+                        }
+                        .await
+                    };
+                    let (assistant, message) = match persisted {
+                        Ok(messages) => messages,
+                        Err(error) => {
+                            storage_error = Some(SendMessageError::Storage(error));
+                            task.abort();
+                            break;
+                        }
+                    };
+                    if let Some(assistant) = assistant {
+                        let _ = output.send(ConversationEvent::AssistantMessage(assistant));
+                    }
+                    response.clear();
+                    assistant_created_at = message.created_at + chrono::Duration::milliseconds(1);
+                    assistant_id = Uuid::new_v4();
+                    let _ = output.send(ConversationEvent::UserMessage(message));
+                }
                 ExecutionEvent::TextDelta(delta) => {
+                    had_output |= !delta.is_empty();
                     response.push_str(&delta);
                     let _ = output.send(ConversationEvent::AssistantDelta {
                         chat_id,
@@ -627,7 +840,9 @@ impl ConversationService {
                         delta,
                     });
                 }
+                ExecutionEvent::FinalAnswerText(text) => final_text = Some(text),
                 ExecutionEvent::TextSnapshot(text) => {
+                    had_output |= !text.is_empty();
                     response = text.clone();
                     let _ = output.send(ConversationEvent::AssistantSnapshot {
                         chat_id,
@@ -656,7 +871,7 @@ impl ConversationService {
                 .map_err(|e| SendMessageError::Task(e.to_string()))
                 .and_then(|r| r.map_err(SendMessageError::Execution)),
         };
-        if result.is_ok() && response.is_empty() {
+        if result.is_ok() && response.is_empty() && !had_output {
             result = Err(SendMessageError::EmptyResponse);
         }
         // Preserve partial output on provider failure; it remains part of the visible transcript.
@@ -672,7 +887,26 @@ impl ConversationService {
                 })
                 .await
                 .map_err(SendMessageError::Storage)?;
-            let _ = output.send(ConversationEvent::AssistantMessage(message));
+            if result.is_ok()
+                && !turn.settings.plan_mode
+                && let Some(text) = final_text
+                    .filter(|text| !text.trim().is_empty() && message.body.ends_with(text))
+            {
+                let answer = FinalAnswer {
+                    message_id: message.id,
+                    text,
+                };
+                if let Some(store) = &self.display_store {
+                    store
+                        .save_final_answer(&answer)
+                        .await
+                        .map_err(SendMessageError::Storage)?;
+                }
+                let _ = output.send(ConversationEvent::AssistantMessage(message));
+                let _ = output.send(ConversationEvent::FinalAnswer { chat_id, answer });
+            } else {
+                let _ = output.send(ConversationEvent::AssistantMessage(message));
+            }
         }
         turn.status = if result.is_ok() {
             "completed"
@@ -777,7 +1011,16 @@ fn validate_selection(
 
 impl ChatService {
     pub fn new(queries: Arc<dyn ChatQueries>, writes: Arc<dyn ChatWrites>) -> Self {
-        Self { queries, writes }
+        Self {
+            queries,
+            writes,
+            setup: None,
+        }
+    }
+
+    pub fn with_setup_store(mut self, setup: Arc<dyn ChatSetupStore>) -> Self {
+        self.setup = Some(setup);
+        self
     }
 
     pub async fn list_chats(&self) -> Result<Vec<Chat>, ListChatsError> {
@@ -795,6 +1038,31 @@ impl ChatService {
                 created_at: Utc::now(),
                 binding: None,
             })
+            .await
+            .map_err(CreateChatError::Storage)
+    }
+
+    pub async fn create_chat_with_defaults(
+        &self,
+        execution: Option<ExecutionSettings>,
+    ) -> Result<Chat, CreateChatError> {
+        let chat = NewChat {
+            id: Uuid::new_v4(),
+            title: "Untitled".to_owned(),
+            created_at: Utc::now(),
+            binding: None,
+        };
+        let preferences = execution.map(|execution| ChatPreferences {
+            execution,
+            ..Default::default()
+        });
+        let Some(setup) = &self.setup else {
+            return Err(CreateChatError::Storage(PersistenceError::new(
+                std::io::Error::other("atomic chat setup is unavailable"),
+            )));
+        };
+        setup
+            .create_chat_with_preferences(chat, preferences)
             .await
             .map_err(CreateChatError::Storage)
     }
@@ -862,3 +1130,6 @@ mod tests {
         assert_eq!(error.to_string(), "the agent request could not be written");
     }
 }
+
+mod rewriting;
+pub use rewriting::*;

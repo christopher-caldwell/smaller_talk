@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT f.message_id, f.text FROM final_answers f JOIN messages m ON m.id = f.message_id WHERE m.chat_id = ?\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "text",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "89da0b05b2f689d4c43fdf6586ab85836eb893cf2548add78c2544d0f3285e1a"
+}

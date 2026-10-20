@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE message_queue SET state = 'uncertain', error = 'Delivery was interrupted. Check the conversation before choosing Retry or Remove.' WHERE state IN ('dispatching','steering');\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "125d5f186f55544cd3827e5fde936e50677db795d16d85082ccac2f40195cdbe"
+}

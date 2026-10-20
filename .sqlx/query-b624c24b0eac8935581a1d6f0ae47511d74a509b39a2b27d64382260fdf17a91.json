@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT path AS \"path!: String\" FROM attachments\nUNION SELECT json_extract(payload, '$.preview_path') FROM attachments WHERE json_extract(payload, '$.preview_path') IS NOT NULL\nUNION SELECT json_extract(value, '$.path') FROM drafts, json_each(drafts.payload, '$.attachments')\nUNION SELECT json_extract(value, '$.preview_path') FROM drafts, json_each(drafts.payload, '$.attachments') WHERE json_extract(value, '$.preview_path') IS NOT NULL\nUNION SELECT json_extract(value, '$.path') FROM message_queue, json_each(message_queue.payload, '$.attachments')\nUNION SELECT json_extract(value, '$.preview_path') FROM message_queue, json_each(message_queue.payload, '$.attachments') WHERE json_extract(value, '$.preview_path') IS NOT NULL;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "path!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "b624c24b0eac8935581a1d6f0ae47511d74a509b39a2b27d64382260fdf17a91"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO queue_state (chat_id, reason) SELECT id, ? FROM chats WHERE id = ?\nON CONFLICT(chat_id) DO UPDATE SET reason = excluded.reason;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "76c4d3123699256808e78d7396e9b558a4cf8e4409542fb6bf597121d8afd876"
+}

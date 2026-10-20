@@ -3,6 +3,10 @@ use uuid::Uuid;
 
 mod workspace;
 pub use workspace::*;
+mod settings;
+pub use settings::*;
+mod repository;
+pub use repository::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chat {

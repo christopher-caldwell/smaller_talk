@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
-use smaller_talk_application::{PersistenceError, WorkspaceQueries, WorkspaceWrites};
+use smaller_talk_application::{
+    PersistenceError, SteeredInputStore, WorkspaceQueries, WorkspaceWrites,
+};
 use smaller_talk_domain::*;
 use uuid::Uuid;
 
@@ -13,6 +15,60 @@ fn encode(value: &impl serde::Serialize) -> Result<String, PersistenceError> {
 }
 fn decode<T: serde::de::DeserializeOwned>(value: &str) -> Result<T, PersistenceError> {
     serde_json::from_str(value).map_err(PersistenceError::new)
+}
+
+struct WorkspaceMessageRow {
+    id: String,
+    chat_id: String,
+    role: String,
+    body: String,
+    created_at: i64,
+}
+
+fn stored_message(row: WorkspaceMessageRow) -> Result<Message, PersistenceError> {
+    Ok(Message {
+        id: Uuid::parse_str(&row.id).map_err(PersistenceError::new)?,
+        chat_id: Uuid::parse_str(&row.chat_id).map_err(PersistenceError::new)?,
+        role: match row.role.as_str() {
+            "user" => MessageRole::User,
+            "assistant" => MessageRole::Assistant,
+            other => {
+                return Err(PersistenceError::new(std::io::Error::other(format!(
+                    "invalid stored message role: {other}"
+                ))));
+            }
+        },
+        body: row.body,
+        created_at: chrono::DateTime::from_timestamp_millis(row.created_at).ok_or_else(|| {
+            PersistenceError::new(std::io::Error::other("invalid message timestamp"))
+        })?,
+    })
+}
+
+async fn insert_transactional_message(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    message: smaller_talk_application::NewMessage,
+) -> Result<Message, PersistenceError> {
+    let id = message.id.to_string();
+    let chat_id = message.chat_id.to_string();
+    let role = match message.role {
+        MessageRole::User => "user",
+        MessageRole::Assistant => "assistant",
+    };
+    let created_at = message.created_at.timestamp_millis();
+    let row = sqlx::query_file_as!(
+        WorkspaceMessageRow,
+        "src/chats/sql/insert_message.sql",
+        id,
+        chat_id,
+        role,
+        message.body,
+        created_at
+    )
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(PersistenceError::new)?;
+    stored_message(row)
 }
 
 #[async_trait]
@@ -43,6 +99,25 @@ impl WorkspaceQueries for SqliteChatStore {
                 })
             })
             .transpose()
+    }
+    async fn accepted_turn_inputs(
+        &self,
+        chat_id: Uuid,
+        original_message_id: Uuid,
+    ) -> Result<Vec<Uuid>, PersistenceError> {
+        let chat_id = chat_id.to_string();
+        let original_message_id = original_message_id.to_string();
+        sqlx::query_file_scalar!(
+            "src/workspace/sql/accepted_turn_inputs.sql",
+            chat_id,
+            original_message_id
+        )
+        .fetch_all(self.pool())
+        .await
+        .map_err(PersistenceError::new)?
+        .into_iter()
+        .map(|id| Uuid::parse_str(&id).map_err(PersistenceError::new))
+        .collect()
     }
     async fn list_projects(&self) -> Result<Vec<Project>, PersistenceError> {
         sqlx::query_file!("src/workspace/sql/list_projects.sql")
@@ -280,6 +355,15 @@ impl WorkspaceWrites for SqliteChatStore {
         tx.commit().await.map_err(PersistenceError::new)?;
         Ok(())
     }
+    async fn save_turn_input(&self, turn: Uuid, message: Uuid) -> Result<(), PersistenceError> {
+        let turn = turn.to_string();
+        let message = message.to_string();
+        sqlx::query_file!("src/workspace/sql/turn_input.sql", turn, message)
+            .execute(self.pool())
+            .await
+            .map_err(PersistenceError::new)?;
+        Ok(())
+    }
     async fn save_turn(&self, turn: &TurnRecord) -> Result<(), PersistenceError> {
         let id = turn.id.to_string();
         let chat = turn.chat_id.to_string();
@@ -300,6 +384,46 @@ impl WorkspaceWrites for SqliteChatStore {
         .await
         .map_err(PersistenceError::new)?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl SteeredInputStore for SqliteChatStore {
+    async fn persist_steered_input(
+        &self,
+        assistant: Option<smaller_talk_application::NewMessage>,
+        user: smaller_talk_application::NewMessage,
+        attachments: &[Attachment],
+        turn: Uuid,
+    ) -> Result<(Option<Message>, Message), PersistenceError> {
+        let mut tx = self.pool().begin().await.map_err(PersistenceError::new)?;
+        let assistant = match assistant {
+            Some(message) => Some(insert_transactional_message(&mut tx, message).await?),
+            None => None,
+        };
+        let user_message = insert_transactional_message(&mut tx, user).await?;
+        let message_id = user_message.id.to_string();
+        for attachment in attachments {
+            let payload = encode(attachment)?;
+            let path = attachment.path.to_string_lossy().into_owned();
+            sqlx::query_file!(
+                "src/workspace/sql/save_attachment.sql",
+                attachment.id,
+                message_id,
+                path,
+                payload
+            )
+            .execute(&mut *tx)
+            .await
+            .map_err(PersistenceError::new)?;
+        }
+        let turn_id = turn.to_string();
+        sqlx::query_file!("src/workspace/sql/turn_input.sql", turn_id, message_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(PersistenceError::new)?;
+        tx.commit().await.map_err(PersistenceError::new)?;
+        Ok((assistant, user_message))
     }
 }
 

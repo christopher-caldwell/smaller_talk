@@ -11,6 +11,8 @@ chrono = { workspace = true, features = ["clock"] }
 gpui.workspace = true
 pulldown-cmark = "0.13"
 unicode-segmentation = "1"
+url = "2"
+serde_json.workspace = true
 smaller-talk-application = { path = "../application" }
 smaller-talk-database = { path = "../database" }
 smaller-talk-infrastructure = { path = "../infrastructure" }

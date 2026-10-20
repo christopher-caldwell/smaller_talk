@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE turns SET status = 'interrupted', error = 'The app closed before the response completed.' WHERE status = 'running';\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": []
+  },
+  "hash": "f9ee03700fba6cc08530d64f5f8de4c9eac3a37f05af2369c52f6a3218fe0d09"
+}

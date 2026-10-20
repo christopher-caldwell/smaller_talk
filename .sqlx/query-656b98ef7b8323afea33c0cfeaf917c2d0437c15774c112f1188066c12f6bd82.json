@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO drafts (chat_id, payload)\nSELECT id, ? FROM chats WHERE id = ?\nON CONFLICT(chat_id) DO UPDATE SET payload = excluded.payload;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "656b98ef7b8323afea33c0cfeaf917c2d0437c15774c112f1188066c12f6bd82"
+}

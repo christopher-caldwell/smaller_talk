@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.id, (SELECT substr(m.body, 1, 240) FROM messages m WHERE m.chat_id = c.id AND m.role = 'user' ORDER BY m.created_at, m.id LIMIT 1) AS \"preview?: String\" FROM chats c WHERE trim(c.title) = '' OR c.title = 'Untitled';\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "preview?: String",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      true
+    ]
+  },
+  "hash": "0be06f647651bd68d4c47f16430c69fed43c30d0099fe437179e5727323fb80a"
+}

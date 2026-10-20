@@ -4579,6 +4579,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "serde_json",
  "smaller-talk-domain",
  "thiserror 2.0.21",
  "tokio",
@@ -4591,6 +4592,9 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "chrono",
+ "futures-util",
+ "serde",
+ "serde_json",
  "smaller-talk-application",
  "smaller-talk-domain",
  "sqlx",
@@ -4607,6 +4611,7 @@ dependencies = [
  "chrono",
  "gpui",
  "pulldown-cmark",
+ "serde_json",
  "smaller-talk-application",
  "smaller-talk-database",
  "smaller-talk-domain",
@@ -4616,6 +4621,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "unicode-segmentation",
+ "url",
  "uuid",
 ]
 
@@ -4624,6 +4630,7 @@ name = "smaller-talk-domain"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "serde",
  "uuid",
 ]
 
@@ -4632,6 +4639,8 @@ name = "smaller-talk-infrastructure"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
+ "image",
  "serde_json",
  "smaller-talk-application",
  "smaller-talk-domain",

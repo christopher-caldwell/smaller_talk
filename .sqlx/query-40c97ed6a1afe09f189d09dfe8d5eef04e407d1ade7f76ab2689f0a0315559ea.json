@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO chat_settings (chat_id, project_id, payload) SELECT id, ?, ? FROM chats WHERE id = ? ON CONFLICT(chat_id) DO UPDATE SET project_id = excluded.project_id, payload = excluded.payload;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "40c97ed6a1afe09f189d09dfe8d5eef04e407d1ade7f76ab2689f0a0315559ea"
+}

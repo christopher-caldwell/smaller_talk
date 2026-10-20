@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT project_id, payload FROM chat_settings WHERE chat_id = ?;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "70331dbd0f8a5ce6ce241160d72ed1ccd18ad9c1efe6319503eada14cff8c20e"
+}

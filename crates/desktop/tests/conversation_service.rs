@@ -186,18 +186,19 @@ async fn streamed_transcript_and_codex_binding_survive_restart_and_stay_per_chat
         Some(ConversationEvent::AssistantMessage(message))
             if message.body == "Follow-up completed."
     ));
-    let requests = executor.requests.lock().expect("request list lock");
-    assert_eq!(requests.len(), 2);
-    assert_eq!(requests[0].binding, None);
-    assert_eq!(
-        requests[1]
-            .binding
-            .as_ref()
-            .expect("reopened chat uses its provider binding")
-            .native_session_id,
-        "native-thread-1"
-    );
-    drop(requests);
+    {
+        let requests = executor.requests.lock().expect("request list lock");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].binding, None);
+        assert_eq!(
+            requests[1]
+                .binding
+                .as_ref()
+                .expect("reopened chat uses its provider binding")
+                .native_session_id,
+            "native-thread-1"
+        );
+    }
     assert_eq!(
         reopened_chats
             .list_chats()

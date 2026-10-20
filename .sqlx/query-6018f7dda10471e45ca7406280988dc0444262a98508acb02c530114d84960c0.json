@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT a.message_id, a.payload FROM attachments a JOIN messages m ON m.id = a.message_id WHERE m.chat_id = ? ORDER BY m.created_at, a.id;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "message_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "payload",
+        "ordinal": 1,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false
+    ]
+  },
+  "hash": "6018f7dda10471e45ca7406280988dc0444262a98508acb02c530114d84960c0"
+}

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use smaller_talk_application::{
     ExecutionAdapter, ExecutionError, ExecutionEvent, ExecutionRequest,
 };
-use smaller_talk_domain::ExecutionBinding;
+use smaller_talk_domain::*;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout, Command},
@@ -30,10 +30,51 @@ impl CodexAdapter {
         }
     }
 
+    async fn discover_models(&self) -> Result<ProviderCapabilities, ExecutionError> {
+        timeout(Duration::from_secs(25), async {
+            let mut child = Command::new(&self.executable).args(["app-server", "--stdio"])
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true)
+                .spawn().map_err(|e| ExecutionError::with_source("Could not start Codex. Install/sign in to Codex or set SMALLER_TALK_CODEX_BIN.", e))?;
+            let mut stdin = child.stdin.take().ok_or_else(|| ExecutionError::new("Codex stdin is unavailable"))?;
+            let mut stdout = BufReader::new(child.stdout.take().ok_or_else(|| ExecutionError::new("Codex stdout is unavailable"))?);
+            let stderr = child.stderr.take().ok_or_else(|| ExecutionError::new("Codex stderr is unavailable"))?;
+            let diagnostic = tokio::spawn(read_stderr(stderr));
+            send_request(&mut stdin, 10, "initialize", json!({ "clientInfo": { "name": CLIENT_NAME, "title": CLIENT_TITLE, "version": CLIENT_VERSION }, "capabilities": { "experimentalApi": true } })).await?;
+            read_response(&mut stdout, &mut stdin, 10).await?;
+            send_notification(&mut stdin, "initialized", json!({})).await?;
+            let mut models = Vec::new(); let mut cursor = Value::Null;
+            loop {
+                send_request(&mut stdin, 11, "model/list", json!({ "cursor": cursor, "limit": 100 })).await?;
+                let result = read_response(&mut stdout, &mut stdin, 11).await?;
+                for model in result["data"].as_array().into_iter().flatten() {
+                    if model["hidden"].as_bool() == Some(true) { continue; }
+                    let id = model["model"].as_str().or_else(|| model["id"].as_str()).ok_or_else(|| ExecutionError::new("Codex returned a model without an identifier"))?;
+                    models.push(ModelCapability {
+                        id: id.into(), label: model["displayName"].as_str().unwrap_or(id).into(),
+                        efforts: model["supportedReasoningEfforts"].as_array().into_iter().flatten().filter_map(|e| e["reasoningEffort"].as_str().or_else(|| e.as_str()).map(str::to_owned)).collect(),
+                        default_effort: model["defaultReasoningEffort"].as_str().map(str::to_owned),
+                        images: model["inputModalities"].as_array().is_none_or(|m| m.iter().any(|m| m.as_str() == Some("image"))),
+                        is_default: model["isDefault"].as_bool().unwrap_or(false),
+                    });
+                }
+                let next = result["nextCursor"].clone();
+                if next.is_null() { break; }
+                if next == cursor { return Err(ExecutionError::new("Codex model discovery repeated a page")); }
+                cursor = next;
+            }
+            drop(stdin);
+            if timeout(Duration::from_secs(2), child.wait()).await.is_err() { let _ = child.kill().await; let _ = child.wait().await; }
+            let _ = diagnostic.await;
+            if models.is_empty() { return Err(ExecutionError::new("Codex returned no models. Check `codex login status` and your account access.")); }
+            Ok(ProviderCapabilities { provider: Provider::Codex, models })
+        }).await.map_err(|_| ExecutionError::new("Codex model discovery timed out. Check your CLI installation and sign-in."))?
+    }
+
     async fn run_turn(
         &self,
         request: ExecutionRequest,
         events: mpsc::UnboundedSender<ExecutionEvent>,
+        mut responses: mpsc::UnboundedReceiver<InteractionResponse>,
     ) -> Result<(), ExecutionError> {
         let mut command = Command::new(&self.executable);
         command
@@ -79,7 +120,7 @@ impl CodexAdapter {
                     "version": CLIENT_VERSION
                 },
                 "capabilities": {
-                    "experimentalApi": false,
+                    "experimentalApi": true,
                     "requestAttestation": false
                 }
             }),
@@ -98,7 +139,8 @@ impl CodexAdapter {
             }
             None => "thread/start",
         };
-        let mut thread_params = json!({ "cwd": request.workspace.to_string_lossy() });
+        let mut thread_params =
+            json!({ "cwd": request.workspace.to_string_lossy(), "model": request.settings.model });
         if let Some(binding) = &request.binding {
             thread_params["threadId"] = json!(binding.native_session_id);
             thread_params["excludeTurns"] = json!(true);
@@ -125,24 +167,37 @@ impl CodexAdapter {
                 )
             })?;
 
-        send_request(
-            &mut stdin,
-            3,
-            "turn/start",
-            json!({
-                "threadId": thread_id,
-                "cwd": request.workspace.to_string_lossy(),
-                "input": [{ "type": "text", "text": request.prompt, "text_elements": [] }]
-            }),
-        )
-        .await?;
+        let mut input =
+            vec![json!({ "type": "text", "text": request.full_prompt(), "text_elements": [] })];
+        for file in request.attachments.iter().filter(|a| a.is_image()) {
+            input.push(json!({ "type": "localImage", "path": file.path }));
+        }
+        let mut params = json!({
+            "threadId": thread_id, "cwd": request.workspace,
+            "input": input, "model": request.settings.model, "effort": request.settings.effort,
+        });
+        // Explicitly set both modes, so returning from Plan does not inherit Plan instructions.
+        // A collaboration preset requires a concrete model. The application resolves defaults.
+        if let Some(model) = &request.settings.model {
+            params["collaborationMode"] = json!({
+                "mode": if request.settings.plan_mode { "plan" } else { "default" },
+                "settings": { "model": model, "reasoning_effort": request.settings.effort, "developer_instructions": null }
+            });
+        } else if request.settings.plan_mode {
+            return Err(ExecutionError::new(
+                "Choose an available model before entering Plan mode",
+            ));
+        }
+        send_request(&mut stdin, 3, "turn/start", params).await?;
+        let _ = events.send(ExecutionEvent::Activity(Activity::Working));
 
+        let mut text_items: Vec<(String, String)> = Vec::new();
         let mut turn_response_received = false;
         let mut turn_completed = false;
         while !turn_completed {
             let value = read_message(&mut stdout).await?;
             if value.get("method").is_some() && value.get("id").is_some() {
-                handle_server_request(&mut stdin, &value).await?;
+                handle_interaction(&mut stdin, &value, &events, &mut responses).await?;
                 continue;
             }
             if value.get("id") == Some(&json!(3)) && value.get("error").is_some() {
@@ -154,20 +209,63 @@ impl CodexAdapter {
             }
 
             match value.get("method").and_then(Value::as_str) {
-                Some("item/agentMessage/delta") => {
+                Some("item/agentMessage/delta" | "item/plan/delta") => {
                     let params = &value["params"];
-                    if params["threadId"].as_str() == Some(thread_id.as_str()) {
-                        if let Some(delta) = params["delta"].as_str() {
-                            events
-                                .send(ExecutionEvent::TextDelta(delta.to_owned()))
-                                .map_err(|error| {
-                                    ExecutionError::with_source(
-                                        format!("conversation stopped while Codex was responding: {error}"),
-                                        error,
-                                    )
-                                })?;
+                    if params["threadId"].as_str() == Some(thread_id.as_str())
+                        && let Some(delta) = params["delta"].as_str()
+                    {
+                        let _ = events.send(ExecutionEvent::Activity(Activity::Responding));
+                        events
+                            .send(ExecutionEvent::TextDelta(delta.to_owned()))
+                            .map_err(|error| {
+                                ExecutionError::with_source(
+                                    format!(
+                                        "conversation stopped while Codex was responding: {error}"
+                                    ),
+                                    error,
+                                )
+                            })?;
+                    }
+                }
+                Some("item/completed") => {
+                    let item = &value["params"]["item"];
+                    if matches!(item["type"].as_str(), Some("plan" | "agentMessage"))
+                        && let Some(text) = item["text"].as_str()
+                    {
+                        let id = item["id"].as_str().unwrap_or("answer").to_owned();
+                        if let Some((_, old)) = text_items.iter_mut().find(|(key, _)| *key == id) {
+                            if *old != text {
+                                *old = text.into();
+                                let full = text_items
+                                    .iter()
+                                    .map(|(_, text)| text.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("\n\n");
+                                let _ = events.send(ExecutionEvent::TextSnapshot(full));
+                            }
+                        } else {
+                            // Completion-only messages (and the final proposed plan) must not disappear.
+                            text_items.push((id, text.into()));
+                            let full = text_items
+                                .iter()
+                                .map(|(_, text)| text.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n\n");
+                            let _ = events.send(ExecutionEvent::TextSnapshot(full));
                         }
                     }
+                }
+                Some("item/reasoning/summaryTextDelta" | "item/reasoning/textDelta") => {
+                    let _ = events.send(ExecutionEvent::Activity(Activity::Thinking));
+                }
+                Some("item/started") => {
+                    let activity = match value.pointer("/params/item/type").and_then(Value::as_str)
+                    {
+                        Some("reasoning") => Activity::Thinking,
+                        Some("agentMessage" | "plan") => Activity::Responding,
+                        _ => Activity::Working,
+                    };
+                    let _ = events.send(ExecutionEvent::Activity(activity));
                 }
                 Some("turn/completed") => {
                     let params = &value["params"];
@@ -240,12 +338,27 @@ impl CodexAdapter {
 
 #[async_trait]
 impl ExecutionAdapter for CodexAdapter {
+    async fn capabilities(
+        &self,
+        _provider: Provider,
+    ) -> Result<ProviderCapabilities, ExecutionError> {
+        self.discover_models().await
+    }
+    async fn execute_interactive(
+        &self,
+        request: ExecutionRequest,
+        events: mpsc::UnboundedSender<ExecutionEvent>,
+        responses: mpsc::UnboundedReceiver<InteractionResponse>,
+    ) -> Result<(), ExecutionError> {
+        self.run_turn(request, events, responses).await
+    }
     async fn execute(
         &self,
         request: ExecutionRequest,
         events: mpsc::UnboundedSender<ExecutionEvent>,
     ) -> Result<(), ExecutionError> {
-        self.run_turn(request, events).await
+        let (_, responses) = mpsc::unbounded_channel();
+        self.run_turn(request, events, responses).await
     }
 }
 
@@ -323,26 +436,144 @@ async fn handle_server_request(
     stdin: &mut ChildStdin,
     request: &Value,
 ) -> Result<(), ExecutionError> {
-    let id = request["id"].clone();
+    write_message(stdin, &json!({ "id": request["id"], "error": { "code": -32601, "message": "This interaction is unavailable before a turn starts" } })).await?;
+    Err(ExecutionError::new(format!(
+        "Unsupported Codex interaction during startup: {}",
+        request["method"]
+    )))
+}
+
+async fn handle_interaction(
+    stdin: &mut ChildStdin,
+    request: &Value,
+    events: &mpsc::UnboundedSender<ExecutionEvent>,
+    responses: &mut mpsc::UnboundedReceiver<InteractionResponse>,
+) -> Result<(), ExecutionError> {
     let method = request["method"].as_str().unwrap_or_default();
-    let result = match method {
+    let params = &request["params"];
+    let id = request["id"].to_string();
+    let kind = match method {
+        "item/tool/requestUserInput" => {
+            InteractionKind::Questions(parse_questions(&params["questions"]))
+        }
         "item/commandExecution/requestApproval"
         | "item/fileChange/requestApproval"
+        | "item/permissions/requestApproval"
         | "applyPatchApproval"
-        | "execCommandApproval" => Some(json!({ "decision": "decline" })),
-        "item/permissions/requestApproval" => Some(json!({ "permissions": {}, "scope": "turn" })),
-        "item/tool/requestUserInput" => Some(json!({ "answers": {} })),
-        _ => None,
+        | "execCommandApproval" => InteractionKind::Approval {
+            detail: describe_approval(params),
+        },
+        _ => {
+            write_message(stdin, &json!({ "id": request["id"], "error": { "code": -32601, "message": "Smaller Talk does not support this interaction" } })).await?;
+            return Err(ExecutionError::new(format!(
+                "Unsupported Codex interaction: {method}"
+            )));
+        }
     };
-    let response = if let Some(result) = result {
-        json!({ "id": id, "result": result })
+    if matches!(&kind, InteractionKind::Questions(questions) if questions.is_empty()) {
+        return Err(ExecutionError::new("Codex sent an empty question request"));
+    }
+    let _ = events.send(ExecutionEvent::Activity(Activity::Waiting));
+    events
+        .send(ExecutionEvent::Interaction(Interaction {
+            id: id.clone(),
+            title: if matches!(kind, InteractionKind::Questions(_)) {
+                "A question from Codex"
+            } else {
+                "Codex needs approval"
+            }
+            .into(),
+            kind,
+        }))
+        .map_err(|_| {
+            ExecutionError::new("The chat closed before the interaction could be shown")
+        })?;
+    let answer = loop {
+        let answer = responses.recv().await.ok_or_else(|| {
+            ExecutionError::new("The chat closed while Codex was waiting for an answer")
+        })?;
+        if answer.id == id {
+            break answer;
+        }
+    };
+    let result = match method {
+        "item/tool/requestUserInput" => {
+            let answers: serde_json::Map<String, Value> = answer
+                .answers
+                .into_iter()
+                .map(|(id, answers)| (id, json!({ "answers": answers })))
+                .collect();
+            json!({ "answers": answers })
+        }
+        "item/permissions/requestApproval" => {
+            json!({ "permissions": if answer.approved { params["permissions"].clone() } else { json!({}) }, "scope": "turn" })
+        }
+        "applyPatchApproval" | "execCommandApproval" => {
+            json!({ "decision": if answer.approved { "approved" } else { "denied" } })
+        }
+        _ => json!({ "decision": if answer.approved { "accept" } else { "decline" } }),
+    };
+    write_message(stdin, &json!({ "id": request["id"], "result": result })).await?;
+    let _ = events.send(ExecutionEvent::Activity(Activity::Working));
+    Ok(())
+}
+
+fn describe_approval(params: &Value) -> String {
+    let mut lines = Vec::new();
+    for (key, label) in [
+        ("command", "Command"),
+        ("cwd", "Working folder"),
+        ("reason", "Reason"),
+        ("grantRoot", "Requested folder"),
+        ("permissions", "Requested permissions"),
+        ("networkApprovalContext", "Network access"),
+    ] {
+        if let Some(value) = params.get(key).filter(|v| !v.is_null()) {
+            let value = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| serde_json::to_string_pretty(value).unwrap_or_default());
+            lines.push(format!("{label}:\n{value}"));
+        }
+    }
+    if lines.is_empty() {
+        "Allow the agent’s requested action for this turn?".into()
     } else {
-        json!({
-            "id": id,
-            "error": { "code": -32601, "message": "Smaller Talk does not support this Codex interaction" }
+        lines.join("\n\n")
+    }
+}
+
+pub(crate) fn parse_questions(value: &Value) -> Vec<Question> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .enumerate()
+        .map(|(index, q)| Question {
+            id: q["id"]
+                .as_str()
+                .or_else(|| q["question"].as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| index.to_string()),
+            prompt: q["question"]
+                .as_str()
+                .or_else(|| q["prompt"].as_str())
+                .unwrap_or("Your response")
+                .into(),
+            options: q["options"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|o| {
+                    o["label"]
+                        .as_str()
+                        .or_else(|| o.as_str())
+                        .map(str::to_owned)
+                })
+                .collect(),
+            multiple: q["multiSelect"].as_bool().unwrap_or(false),
         })
-    };
-    write_message(stdin, &response).await
+        .collect()
 }
 
 fn rpc_error(value: &Value) -> ExecutionError {
@@ -356,7 +587,7 @@ fn rpc_error(value: &Value) -> ExecutionError {
 
 const STDERR_LIMIT: usize = 16 * 1024;
 
-async fn read_stderr(mut stderr: impl tokio::io::AsyncRead + Unpin) -> String {
+pub(crate) async fn read_stderr(mut stderr: impl tokio::io::AsyncRead + Unpin) -> String {
     let mut retained = Vec::with_capacity(STDERR_LIMIT);
     let mut buffer = [0; 4096];
     // Keep the pipe open and drain to EOF even after the diagnostic prefix is full.
@@ -403,6 +634,9 @@ mod tests {
             binding: None,
             workspace,
             prompt: "continue".into(),
+            settings: Default::default(),
+            attachments: vec![],
+            prior_context: None,
         }
     }
 
@@ -484,6 +718,9 @@ for line in sys.stdin:
                     }),
                     workspace: directory.path().to_path_buf(),
                     prompt: "continue".into(),
+                    settings: Default::default(),
+                    attachments: vec![],
+                    prior_context: None,
                 },
                 sender,
             )
@@ -495,11 +732,17 @@ for line in sys.stdin:
             Some(ExecutionEvent::BindingEstablished(binding))
                 if binding.native_session_id == "native-thread-123"
         ));
-        assert_eq!(
-            receiver.recv().await,
-            Some(ExecutionEvent::TextDelta("streamed answer".into()))
-        );
-        assert!(receiver.recv().await.is_none());
+        let mut text = String::new();
+        let mut working = false;
+        while let Some(event) = receiver.recv().await {
+            match event {
+                ExecutionEvent::TextDelta(delta) => text.push_str(&delta),
+                ExecutionEvent::Activity(_) => working = true,
+                _ => {}
+            }
+        }
+        assert_eq!(text, "streamed answer");
+        assert!(working);
     }
 
     #[tokio::test]

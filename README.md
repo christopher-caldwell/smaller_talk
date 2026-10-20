@@ -1,8 +1,12 @@
 # Smaller Talk
 
+For the current chat workspace, upgrade instructions, and verification, see [Chat workspace](docs/chat-workspace.md). The phase reports below describe the earlier proof of concept.
+
 Smaller Talk is a macOS GPUI/Rust proof of concept for local, app-owned Codex conversations. It keeps chat identity and messages in SQLite and uses the local Codex app-server for execution. This report records the phase implementation, review corrections, verification evidence, and limits before the phase Review checkpoint.
 
 ## Local setup
+
+With [just](https://github.com/casey/just) installed, run `just` to list the available commands. Use `just db-setup` before first launch, then `just run` or `just dev` to restart the app on changes. The latter requires `cargo install cargo-watch --locked`. Use `just format`, `just lint`, `just check`, and `just test` for workspace checks, and `just build` for an optimized release in `target/release/`. `just lint` treats warnings as errors, including the existing Clippy findings documented below.
 
 The database lives at `~/Library/Application Support/SmallerTalk/chats.sqlite3`. Setup is explicit and separate from opening the app:
 

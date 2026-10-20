@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT user_message_id, status, error FROM turns WHERE chat_id = ? ORDER BY rowid DESC LIMIT 1;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "user_message_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "status",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "error",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "77faed754204d9087a4023728a98bef5ac7482c564897fd66cc8a8bc54b66f22"
+}

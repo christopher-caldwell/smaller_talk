@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO attachments (id, message_id, path, payload) VALUES (?, ?, ?, ?) ON CONFLICT(id, message_id) DO NOTHING;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "2e324fa0563bfce217c9a4a1ece330054d95d6718e6aa9b1971c769f8a6faace"
+}

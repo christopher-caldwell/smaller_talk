@@ -5,11 +5,11 @@ use std::{
 };
 
 use gpui::{FontStyle, FontWeight, HighlightStyle};
-use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use syntect::{easy::HighlightLines, highlighting::ThemeSet, parsing::SyntaxSet};
 use uuid::Uuid;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum MarkdownBlockKind {
     Paragraph,
     Heading(u8),
@@ -17,15 +17,20 @@ pub enum MarkdownBlockKind {
     ListItem,
     Quote,
     Rule,
+    Table(Vec<Alignment>),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+type HighlightedCodeLine = (String, Vec<(Range<usize>, u32)>);
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct MarkdownBlock {
     pub kind: MarkdownBlockKind,
     pub text: String,
     pub highlights: Vec<(Range<usize>, InlineStyle)>,
     pub code_highlights: Vec<(Range<usize>, u32)>,
-    pub code_lines: Vec<(String, Vec<(Range<usize>, u32)>)>,
+    pub code_lines: Vec<HighlightedCodeLine>,
+    pub links: Vec<(Range<usize>, String)>,
+    pub table_rows: Vec<Vec<MarkdownBlock>>,
 }
 
 #[derive(Default)]
@@ -46,6 +51,9 @@ impl MarkdownCache {
             return cached.blocks.clone();
         }
 
+        if self.entries.len() >= 64 && !self.entries.contains_key(&message_id) {
+            self.entries.clear();
+        }
         let blocks: Arc<[MarkdownBlock]> = Arc::from(parse_markdown(source));
         self.entries.insert(
             message_id,
@@ -72,6 +80,7 @@ pub struct InlineStyle {
     italic: bool,
     code: bool,
     link: bool,
+    strike: bool,
 }
 
 impl InlineStyle {
@@ -81,11 +90,12 @@ impl InlineStyle {
             InlineMark::Italic => self.italic = true,
             InlineMark::Code => self.code = true,
             InlineMark::Link => self.link = true,
+            InlineMark::Strike => self.strike = true,
         }
     }
 
     fn is_empty(self) -> bool {
-        !self.bold && !self.italic && !self.code && !self.link
+        !self.bold && !self.italic && !self.code && !self.link && !self.strike
     }
 }
 
@@ -95,6 +105,7 @@ enum InlineMark {
     Italic,
     Code,
     Link,
+    Strike,
 }
 
 impl From<InlineStyle> for HighlightStyle {
@@ -115,6 +126,10 @@ impl From<InlineStyle> for HighlightStyle {
                 thickness: gpui::px(1.0),
                 wavy: false,
             }),
+            strikethrough: style.strike.then_some(gpui::StrikethroughStyle {
+                color: None,
+                thickness: gpui::px(1.),
+            }),
             ..Default::default()
         }
     }
@@ -126,6 +141,8 @@ struct BlockBuilder {
     text: String,
     highlights: Vec<(Range<usize>, InlineStyle)>,
     marks: Vec<InlineMark>,
+    links: Vec<(Range<usize>, String)>,
+    open_links: Vec<(usize, String)>,
 }
 
 impl BlockBuilder {
@@ -177,6 +194,8 @@ impl BlockBuilder {
                 highlights: std::mem::take(&mut self.highlights),
                 code_highlights: Vec::new(),
                 code_lines: Vec::new(),
+                links: std::mem::take(&mut self.links),
+                table_rows: Vec::new(),
             });
             self.marks.clear();
         }
@@ -187,7 +206,13 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
     let mut blocks = Vec::new();
     let mut current = BlockBuilder::default();
 
-    for event in Parser::new(source) {
+    let mut list_numbers: Vec<Option<u64>> = Vec::new();
+    let mut table_alignments = Vec::new();
+    let mut table_rows = Vec::new();
+    let mut row = Vec::new();
+    let options =
+        Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
+    for event in Parser::new_ext(source, options) {
         match event {
             Event::Start(Tag::Paragraph) => current.begin(MarkdownBlockKind::Paragraph),
             Event::End(TagEnd::Paragraph) => current.finish(&mut blocks),
@@ -203,11 +228,64 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
                 current.begin(MarkdownBlockKind::Code(language));
             }
             Event::End(TagEnd::CodeBlock) => current.finish(&mut blocks),
+            Event::Start(Tag::List(start)) => {
+                current.finish(&mut blocks);
+                list_numbers.push(start);
+            }
+            Event::End(TagEnd::List(_)) => {
+                current.finish(&mut blocks);
+                list_numbers.pop();
+            }
             Event::Start(Tag::Item) => {
+                current.finish(&mut blocks);
                 current.begin(MarkdownBlockKind::ListItem);
-                if current.text.is_empty() {
-                    current.append("•  ");
+                current.append(&"  ".repeat(list_numbers.len().saturating_sub(1)));
+                match list_numbers.last_mut() {
+                    Some(Some(number)) => {
+                        current.append(&format!("{}.  ", *number));
+                        *number += 1;
+                    }
+                    _ => current.append("•  "),
                 }
+            }
+            Event::Start(Tag::Table(alignments)) => {
+                current.finish(&mut blocks);
+                table_alignments = alignments;
+                table_rows.clear();
+                row.clear();
+            }
+            Event::Start(Tag::TableHead | Tag::TableRow) => row.clear(),
+            Event::End(TagEnd::TableHead | TagEnd::TableRow) => {
+                table_rows.push(std::mem::take(&mut row))
+            }
+            Event::Start(Tag::TableCell) => current.begin(MarkdownBlockKind::Paragraph),
+            Event::End(TagEnd::TableCell) => {
+                // Empty cells must retain their column position.
+                if current.text.is_empty() {
+                    current.append(" ");
+                }
+                current.finish(&mut row);
+            }
+            Event::End(TagEnd::Table) => {
+                let text = table_rows
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .map(|c| c.text.as_str())
+                            .collect::<Vec<_>>()
+                            .join(" | ")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                blocks.push(MarkdownBlock {
+                    kind: MarkdownBlockKind::Table(std::mem::take(&mut table_alignments)),
+                    text,
+                    highlights: vec![],
+                    code_highlights: vec![],
+                    code_lines: vec![],
+                    links: vec![],
+                    table_rows: std::mem::take(&mut table_rows),
+                });
             }
             Event::End(TagEnd::Item) => current.finish(&mut blocks),
             Event::Start(Tag::BlockQuote(_)) => current.begin(MarkdownBlockKind::Quote),
@@ -218,8 +296,22 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
             Event::End(TagEnd::Emphasis) => {
                 remove_last_mark(&mut current.marks, InlineMark::Italic);
             }
-            Event::Start(Tag::Link { .. }) => current.marks.push(InlineMark::Link),
-            Event::End(TagEnd::Link) => remove_last_mark(&mut current.marks, InlineMark::Link),
+            Event::Start(Tag::Strikethrough) => current.marks.push(InlineMark::Strike),
+            Event::End(TagEnd::Strikethrough) => {
+                remove_last_mark(&mut current.marks, InlineMark::Strike)
+            }
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                current.marks.push(InlineMark::Link);
+                current
+                    .open_links
+                    .push((current.text.len(), dest_url.into_string()));
+            }
+            Event::End(TagEnd::Link) => {
+                remove_last_mark(&mut current.marks, InlineMark::Link);
+                if let Some((start, url)) = current.open_links.pop() {
+                    current.links.push((start..current.text.len(), url));
+                }
+            }
             Event::Text(text) | Event::Html(text) | Event::InlineHtml(text) => {
                 current.append(&text);
             }
@@ -523,5 +615,44 @@ mod tests {
         assert!(updated_weak.upgrade().is_none());
         let reloaded = cache.get_or_parse(first_id, "```rust\nfn main() {}\n```");
         assert_eq!(reloaded[0].text, "fn main() {}\n");
+    }
+}
+
+#[cfg(test)]
+mod workspace_markdown_tests {
+    use super::*;
+    #[test]
+    fn tables_preserve_empty_cells_alignment_and_inline_styles() {
+        let blocks = parse_markdown(
+            "| Precon | Why | Empty |\n|:--|--:|---|\n| **Explorers** | [Details](https://example.com) | |\n",
+        );
+        let table = &blocks[0];
+        assert!(
+            matches!(&table.kind, MarkdownBlockKind::Table(a) if a[0] == Alignment::Left && a[1] == Alignment::Right)
+        );
+        assert_eq!(table.table_rows.len(), 2);
+        assert_eq!(table.table_rows[1].len(), 3);
+        assert!(table.table_rows[1][0].highlights[0].1.bold);
+        assert_eq!(table.table_rows[1][1].links[0].1, "https://example.com");
+    }
+    #[test]
+    fn streamed_tables_and_nested_unicode_formatting_never_drop_text_or_invalidate_ranges() {
+        let source = "| A | B |\n|---|---|\n| **é🙂** | ~~old~~ |\n\n1. First\n   - [x] Nested\n\n<a>inert</a>";
+        for end in (0..=source.len()).filter(|i| source.is_char_boundary(*i)) {
+            for block in parse_markdown(&source[..end]) {
+                for cell in std::iter::once(&block).chain(block.table_rows.iter().flatten()) {
+                    for (range, _) in &cell.highlights {
+                        assert!(cell.text.get(range.clone()).is_some());
+                    }
+                    for (range, _) in &cell.links {
+                        assert!(cell.text.get(range.clone()).is_some());
+                    }
+                }
+            }
+        }
+        let blocks = parse_markdown(source);
+        assert!(blocks.iter().any(|b| b.text.contains("1.  First")));
+        assert!(blocks.iter().any(|b| b.text.contains("☑ Nested")));
+        assert!(blocks.iter().any(|b| b.text.contains("<a>")));
     }
 }

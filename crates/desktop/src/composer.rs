@@ -42,6 +42,9 @@ actions!(
     ]
 );
 
+pub struct Changed;
+impl EventEmitter<Changed> for Composer {}
+
 pub struct Submitted;
 impl EventEmitter<Submitted> for Composer {}
 pub struct Canceled;
@@ -68,6 +71,9 @@ pub struct Composer {
     last_bounds: Option<Bounds<Pixels>>,
     is_selecting: bool,
     single_line: bool,
+    max_rows: usize,
+    content_height: Pixels,
+    reveal_cursor: bool,
 }
 
 impl Composer {
@@ -91,6 +97,9 @@ impl Composer {
             last_bounds: None,
             is_selecting: false,
             single_line,
+            max_rows: 7,
+            content_height: px(24.),
+            reveal_cursor: true,
             undo: Vec::new(),
             redo: Vec::new(),
             scroll: point(px(0.), px(0.)),
@@ -98,13 +107,55 @@ impl Composer {
     }
 
     pub fn set_content(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.reveal_cursor = true;
         self.content = content.into();
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
         self.marked_range = None;
         self.last_layout.clear();
         self.focus_handle.focus(window);
+        cx.emit(Changed);
         cx.notify();
+    }
+
+    pub fn draft(
+        &self,
+        attachments: Vec<smaller_talk_domain::Attachment>,
+    ) -> smaller_talk_domain::Draft {
+        smaller_talk_domain::Draft {
+            text: self.content.to_string(),
+            attachments,
+            selection_start: self.selected_range.start,
+            selection_end: self.selected_range.end,
+        }
+    }
+    pub fn load_draft(&mut self, draft: &smaller_talk_domain::Draft, cx: &mut Context<Self>) {
+        self.reveal_cursor = true;
+        self.scroll = point(px(0.), px(0.));
+        self.content = draft.text.clone().into();
+        let boundary = |mut n: usize| {
+            n = n.min(self.content.len());
+            while !self.content.is_char_boundary(n) {
+                n -= 1;
+            }
+            n
+        };
+        self.selected_range = boundary(draft.selection_start)
+            ..boundary(draft.selection_end).max(boundary(draft.selection_start));
+        self.marked_range = None;
+        self.undo.clear();
+        self.redo.clear();
+        self.last_layout.clear();
+        cx.notify();
+    }
+    pub fn set_max_rows(&mut self, rows: usize, cx: &mut Context<Self>) {
+        if self.max_rows != rows {
+            self.max_rows = rows;
+            cx.notify();
+        }
+    }
+    pub fn set_placeholder(&mut self, text: &str) {
+        self.placeholder = text.to_owned().into();
     }
 
     pub fn content(&self) -> String {
@@ -120,6 +171,7 @@ impl Composer {
     }
 
     fn remember_edit(&mut self) {
+        self.reveal_cursor = true;
         // Small, local history for the prompt field, including selection state.
         if self.undo.len() == 100 {
             self.undo.remove(0);
@@ -129,10 +181,12 @@ impl Composer {
     }
 
     fn restore(&mut self, edit: EditSnapshot, cx: &mut Context<Self>) {
+        self.reveal_cursor = true;
         self.content = edit.content;
         self.selected_range = edit.range;
         self.selection_reversed = edit.reversed;
         self.marked_range = None;
+        cx.emit(Changed);
         cx.notify();
     }
 
@@ -157,9 +211,7 @@ impl Composer {
     }
 
     fn cancel(&mut self, _: &Cancel, _: &mut Window, cx: &mut Context<Self>) {
-        if self.single_line {
-            cx.emit(Canceled);
-        }
+        cx.emit(Canceled);
     }
 
     fn newline(&mut self, _: &Newline, window: &mut Window, cx: &mut Context<Self>) {
@@ -170,6 +222,26 @@ impl Composer {
 
     fn vertical(&mut self, down: bool, select: bool, cx: &mut Context<Self>) {
         let cursor = self.cursor_offset();
+        if let Some((start, line, origin)) = self
+            .last_layout
+            .iter()
+            .rev()
+            .find(|(start, _, _)| *start <= cursor)
+            && let Some(position) = line.position_for_index(cursor.saturating_sub(*start), px(24.))
+        {
+            let target = *origin
+                + point(
+                    position.x,
+                    position.y + if down { px(25.) } else { px(-1.) },
+                );
+            let offset = self.index_for_mouse_position(target);
+            if select {
+                self.select_to(offset, cx);
+            } else {
+                self.move_to(offset, cx);
+            }
+            return;
+        }
         let start = self.content[..cursor].rfind('\n').map_or(0, |i| i + 1);
         let column = self.content[start..cursor].graphemes(true).count();
         let target = if down {
@@ -322,6 +394,7 @@ impl Composer {
     }
 
     fn move_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.reveal_cursor = true;
         self.selected_range = offset..offset;
         self.selection_reversed = false;
         cx.notify()
@@ -359,6 +432,7 @@ impl Composer {
     }
 
     fn select_to(&mut self, offset: usize, cx: &mut Context<Self>) {
+        self.reveal_cursor = true;
         if self.selection_reversed {
             self.selected_range.start = offset
         } else {
@@ -425,6 +499,7 @@ impl Composer {
     }
 
     pub fn reset(&mut self, cx: &mut Context<Self>) {
+        self.reveal_cursor = true;
         self.content = "".into();
         self.selected_range = 0..0;
         self.selection_reversed = false;
@@ -433,6 +508,7 @@ impl Composer {
         self.undo.clear();
         self.redo.clear();
         self.scroll = point(px(0.), px(0.));
+        cx.emit(Changed);
         cx.notify();
         self.last_bounds = None;
         self.is_selecting = false;
@@ -493,7 +569,7 @@ impl EntityInputHandler for Composer {
 
         let single_line_text;
         let new_text = if self.single_line {
-            single_line_text = new_text.replace('\n', "").replace('\r', "");
+            single_line_text = new_text.replace(['\n', '\r'], "");
             single_line_text.as_str()
         } else {
             new_text
@@ -507,6 +583,7 @@ impl EntityInputHandler for Composer {
                 .into();
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
+        cx.emit(Changed);
         cx.notify();
     }
 
@@ -555,6 +632,7 @@ impl EntityInputHandler for Composer {
             })
             .unwrap_or_else(|| range.start + new_text.len()..range.start + new_text.len());
 
+        cx.emit(Changed);
         cx.notify();
     }
 
@@ -602,6 +680,7 @@ struct PrepaintState {
     lines: Vec<(usize, WrappedLine, Point<Pixels>)>,
     cursor: Option<PaintQuad>,
     selections: Vec<PaintQuad>,
+    scrollbar: Option<PaintQuad>,
 }
 
 impl IntoElement for TextElement {
@@ -639,30 +718,45 @@ impl Element for TextElement {
         } else {
             input.content.clone()
         };
+        let single_line = input.single_line;
+        let max_rows = input.max_rows;
         let text_style = window.text_style();
-        let run = TextRun {
-            len: text.len(),
-            font: text_style.font(),
-            color: text_style.color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
         let font_size = text_style.font_size.to_pixels(window.rem_size());
-        let available_width = (window.bounds().size.width - px(368.)).max(px(120.));
-        let visual_lines = window
-            .text_system()
-            .shape_text(text, font_size, &[run], Some(available_width), None)
-            .map(|lines| {
-                lines
-                    .iter()
-                    .map(|line| line.wrap_boundaries().len() + 1)
-                    .sum::<usize>()
-            })
-            .unwrap_or(1)
-            .max(1);
-        style.size.height = px((visual_lines.min(7) as f32 * 24.0).max(24.0)).into();
-        (window.request_layout(style, [], cx), ())
+        let layout = window.request_measured_layout(style, move |known, available, window, _| {
+            let width = known
+                .width
+                .or(match available.width {
+                    gpui::AvailableSpace::Definite(w) => Some(w),
+                    _ => None,
+                })
+                .unwrap_or(px(400.))
+                .max(px(1.));
+            let rows: usize = text
+                .split('\n')
+                .map(|line| {
+                    let run = text_style.to_run(line.len());
+                    window
+                        .text_system()
+                        .shape_text(line.to_owned().into(), font_size, &[run], Some(width), None)
+                        .map(|lines| {
+                            lines
+                                .iter()
+                                .map(|l| l.wrap_boundaries().len() + 1)
+                                .sum::<usize>()
+                        })
+                        .unwrap_or(1)
+                })
+                .sum();
+            size(
+                width,
+                px(if single_line {
+                    24.
+                } else {
+                    rows.clamp(1, max_rows) as f32 * 24.
+                }),
+            )
+        });
+        (layout, ())
     }
 
     fn prepaint(
@@ -683,6 +777,7 @@ impl Element for TextElement {
         };
         let mut lines: Vec<(usize, WrappedLine, Point<Pixels>)> = Vec::new();
         let mut start = 0;
+        let mut visual_rows = 0;
         let font_size = style.font_size.to_pixels(window.rem_size());
         for text in text.split('\n') {
             let run = TextRun {
@@ -703,21 +798,19 @@ impl Element for TextElement {
                     text.to_owned().into(),
                     font_size,
                     &[run],
-                    Some(bounds.size.width),
+                    (!input.single_line).then_some(bounds.size.width),
                     None,
                 )
                 .ok()
                 .and_then(|mut lines| lines.pop())
                 .unwrap_or_default();
-            let row = lines
-                .iter()
-                .map(|(_, line, _)| line.wrap_boundaries().len() + 1)
-                .sum::<usize>();
+            let row_count = line.wrap_boundaries().len() + 1;
             lines.push((
                 start,
                 line,
-                point(bounds.left(), bounds.top() + px(24.) * row as f32),
+                point(bounds.left(), bounds.top() + px(24.) * visual_rows as f32),
             ));
+            visual_rows += row_count;
             start += text.len() + 1;
         }
         let cursor = input.cursor_offset();
@@ -730,13 +823,38 @@ impl Element for TextElement {
             .position_for_index(cursor.saturating_sub(lines[line_index].0), px(24.))
             .unwrap_or_default();
         let cursor_y = lines[line_index].2.y - bounds.top() + cursor_position.y;
+        let content_height = px(lines
+            .iter()
+            .map(|(_, line, _)| line.wrap_boundaries().len() + 1)
+            .sum::<usize>() as f32
+            * 24.);
         let mut scroll = input.scroll;
-        scroll.x = px(0.);
-        if cursor_y < scroll.y {
-            scroll.y = cursor_y;
-        }
-        if cursor_y + px(24.) > scroll.y + bounds.size.height {
-            scroll.y = cursor_y + px(24.) - bounds.size.height;
+        let resized = input
+            .last_bounds
+            .is_none_or(|previous| previous.size != bounds.size);
+        if input.single_line {
+            scroll.y = px(0.);
+            if input.reveal_cursor || resized {
+                if cursor_position.x < scroll.x {
+                    scroll.x = cursor_position.x;
+                }
+                if cursor_position.x + px(2.) > scroll.x + bounds.size.width {
+                    scroll.x = cursor_position.x + px(2.) - bounds.size.width;
+                }
+            }
+        } else {
+            scroll.x = px(0.);
+            if input.reveal_cursor || resized {
+                if cursor_y < scroll.y {
+                    scroll.y = cursor_y;
+                }
+                if cursor_y + px(24.) > scroll.y + bounds.size.height {
+                    scroll.y = cursor_y + px(24.) - bounds.size.height;
+                }
+            }
+            scroll.y = scroll
+                .y
+                .clamp(px(0.), (content_height - bounds.size.height).max(px(0.)));
         }
         let mut selections = Vec::new();
         for (start, line, origin) in &mut lines {
@@ -754,7 +872,14 @@ impl Element for TextElement {
                     selections.push(fill(
                         Bounds::new(
                             point(origin.x + left.x, origin.y + left.y),
-                            size((right.x - left.x).max(px(2.)), px(24.)),
+                            size(
+                                if right.y > left.y {
+                                    (bounds.size.width - left.x).max(px(2.))
+                                } else {
+                                    (right.x - left.x).max(px(2.))
+                                },
+                                px(24.),
+                            ),
                         ),
                         rgba(0x84d7c155),
                     ));
@@ -773,11 +898,31 @@ impl Element for TextElement {
                 rgb(super::ACCENT),
             )
         });
-        self.input.update(cx, |input, _| input.scroll = scroll);
+        let scrollbar = (!input.single_line && content_height > bounds.size.height).then(|| {
+            let height = (bounds.size.height
+                * (f32::from(bounds.size.height) / f32::from(content_height)))
+            .max(px(12.));
+            let travel = bounds.size.height - height;
+            let offset =
+                travel * (f32::from(scroll.y) / f32::from(content_height - bounds.size.height));
+            fill(
+                Bounds::new(
+                    point(bounds.right() - px(3.), bounds.top() + offset),
+                    size(px(2.), height),
+                ),
+                rgba(0x959ca780),
+            )
+        });
+        self.input.update(cx, |input, _| {
+            input.scroll = scroll;
+            input.content_height = content_height;
+            input.reveal_cursor = false;
+        });
         PrepaintState {
             lines,
             cursor,
             selections,
+            scrollbar,
         }
     }
 
@@ -802,6 +947,10 @@ impl Element for TextElement {
                 window.paint_quad(selection);
             }
             for (_, line, origin) in &prepaint.lines {
+                let height = px(24.) * (line.wrap_boundaries().len() + 1) as f32;
+                if origin.y >= bounds.bottom() || origin.y + height <= bounds.top() {
+                    continue;
+                }
                 line.paint(
                     *origin,
                     px(24.),
@@ -812,10 +961,13 @@ impl Element for TextElement {
                 )
                 .expect("composer text paint");
             }
-            if focus_handle.is_focused(window) {
-                if let Some(cursor) = prepaint.cursor.take() {
-                    window.paint_quad(cursor);
-                }
+            if let Some(scrollbar) = prepaint.scrollbar.take() {
+                window.paint_quad(scrollbar);
+            }
+            if focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
             }
         });
         self.input.update(cx, |input, _| {
@@ -830,8 +982,27 @@ impl Render for Composer {
         div()
             .flex()
             .key_context("Composer")
+            .tab_index(0)
+            .focus(|s| s.bg(rgb(crate::theme::COMPOSER)))
             .track_focus(&self.focus_handle(cx))
             .cursor(CursorStyle::IBeam)
+            .capture_key_down(
+                cx.listener(|this, _: &gpui::KeyDownEvent, _, _| this.reveal_cursor = true),
+            )
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _, cx| {
+                if !this.single_line
+                    && let Some(bounds) = this.last_bounds
+                {
+                    let max = (this.content_height - bounds.size.height).max(px(0.));
+                    if max > px(0.) {
+                        this.scroll.y =
+                            (this.scroll.y - event.delta.pixel_delta(px(24.)).y).clamp(px(0.), max);
+                        this.reveal_cursor = false;
+                        cx.stop_propagation();
+                        cx.notify();
+                    }
+                }
+            }))
             .on_action(cx.listener(Self::backspace))
             .on_action(cx.listener(Self::delete))
             .on_action(cx.listener(Self::left))

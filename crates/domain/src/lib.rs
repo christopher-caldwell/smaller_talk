@@ -1,6 +1,9 @@
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+mod workspace;
+pub use workspace::*;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chat {
     pub id: Uuid,

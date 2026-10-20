@@ -1,0 +1,44 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT c.id AS chat_id, c.title, p.name AS project, m.id AS message_id, m.body\nFROM chats c\nLEFT JOIN chat_settings s ON s.chat_id = c.id\nLEFT JOIN projects p ON p.id = s.project_id\nLEFT JOIN messages m ON m.chat_id = c.id\nORDER BY c.created_at DESC, c.id, m.created_at DESC, m.id;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "chat_id",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "title",
+        "ordinal": 1,
+        "type_info": "Text"
+      },
+      {
+        "name": "project",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "message_id",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "body",
+        "ordinal": 4,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      false,
+      false,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c546c18023860a8b9943b4884e5f201f3456e0c5f90271a1901ce031236b74d6"
+}

@@ -1,0 +1,1 @@
+SELECT c.id, (SELECT substr(m.body, 1, 240) FROM messages m WHERE m.chat_id = c.id AND m.role = 'user' ORDER BY m.created_at, m.id LIMIT 1) AS "preview?: String" FROM chats c WHERE trim(c.title) = '' OR c.title = 'Untitled';

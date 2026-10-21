@@ -1,7 +1,7 @@
 use std::{error::Error, fmt, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, SubsecRound, Utc};
 use smaller_talk_domain::*;
 use thiserror::Error;
 use tokio::sync::mpsc;
@@ -97,6 +97,20 @@ pub trait ChatSetupStore: Send + Sync {
         chat: NewChat,
         preferences: Option<ChatPreferences>,
     ) -> Result<Chat, PersistenceError>;
+    /// Persist a conversation, its selected settings, and its first queued input atomically.
+    async fn start_chat(
+        &self,
+        chat: NewChat,
+        preferences: ChatPreferences,
+        first_message: QueuedMessage,
+    ) -> Result<(), PersistenceError>;
+}
+
+#[derive(Clone, Debug)]
+pub struct StartChatInput {
+    pub chat_id: Uuid,
+    pub preferences: ChatPreferences,
+    pub draft: Draft,
 }
 
 #[async_trait]
@@ -290,6 +304,16 @@ pub enum ListChatsError {
 pub enum CreateChatError {
     #[error("chat storage failed: {0}")]
     Storage(#[source] PersistenceError),
+}
+
+#[derive(Debug, Error)]
+pub enum StartChatError {
+    #[error("Add a message or attachment first")]
+    EmptyMessage,
+    #[error("chat storage failed: {0}")]
+    Storage(#[source] PersistenceError),
+    #[error("Starting a conversation is unavailable")]
+    Unavailable,
 }
 
 #[derive(Debug, Error)]
@@ -1065,6 +1089,54 @@ impl ChatService {
             .create_chat_with_preferences(chat, preferences)
             .await
             .map_err(CreateChatError::Storage)
+    }
+
+    pub async fn start_chat(&self, input: StartChatInput) -> Result<Chat, StartChatError> {
+        if input.draft.text.trim().is_empty() && input.draft.attachments.is_empty() {
+            return Err(StartChatError::EmptyMessage);
+        }
+        let setup = self.setup.as_ref().ok_or(StartChatError::Unavailable)?;
+        let title: String = if input.draft.text.trim().is_empty() {
+            format!("Attachment: {}", input.draft.attachments[0].name)
+        } else {
+            input
+                .draft
+                .text
+                .split_whitespace()
+                .take(80)
+                .collect::<Vec<_>>()
+                .join(" ")
+        }
+        .chars()
+        .take(80)
+        .collect();
+        let created_at = Utc::now().trunc_subsecs(3);
+        let chat = NewChat {
+            id: input.chat_id,
+            title: title.clone(),
+            created_at,
+            binding: None,
+        };
+        setup
+            .start_chat(
+                chat,
+                input.preferences,
+                QueuedMessage {
+                    id: Uuid::new_v4(),
+                    chat_id: input.chat_id,
+                    draft: input.draft,
+                    state: "pending".into(),
+                    error: None,
+                },
+            )
+            .await
+            .map_err(StartChatError::Storage)?;
+        Ok(Chat {
+            id: input.chat_id,
+            title,
+            created_at,
+            binding: None,
+        })
     }
 
     pub async fn delete_chat(&self, id: Uuid) -> Result<(), DeleteChatError> {

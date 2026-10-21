@@ -23,7 +23,7 @@ impl ChatsView {
             .gap_1()
             .on_click(|_, _, cx| cx.stop_propagation());
         match *popup {
-            Popup::Models | Popup::Effort => {
+            Popup::Models | Popup::Effort | Popup::Settings(_) => {
                 if matches!(popup, Popup::Models) {
                     content = content.child(
                         row()
@@ -35,17 +35,19 @@ impl ChatsView {
                                     .min_w(px(0.))
                                     .child(self.model_search.clone()),
                             )
-                            .child(button("clear-model-search", "×").on_click(cx.listener(
-                                |this, _, window, cx| {
-                                    this.model_search.update(cx, |e, cx| {
-                                        e.set_content(String::new(), window, cx)
-                                    });
-                                    this.model_query.clear();
-                                    this.popup_index = 0;
-                                    this.model_search.focus_handle(cx).focus(window);
-                                    cx.notify();
-                                },
-                            ))),
+                            .child(
+                                icon_button("clear-model-search", "close")
+                                    .size(px(22.))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.model_search.update(cx, |e, cx| {
+                                            e.set_content(String::new(), window, cx)
+                                        });
+                                        this.model_query.clear();
+                                        this.popup_index = 0;
+                                        this.model_search.focus_handle(cx).focus(window);
+                                        cx.notify();
+                                    })),
+                            ),
                     );
                 }
                 let choices = self.picker_choices();
@@ -62,27 +64,32 @@ impl ChatsView {
                 for (index, choice) in choices.into_iter().enumerate() {
                     let action = choice.action;
                     items = items.child(
-                        button(
-                            element_id("picker-choice", index),
-                            format!(
-                                "{}{}",
-                                if choice.selected { "✓  " } else { "    " },
-                                choice.label
-                            ),
-                        )
-                        .w_full()
-                        .py_1()
-                        .bg(rgb(if index == self.popup_index {
-                            PANEL_HOVER
-                        } else {
-                            MENU
-                        }))
-                        .on_click(cx.listener(
-                            move |this, _, window, cx| {
+                        compact_button(element_id("picker-choice", index), "")
+                            .w_full()
+                            .py_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().w(px(12.)).flex_shrink_0().child(if choice.selected {
+                                "✓"
+                            } else {
+                                ""
+                            }))
+                            .child(div().flex_1().min_w(px(0.)).truncate().child(choice.label))
+                            .bg(rgb(if index == self.popup_index {
+                                PANEL_HOVER
+                            } else {
+                                MENU
+                            }))
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 this.choose_picker(action.clone(), window, cx)
-                            },
-                        )),
+                            })),
                     );
+                }
+                if no_choices && matches!(popup, Popup::Settings(_)) {
+                    items = items.child(div().p_2().child(muted(
+                        "No available models. Check provider status and model visibility.",
+                    )));
                 }
                 if matches!(popup, Popup::Models) {
                     if no_choices {
@@ -116,17 +123,22 @@ impl ChatsView {
                     }
                 }
                 content = content
-                    .child(div().px_3().py_1().text_xs().text_color(rgb(MUTED)).child(
-                        if matches!(popup, Popup::Models) {
-                            "Select model"
-                        } else {
-                            "Reasoning effort"
-                        },
-                    ))
+                    .child(
+                        div()
+                            .px_2()
+                            .py_1()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(match popup {
+                                Popup::Models => "Select model",
+                                Popup::Settings(picker) => picker.title(),
+                                _ => "Reasoning effort",
+                            }),
+                    )
                     .child(items);
                 if matches!(popup, Popup::Models) {
                     content = content.child(
-                        button("manage-models", "Manage models…")
+                        compact_button("manage-models", "Manage models…")
                             .text_xs()
                             .on_click(
                                 cx.listener(|this, _, window, cx| this.open_settings(window, cx)),
@@ -374,7 +386,7 @@ impl ChatsView {
                     );
             }
         }
-        let anchored = matches!(popup, Popup::Models | Popup::Effort);
+        let anchored = matches!(popup, Popup::Models | Popup::Effort | Popup::Settings(_));
         let context_menu = matches!(
             popup,
             Popup::Chat(_) | Popup::Assign(_) | Popup::ProjectMenu(_)
@@ -392,7 +404,33 @@ impl ChatsView {
             .inset_0()
             .occlude()
             .on_click(cx.listener(|this, _, window, cx| this.dismiss_popup(window, cx)));
-        if anchored {
+        if let Popup::Settings(picker) = popup {
+            let viewport = window.viewport_size();
+            let bounds = self
+                .picker_bounds
+                .get(picker.anchor())
+                .copied()
+                .unwrap_or_default();
+            let width = px(300.).min(viewport.width - px(24.));
+            let left = (bounds.right() - width)
+                .max(px(12.))
+                .min(viewport.width - width - px(12.));
+            let below = viewport.height - bounds.bottom() - px(12.);
+            let above = bounds.top() - px(12.);
+            let upward = below < px(220.) && above > below;
+            content = content
+                .w(width)
+                .max_h(if upward { above } else { below }.min(px(320.)))
+                .p_1()
+                .rounded_lg();
+            let mut anchor = div().absolute().left(left).track_focus(&self.popup_focus);
+            anchor = if upward {
+                anchor.bottom(viewport.height - bounds.top() + px(4.))
+            } else {
+                anchor.top(bounds.bottom() + px(4.))
+            };
+            backdrop = backdrop.child(anchor.child(content));
+        } else if anchored {
             let key = if matches!(popup, Popup::Models) {
                 "model-picker"
             } else {

@@ -218,6 +218,39 @@ impl ChatWrites for SqliteChatStore {
 
 #[async_trait::async_trait]
 impl ChatSetupStore for SqliteChatStore {
+    async fn start_chat(
+        &self,
+        chat: NewChat,
+        preferences: smaller_talk_domain::ChatPreferences,
+        first_message: smaller_talk_domain::QueuedMessage,
+    ) -> Result<(), PersistenceError> {
+        let mut tx = self.pool.begin().await.map_err(PersistenceError::new)?;
+        let id = chat.id.to_string();
+        let created_at = chat.created_at.timestamp_millis();
+        sqlx::query_file!("src/chats/sql/start_chat.sql", id, chat.title, created_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(PersistenceError::new)?;
+        let preferences_payload =
+            serde_json::to_string(&preferences).map_err(PersistenceError::new)?;
+        sqlx::query_file!(
+            "src/workspace/sql/save_preferences.sql",
+            preferences.project_id,
+            preferences_payload,
+            id
+        )
+        .execute(&mut *tx)
+        .await
+        .map_err(PersistenceError::new)?;
+        let entry_id = first_message.id.to_string();
+        let payload = serde_json::to_string(&first_message.draft).map_err(PersistenceError::new)?;
+        sqlx::query_file!("src/queue/sql/enqueue.sql", entry_id, id, payload)
+            .execute(&mut *tx)
+            .await
+            .map_err(PersistenceError::new)?;
+        tx.commit().await.map_err(PersistenceError::new)
+    }
+
     async fn create_chat_with_preferences(
         &self,
         chat: NewChat,

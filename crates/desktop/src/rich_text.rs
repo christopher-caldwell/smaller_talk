@@ -2,11 +2,52 @@ use std::{collections::BTreeSet, ops::Range};
 
 use gpui::{
     App, ClipboardItem, Context, FocusHandle, Focusable, HighlightStyle, IntoElement, KeyBinding,
-    MouseButton, Render, StyledText, Window, actions, div, prelude::*, px, rgba,
+    MouseButton, Render, StyledText, WeakEntity, Window, actions, div, prelude::*, px, rgba,
 };
 use unicode_segmentation::UnicodeSegmentation;
+use uuid::Uuid;
+
+use crate::shell::ChatsView;
 
 actions!(rich_text, [Copy, SelectAll]);
+
+#[derive(Default)]
+struct TextSelection {
+    anchor: usize,
+    caret: usize,
+    dragging: bool,
+}
+
+impl TextSelection {
+    fn clear(&mut self) {
+        self.anchor = 0;
+        self.caret = 0;
+        self.dragging = false;
+    }
+
+    fn select_all(&mut self, text_len: usize) {
+        self.anchor = 0;
+        self.caret = text_len;
+        self.dragging = false;
+    }
+
+    fn has_selection(&self) -> bool {
+        self.anchor != self.caret || self.dragging
+    }
+
+    fn range(&self) -> Range<usize> {
+        self.anchor.min(self.caret)..self.anchor.max(self.caret)
+    }
+
+    fn boundary(text: &str, byte: usize) -> usize {
+        text.grapheme_indices(true)
+            .map(|(i, _)| i)
+            .chain(std::iter::once(text.len()))
+            .take_while(|i| *i <= byte)
+            .last()
+            .unwrap_or(0)
+    }
+}
 
 pub fn bind_keys(cx: &mut App) {
     cx.bind_keys([
@@ -20,9 +61,8 @@ pub struct RichText {
     pub highlights: Vec<(Range<usize>, HighlightStyle)>,
     pub links: Vec<(Range<usize>, String)>,
     focus: FocusHandle,
-    anchor: usize,
-    caret: usize,
-    dragging: bool,
+    selection: TextSelection,
+    selection_owner: Option<(WeakEntity<ChatsView>, Uuid, Uuid, String)>,
 }
 
 impl RichText {
@@ -32,10 +72,40 @@ impl RichText {
             highlights: vec![],
             links: vec![],
             focus: cx.focus_handle(),
-            anchor: 0,
-            caret: 0,
-            dragging: false,
+            selection: TextSelection::default(),
+            selection_owner: None,
         }
+    }
+    pub fn coordinate_selection(
+        &mut self,
+        owner: WeakEntity<ChatsView>,
+        chat: Uuid,
+        message: Uuid,
+        key: String,
+    ) {
+        self.selection_owner = Some((owner, chat, message, key));
+    }
+    pub fn clear_selection(&mut self) {
+        self.selection.clear();
+    }
+    fn coordinate_with_siblings(&self, cx: &mut Context<Self>) {
+        let Some((owner, chat, active_message, active_key)) = self.selection_owner.clone() else {
+            return;
+        };
+        let _ = owner.update(cx, |view, cx| {
+            if let Some(state) = view.states.get(&chat) {
+                for ((message, key), entity) in &state.rich {
+                    if *message != active_message || key != &active_key {
+                        entity.update(cx, |text, cx| {
+                            if text.has_selection() {
+                                text.clear_selection();
+                                cx.notify();
+                            }
+                        });
+                    }
+                }
+            }
+        });
     }
     pub fn set(
         &mut self,
@@ -46,23 +116,11 @@ impl RichText {
         self.text = text;
         self.highlights = highlights;
         self.links = links;
-        self.anchor = self.boundary(self.anchor);
-        self.caret = self.boundary(self.caret);
-    }
-    fn boundary(&self, byte: usize) -> usize {
-        self.text
-            .grapheme_indices(true)
-            .map(|(i, _)| i)
-            .chain(std::iter::once(self.text.len()))
-            .take_while(|i| *i <= byte)
-            .last()
-            .unwrap_or(0)
+        self.selection.anchor = TextSelection::boundary(&self.text, self.selection.anchor);
+        self.selection.caret = TextSelection::boundary(&self.text, self.selection.caret);
     }
     pub fn has_selection(&self) -> bool {
-        self.anchor != self.caret || self.dragging
-    }
-    fn selection(&self) -> Range<usize> {
-        self.anchor.min(self.caret)..self.anchor.max(self.caret)
+        self.selection.has_selection()
     }
 }
 
@@ -73,7 +131,7 @@ impl Focusable for RichText {
 }
 impl Render for RichText {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected = self.selection();
+        let selected = self.selection.range();
         let mut boundaries = BTreeSet::from([0, self.text.len(), selected.start, selected.end]);
         for (range, _) in &self.highlights {
             boundaries.insert(range.start);
@@ -108,43 +166,46 @@ impl Render for RichText {
             .track_focus(&self.focus)
             .cursor_text()
             .on_action(cx.listener(|this, _: &Copy, _, cx| {
-                let range = this.selection();
+                let range = this.selection.range();
                 if !range.is_empty() {
                     cx.write_to_clipboard(ClipboardItem::new_string(this.text[range].to_owned()));
                 }
             }))
             .on_action(cx.listener(|this, _: &SelectAll, _, cx| {
-                this.anchor = 0;
-                this.caret = this.text.len();
+                this.coordinate_with_siblings(cx);
+                this.selection.select_all(this.text.len());
                 cx.notify();
             }))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
+                    this.coordinate_with_siblings(cx);
                     this.focus.focus(window);
                     let byte = down_layout
                         .index_for_position(event.position)
                         .unwrap_or_else(|i| i);
-                    this.anchor = this.boundary(byte);
-                    this.caret = this.anchor;
-                    this.dragging = true;
+                    this.selection.anchor = TextSelection::boundary(&this.text, byte);
+                    this.selection.caret = this.selection.anchor;
+                    this.selection.dragging = true;
                     if event.click_count >= 2
                         && let Some((offset, word)) = this
                             .text
                             .unicode_word_indices()
                             .find(|(i, word)| *i <= byte && byte <= *i + word.len())
                     {
-                        this.anchor = offset;
-                        this.caret = offset + word.len();
-                        this.dragging = false;
+                        this.selection.anchor = TextSelection::boundary(&this.text, offset);
+                        this.selection.caret =
+                            TextSelection::boundary(&this.text, offset + word.len());
+                        this.selection.dragging = false;
                     }
                     cx.notify();
                 }),
             )
             .on_mouse_move(
                 cx.listener(move |this, event: &gpui::MouseMoveEvent, _, cx| {
-                    if this.dragging {
-                        this.caret = this.boundary(
+                    if this.selection.dragging {
+                        this.selection.caret = TextSelection::boundary(
+                            &this.text,
                             move_layout
                                 .index_for_position(event.position)
                                 .unwrap_or_else(|i| i),
@@ -156,7 +217,7 @@ impl Render for RichText {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
-                    if this.dragging && this.selection().is_empty() {
+                    if this.selection.dragging && this.selection.range().is_empty() {
                         let byte = up_layout
                             .index_for_position(event.position)
                             .unwrap_or_else(|i| i);
@@ -175,19 +236,73 @@ impl Render for RichText {
                             }
                         }
                     }
-                    this.dragging = false;
+                    this.selection.dragging = false;
                     cx.notify();
                 }),
             )
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.dragging = false;
+                    this.selection.dragging = false;
                     cx.notify();
                 }),
             )
             .w_full()
             .min_w(px(0.))
             .child(styled)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TextSelection;
+
+    #[test]
+    fn clearing_selection_removes_copy_and_rewrite_selection_state() {
+        let mut selection = TextSelection {
+            anchor: 2,
+            caret: 7,
+            dragging: true,
+        };
+        assert!(selection.has_selection());
+        assert_eq!(selection.range(), 2..7);
+
+        selection.clear();
+
+        assert!(!selection.has_selection());
+        assert!(selection.range().is_empty());
+        assert!(!selection.dragging);
+    }
+
+    #[test]
+    fn selection_boundaries_do_not_split_grapheme_clusters() {
+        let text = "a👩‍💻b";
+        let grapheme_start = 1;
+        let grapheme_end = text.len() - 1;
+
+        assert_eq!(
+            TextSelection::boundary(text, grapheme_start + 1),
+            grapheme_start
+        );
+        assert_eq!(
+            TextSelection::boundary(text, grapheme_end - 1),
+            grapheme_start
+        );
+        assert_eq!(TextSelection::boundary(text, grapheme_end), grapheme_end);
+    }
+
+    #[test]
+    fn select_all_replaces_prior_range_and_stops_dragging() {
+        let mut selection = TextSelection {
+            anchor: 5,
+            caret: 8,
+            dragging: true,
+        };
+
+        selection.select_all(12);
+
+        assert_eq!(selection.range(), 0..12);
+        assert!(selection.has_selection());
+        assert!(!selection.dragging);
     }
 }

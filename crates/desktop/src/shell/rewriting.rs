@@ -228,31 +228,34 @@ impl ChatsView {
         } else {
             "Shorten"
         };
-        let mut controls = div().flex().flex_col().gap_1().child(
-            row().child(
-                button(element_id("shorten-response", message), label)
-                    .text_xs()
-                    .text_color(rgb(MUTED))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        if pending {
-                            return;
+        let mut controls = row().flex_wrap().gap_2().child(
+            compact_button(element_id("shorten-response", message), label)
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if pending {
+                        return;
+                    }
+                    if variant {
+                        if !this.rewriting.displayed.remove(&message) {
+                            this.rewriting.displayed.insert(message);
                         }
-                        if variant {
-                            if !this.rewriting.displayed.remove(&message) {
-                                this.rewriting.displayed.insert(message);
-                            }
-                            this.reset_response_layout(chat);
-                            cx.notify();
-                        } else if this.app_settings.rewrite_model.is_none() {
-                            this.open_settings(window, cx);
-                        } else {
-                            this.request_shorten(chat, message, cx);
-                        }
-                    })),
-            ),
+                        this.reset_response_layout(chat);
+                        cx.notify();
+                    } else if this.app_settings.rewrite_model.is_none() {
+                        this.open_settings(window, cx);
+                    } else {
+                        this.request_shorten(chat, message, cx);
+                    }
+                })),
         );
         if let Some(error) = self.rewriting.errors.get(&message) {
-            controls = controls.child(div().text_xs().text_color(rgb(MUTED)).child(error.clone()));
+            controls = controls.child(
+                div()
+                    .text_size(px(12.))
+                    .text_color(rgb(MUTED))
+                    .child(error.clone()),
+            );
         }
         controls.into_any_element()
     }

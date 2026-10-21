@@ -6,6 +6,8 @@ pub(super) enum PickerAction {
     Model(Provider, String),
     Effort(Option<String>),
     Retry(Provider),
+    SettingsModel(settings::SettingsPicker, Provider, String),
+    SettingsEffort(Option<String>),
 }
 
 pub(super) struct PickerChoice {
@@ -64,6 +66,9 @@ impl ChatsView {
     }
 
     pub(super) fn picker_choices(&self) -> Vec<PickerChoice> {
+        if let Some(Popup::Settings(picker)) = self.popup {
+            return self.settings_picker_choices(picker);
+        }
         let Some(id) = self.active else {
             return Vec::new();
         };
@@ -138,6 +143,7 @@ impl ChatsView {
             self.model_query.clear();
             self.model_search.update(cx, |e, cx| {
                 e.set_picker_navigation(true);
+                e.set_font_size(13.);
                 e.set_content(String::new(), window, cx);
             });
         }
@@ -158,8 +164,18 @@ impl ChatsView {
     }
 
     pub(super) fn dismiss_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let return_to_composer = matches!(self.popup, Some(Popup::Models)) && !self.settings_open;
         self.popup = None;
-        if let Some(focus) = self.popup_return_focus.take() {
+        if return_to_composer {
+            self.popup_return_focus = None;
+            if let Some(id) = self.active
+                && let Some(state) = self.states.get(&id)
+            {
+                state.composer.focus_handle(cx).focus(window);
+            } else {
+                self.focus.focus(window);
+            }
+        } else if let Some(focus) = self.popup_return_focus.take() {
             focus.focus(window);
         } else {
             self.focus_composer = true;
@@ -174,6 +190,13 @@ impl ChatsView {
         cx: &mut Context<Self>,
     ) {
         self.dismiss_popup(window, cx);
+        if matches!(
+            action,
+            PickerAction::SettingsModel(..) | PickerAction::SettingsEffort(_)
+        ) {
+            self.choose_settings(action, cx);
+            return;
+        }
         let Some(id) = self.active else {
             return;
         };
@@ -198,6 +221,7 @@ impl ChatsView {
                 prefs.execution.effort = None;
             }
             PickerAction::Effort(effort) => prefs.execution.effort = effort,
+            PickerAction::SettingsModel(..) | PickerAction::SettingsEffort(_) => unreachable!(),
         }
         self.save_preferences(id, prefs, cx);
     }
@@ -221,7 +245,17 @@ impl ChatsView {
             cx.stop_propagation();
             return;
         }
-        if matches!(self.popup, Some(Popup::Models | Popup::Effort)) {
+        // Commit Settings choices on release so restoring focus cannot reopen
+        // the selector through GPUI's automatic keyboard click.
+        if matches!(self.popup, Some(Popup::Settings(_))) && matches!(key, "enter" | "space") {
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
+        if matches!(
+            self.popup,
+            Some(Popup::Models | Popup::Effort | Popup::Settings(_))
+        ) {
             let searching = matches!(self.popup, Some(Popup::Models));
             if searching && !matches!(key, "up" | "down" | "enter" | "tab") {
                 return;

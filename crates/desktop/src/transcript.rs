@@ -56,7 +56,8 @@ impl ChatsView {
             weak.update(cx, |this, cx| this.render_message(id, index, window, cx))
                 .unwrap_or_else(|_| div().into_any_element())
         })
-        .size_full();
+        .flex_1()
+        .min_h(px(0.));
         div()
             .id("transcript-viewport")
             .flex_1()
@@ -65,20 +66,22 @@ impl ChatsView {
             .w_full()
             .overflow_hidden()
             .relative()
+            .flex()
+            .flex_col()
             .child(conversation)
             .when(!state.follow, |view| {
                 view.child(
                     div()
-                        .absolute()
-                        .bottom(px(10.))
-                        .left_0()
+                        .flex_shrink_0()
+                        .h(px(44.))
                         .w_full()
                         .flex()
                         .justify_center()
+                        .items_center()
                         .child(
-                            button("return-to-latest", "↓  Latest")
+                            compact_button("return-to-latest", "↓  Latest")
                                 .bg(rgb(PANEL))
-                                .border_color(rgb(BORDER))
+                                .border_color(quiet_border())
                                 .tooltip(hint("Return to the latest message and follow new output"))
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if let Some(state) = this.states.get_mut(&id) {
@@ -97,7 +100,7 @@ impl ChatsView {
             .into_any_element()
     }
 
-    fn text_view(
+    pub(super) fn text_view(
         &mut self,
         chat: Uuid,
         key: (Uuid, String),
@@ -111,12 +114,18 @@ impl ChatsView {
         if state.rich.len() > 192 {
             state.rich.clear();
         }
+        let owner_key = key.1.clone();
+        let message_id = key.0;
         let entity = state
             .rich
             .entry(key)
             .or_insert_with(|| cx.new(RichText::new))
             .clone();
-        entity.update(cx, |view, _| view.set(text, highlights, links));
+        let weak = cx.entity().downgrade();
+        entity.update(cx, |view, _| {
+            view.set(text, highlights, links);
+            view.coordinate_selection(weak, chat, message_id, owner_key);
+        });
         entity
     }
 
@@ -143,8 +152,8 @@ impl ChatsView {
             .min_w(px(0.))
             .flex()
             .flex_col()
-            .gap_3()
-            .py_4();
+            .gap_2()
+            .py_3();
         if message.role == MessageRole::User {
             let text = self.text_view(
                 chat,
@@ -158,42 +167,75 @@ impl ChatsView {
                 div()
                     .max_w(px(650.))
                     .min_w(px(0.))
-                    .px_4()
-                    .py_3()
+                    .px_3()
+                    .py_2()
                     .rounded_lg()
                     .bg(rgb(PANEL_HOVER))
-                    .text_base()
-                    .line_height(px(25.))
+                    .text_size(px(15.))
+                    .line_height(px(24.))
                     .child(text),
             );
         } else {
-            body = body.child(div().text_xs().text_color(rgb(MUTED)).child(
-                if self.showing_shortened(message.id) {
-                    "Assistant · Shortened"
-                } else {
-                    "Assistant"
-                },
-            ));
+            body = body.child(
+                row()
+                    .text_size(px(12.))
+                    .line_height(px(16.))
+                    .text_color(rgb(MUTED))
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .child("Assistant"),
+                    )
+                    .when(self.showing_shortened(message.id), |header| {
+                        header.child(
+                            div()
+                                .text_size(px(11.))
+                                .text_color(rgb(ACCENT))
+                                .child("Shortened"),
+                        )
+                    }),
+            );
             let blocks = self
                 .states
                 .get_mut(&chat)
                 .expect("chat exists")
                 .markdown
                 .get_or_parse(message.id, &message.body);
+            let mut content = div().w_full().min_w(px(0.)).flex().flex_col();
             for (index, block) in blocks.iter().enumerate() {
-                body = body.child(self.render_block(chat, message.id, index, block, window, cx));
+                let previous = index.checked_sub(1).map(|i| &blocks[i].kind);
+                let gap = match (previous, &block.kind) {
+                    (None, _) => 0.,
+                    (_, MarkdownBlockKind::Heading(_)) => 14.,
+                    (Some(MarkdownBlockKind::Heading(_)), _) => 6.,
+                    (Some(MarkdownBlockKind::ListItem), MarkdownBlockKind::ListItem) => 3.,
+                    (Some(MarkdownBlockKind::Quote), MarkdownBlockKind::Quote) => 4.,
+                    _ => 10.,
+                };
+                content = content.child(
+                    div()
+                        .w_full()
+                        .min_w(px(0.))
+                        .mt(px(gap))
+                        .child(self.render_block(chat, message.id, index, block, window, cx)),
+                );
             }
+            body = body.child(content);
         }
         for file in files {
             body = body.child(
                 div()
                     .max_w(px(360.))
-                    .px_3()
-                    .py_2()
+                    .px_2()
+                    .py_1()
                     .rounded_md()
                     .border_1()
-                    .border_color(rgb(BORDER))
-                    .text_sm()
+                    .border_color(quiet_border())
+                    .bg(rgb(PANEL))
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .text_size(px(12.))
                     .text_color(rgb(MUTED))
                     .when_some(file.preview_path.clone(), |chip, path| {
                         chip.child(thumbnail(
@@ -211,48 +253,53 @@ impl ChatsView {
             );
         }
         if message.role == MessageRole::Assistant {
-            body = body.child(self.render_rewrite_controls(chat, message.id, cx));
             let source = message.body.clone();
             let message_id = message.id;
             let copied = self.states[&chat].copied == Some(message_id);
             body = body.child(
-                row().child(
-                    button(element_id("copy-response", message.id), "")
-                        .w(px(28.))
-                        .h(px(28.))
-                        .px_0()
-                        .py_0()
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .flex_shrink_0()
-                        .tooltip(hint("Copy response"))
-                        .when(copied, |b| {
-                            b.child(div().text_color(rgb(ACCENT)).child("✓"))
-                        })
-                        .when(!copied, |b| b.child(icon("copy").text_color(rgb(MUTED))))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            cx.write_to_clipboard(gpui::ClipboardItem::new_string(source.clone()));
-                            if let Some(state) = this.states.get_mut(&chat) {
-                                state.copied = Some(message_id);
-                            }
-                            cx.notify();
-                            cx.spawn(async move |this, cx| {
-                                cx.background_executor()
-                                    .timer(std::time::Duration::from_secs(2))
-                                    .await;
-                                let _ = this.update(cx, |this, cx| {
-                                    if let Some(state) = this.states.get_mut(&chat)
-                                        && state.copied == Some(message_id)
-                                    {
-                                        state.copied = None;
-                                    }
-                                    cx.notify();
-                                });
+                row()
+                    .gap_1()
+                    .flex_wrap()
+                    .child(
+                        button(element_id("copy-response", message.id), "")
+                            .w(px(28.))
+                            .h(px(28.))
+                            .px_0()
+                            .py_0()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .flex_shrink_0()
+                            .tooltip(hint("Copy response"))
+                            .when(copied, |b| {
+                                b.child(div().text_color(rgb(ACCENT)).child("✓"))
                             })
-                            .detach();
-                        })),
-                ),
+                            .when(!copied, |b| b.child(icon("copy").text_color(rgb(MUTED))))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                    source.clone(),
+                                ));
+                                if let Some(state) = this.states.get_mut(&chat) {
+                                    state.copied = Some(message_id);
+                                }
+                                cx.notify();
+                                cx.spawn(async move |this, cx| {
+                                    cx.background_executor()
+                                        .timer(std::time::Duration::from_secs(2))
+                                        .await;
+                                    let _ = this.update(cx, |this, cx| {
+                                        if let Some(state) = this.states.get_mut(&chat)
+                                            && state.copied == Some(message_id)
+                                        {
+                                            state.copied = None;
+                                        }
+                                        cx.notify();
+                                    });
+                                })
+                                .detach();
+                            })),
+                    )
+                    .child(self.render_rewrite_controls(chat, message.id, cx)),
             );
         }
         div()
@@ -280,8 +327,8 @@ impl ChatsView {
             MarkdownBlockKind::Rule => div()
                 .w_full()
                 .h(px(1.))
-                .my_2()
-                .bg(rgb(BORDER))
+                .my_1()
+                .bg(quiet_border())
                 .into_any_element(),
             MarkdownBlockKind::Table(alignments) => {
                 let columns = alignments.len();
@@ -294,7 +341,7 @@ impl ChatsView {
                             .map(|c| c.text.chars().count())
                             .max()
                             .unwrap_or(10);
-                        px((longest as f32 * 7. + 28.).clamp(120., 330.))
+                        px((longest as f32 * 7. + 22.).clamp(110., 320.))
                     })
                     .collect();
                 let table_width: gpui::Pixels = widths.iter().copied().fold(px(0.), |a, b| a + b);
@@ -303,7 +350,7 @@ impl ChatsView {
                     .flex_col()
                     .w(table_width)
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(quiet_border())
                     .rounded_md();
                 for (row_index, cells) in block.table_rows.iter().enumerate() {
                     let mut row = div()
@@ -311,8 +358,7 @@ impl ChatsView {
                         .w_full()
                         .flex_shrink_0()
                         .when(row_index == 0, |r| {
-                            r.bg(rgb(PANEL_HOVER))
-                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                            r.bg(rgb(PANEL)).font_weight(gpui::FontWeight::SEMIBOLD)
                         });
                     for (column, cell) in cells.iter().enumerate() {
                         let text = self.text_view(
@@ -330,13 +376,13 @@ impl ChatsView {
                             div()
                                 .w(widths.get(column).copied().unwrap_or(px(120.)))
                                 .flex_shrink_0()
-                                .px_3()
-                                .py_2()
+                                .px(px(10.))
+                                .py(px(6.))
                                 .border_b_1()
                                 .border_r_1()
-                                .border_color(rgb(BORDER))
-                                .text_sm()
-                                .line_height(px(23.))
+                                .border_color(quiet_border())
+                                .text_size(px(13.))
+                                .line_height(px(21.))
                                 .when(
                                     alignments.get(column)
                                         == Some(&pulldown_cmark::Alignment::Right),
@@ -369,6 +415,7 @@ impl ChatsView {
             }
             MarkdownBlockKind::Code(language) => {
                 let source = block.text.clone();
+                let copied = self.states[&chat].copied_code == Some((message, index));
                 let highlights = block
                     .code_highlights
                     .iter()
@@ -425,33 +472,55 @@ impl ChatsView {
                     .min_w(px(0.))
                     .rounded_lg()
                     .border_1()
-                    .border_color(rgb(BORDER))
+                    .border_color(quiet_border())
                     .bg(rgb(PANEL))
                     .child(
                         crate::theme::row()
                             .px_3()
-                            .py_2()
+                            .h(px(30.))
                             .justify_between()
                             .border_b_1()
-                            .border_color(rgb(BORDER))
+                            .border_color(quiet_border())
+                            .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child(
+                                if language.is_empty() {
+                                    "text".into()
+                                } else {
+                                    language.clone()
+                                },
+                            ))
                             .child(
-                                div()
-                                    .text_xs()
-                                    .text_color(rgb(MUTED))
-                                    .child(language.clone()),
-                            )
-                            .child(
-                                button(
+                                compact_button(
                                     element_id("copy-code", format!("{message}:{index}")),
-                                    "Copy",
+                                    if copied { "✓ Copied" } else { "Copy" },
                                 )
-                                .text_xs()
+                                .text_size(px(12.))
+                                .text_color(rgb(MUTED))
                                 .py_0()
-                                .on_click(move |_, _, cx| {
-                                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(
-                                        source.clone(),
-                                    ))
-                                }),
+                                .on_click(cx.listener(
+                                    move |this, _, _, cx| {
+                                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(
+                                            source.clone(),
+                                        ));
+                                        if let Some(state) = this.states.get_mut(&chat) {
+                                            state.copied_code = Some((message, index));
+                                        }
+                                        cx.notify();
+                                        cx.spawn(async move |this, cx| {
+                                            cx.background_executor()
+                                                .timer(std::time::Duration::from_secs(2))
+                                                .await;
+                                            let _ = this.update(cx, |this, cx| {
+                                                if let Some(state) = this.states.get_mut(&chat)
+                                                    && state.copied_code == Some((message, index))
+                                                {
+                                                    state.copied_code = None;
+                                                }
+                                                cx.notify();
+                                            });
+                                        })
+                                        .detach();
+                                    },
+                                )),
                             ),
                     )
                     .child(
@@ -459,7 +528,8 @@ impl ChatsView {
                             element_id("code-scroll", format!("{message}:{index}")),
                             &scroll,
                         )
-                        .p_3()
+                        .px_3()
+                        .py_2()
                         .child(
                             div()
                                 .w(code_width + px(12.))
@@ -488,25 +558,29 @@ impl ChatsView {
                 let mut view = div()
                     .w_full()
                     .min_w(px(0.))
-                    .text_base()
-                    .line_height(px(26.))
+                    .text_size(px(15.))
+                    .line_height(px(24.))
                     .child(text);
                 match kind {
                     MarkdownBlockKind::Heading(level) => {
                         view = view
-                            .mt_2()
                             .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .line_height(px(match level {
+                                1 => 28.,
+                                2 => 25.,
+                                _ => 24.,
+                            }))
                             .text_size(px(match level {
-                                1 => 25.,
-                                2 => 21.,
-                                _ => 18.,
+                                1 => 22.,
+                                2 => 19.,
+                                _ => 17.,
                             }));
                     }
                     MarkdownBlockKind::Quote => {
                         view = view
-                            .pl_4()
+                            .pl_3()
                             .border_l_2()
-                            .border_color(rgb(ACCENT))
+                            .border_color(quiet_border())
                             .text_color(rgb(MUTED));
                     }
                     _ => {}

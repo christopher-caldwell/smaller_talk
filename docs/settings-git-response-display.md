@@ -10,6 +10,8 @@ Quit the old build, run `just db-migrate`, then start the new build with `just r
 
 Open Settings from the sidebar gear or Cmd+,. Back to chat and Escape return to the existing chat without changing its draft or reading position.
 
+Providers & Models and Response Display have separate tabs that stay visible while scrolling. New-chat defaults use compact selectors above the model list; each model row has a visibility switch. The rewrite-model selector and automatic-shortening switch live only in Response Display.
+
 Providers & Models contains:
 
 - Enable/disable controls and separate installation/sign-in status. Status checks do not open an agent session or start a login flow.
@@ -25,9 +27,9 @@ The composer model picker includes a focused search input, clear action, no-resu
 
 ## Approval and layout changes
 
-Assistant status, errors, approvals, queue cards, transcript, and composer share the same centered content-column dimensions. Activity labels align with the composer instead of the pane edge.
+Assistant status, errors, approvals, queue cards, transcript, and composer share the same centered content-column dimensions. Activity labels align with the composer instead of the pane edge. Transcript spacing follows the Markdown structure: headings introduce groups, consecutive list items sit closer together, and Copy and response-display actions share a compact row. Code blocks, tables, quotes, and sent attachments retain their content and selection behavior with lighter borders and tighter padding.
 
-Approval adapters provide typed presentation fields. Searches show the query, commands show the command and working folder, files show paths, and permissions retain their requested scope. Details expands the original JSON arguments. Native request IDs, inputs, and response mapping are unchanged. Permission grants scoped to a turn are labeled Allow for this turn; ordinary one-time actions retain Approve once.
+Approval adapters provide typed presentation fields. Searches show the query, commands show the command and working folder, files show paths, and permissions retain their requested scope. Details expands the original JSON arguments. Native request IDs, inputs, and response mapping are unchanged. Permission grants scoped to a turn are labeled Allow for this turn; ordinary one-time actions retain Approve once. Approval titles and decision actions stay visible while the request body scrolls, including in short windows. Command blocks and original JSON use a quieter inset surface; smaller field labels distinguish metadata from the action itself.
 
 ## Git review
 

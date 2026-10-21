@@ -268,12 +268,12 @@ impl ChatsView {
             status.files.len()
         );
         row()
-            .h(px(34.))
+            .h(px(30.))
             .px_3()
             .border_b_1()
-            .border_color(rgb(BORDER))
+            .border_color(quiet_border())
             .child(
-                button("repo-status", label)
+                compact_button("repo-status", label)
                     .text_xs()
                     .tooltip(hint(format!(
                         "{} · {:?} changes",
@@ -291,7 +291,7 @@ impl ChatsView {
             .child(div().flex_1())
             .when_some(self.repository.pull_request.clone(), |d, url| {
                 d.child(
-                    button("open-pull-request", "Pull request ↗")
+                    compact_button("open-pull-request", "Pull request ↗")
                         .text_xs()
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 )

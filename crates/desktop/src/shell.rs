@@ -1,4 +1,5 @@
 mod composer_panel;
+mod drafts;
 mod menus;
 mod navigation;
 mod polish;
@@ -59,6 +60,7 @@ pub(crate) struct ChatViewState {
     pub error: Option<String>,
     pub error_details: bool,
     pub copied: Option<Uuid>,
+    pub copied_code: Option<(Uuid, usize)>,
     pub pending: Option<PendingInteraction>,
     pub submitted: Option<Draft>,
     pub retry_of: Option<Uuid>,
@@ -68,6 +70,7 @@ pub(crate) struct ChatViewState {
     pub markdown: MarkdownCache,
     pub rich: HashMap<(Uuid, String), Entity<RichText>>,
     pub horizontal: HashMap<(Uuid, usize), ScrollHandle>,
+    pub interaction_scroll: ScrollHandle,
     pub importing: bool,
     pub enqueue_pending: bool,
 }
@@ -77,6 +80,14 @@ pub(crate) struct PendingInteraction {
     pub editors: Vec<Entity<Composer>>,
     pub answers: BTreeMap<String, Vec<String>>,
     pub details: bool,
+}
+
+fn clear_approval_text(state: &mut ChatViewState, request_id: &str) {
+    let command_key = format!("approval-command:{request_id}");
+    let arguments_key = format!("approval-arguments:{request_id}");
+    state
+        .rich
+        .retain(|(_, key), _| key != &command_key && key != &arguments_key);
 }
 
 struct LoadedChat {
@@ -92,6 +103,7 @@ struct LoadedChat {
 pub(crate) enum Popup {
     Models,
     Effort,
+    Settings(settings::SettingsPicker),
     Chat(Uuid),
     Assign(Uuid),
     Rename(Uuid),
@@ -106,7 +118,7 @@ enum Persist {
     Draft(Uuid, Draft),
     Session(SessionState),
     Preferences(Uuid, ChatPreferences),
-    CreateChat(Option<ExecutionSettings>),
+    StartChat(StartChatInput),
     GlobalSettings(AppSettings),
     DeleteChat(Uuid),
     Rename(Uuid, String),
@@ -138,7 +150,7 @@ enum UiEvent {
     ),
     Rewritten(Uuid, Uuid, Result<ResponseVariant, String>),
     Search(u64, Result<Vec<SearchHit>, String>),
-    Created(Result<Chat, String>),
+    Started(Uuid, Draft, Result<Chat, String>),
     Deleted(Uuid),
     Renamed(Chat),
     Projects(Vec<Project>),
@@ -164,6 +176,7 @@ pub struct ChatsView {
     repository: repository::RepositoryUi,
     app_settings: AppSettings,
     settings_open: bool,
+    settings_section: settings::SettingsSection,
     global_settings_save: settings::GlobalSettingsSave,
     settings_focus: Option<FocusHandle>,
     model_search: Entity<Composer>,
@@ -281,13 +294,19 @@ impl ChatsView {
                             }
                             let _ = notices.send(UiEvent::GlobalSaved(settings, result));
                         }
-                        Persist::CreateChat(default) => {
+                        Persist::StartChat(input) => {
+                            let id = input.chat_id;
+                            let draft = input.draft.clone();
                             let result = storage
                                 .chats
-                                .create_chat_with_defaults(default)
+                                .start_chat(input)
                                 .await
                                 .map_err(|e| e.to_string());
-                            let _ = notices.send(UiEvent::Created(result));
+                            let saved = result.is_ok();
+                            let _ = notices.send(UiEvent::Started(id, draft, result));
+                            if saved {
+                                storage.queue.resume(id);
+                            }
                         }
                         Persist::DeleteChat(id) => {
                             storage
@@ -359,9 +378,16 @@ impl ChatsView {
             }
         })
         .detach();
-        session
-            .open_tabs
-            .retain(|id| chats.iter().any(|c| c.id.to_string() == *id));
+        if let Some((id, draft)) = drafts::recover_started_chat(&mut session, &chats) {
+            let _ = persist.send(Persist::Draft(id, draft));
+        }
+        session.open_tabs.retain(|id| {
+            chats.iter().any(|c| c.id.to_string() == *id)
+                || session
+                    .new_chat
+                    .as_ref()
+                    .is_some_and(|draft| draft.id == *id)
+        });
         let active = session
             .active_tab
             .as_ref()
@@ -374,7 +400,10 @@ impl ChatsView {
                     .and_then(|s| Uuid::parse_str(s).ok())
             });
         let search = cx.new(Composer::new_single_line);
-        search.update(cx, |s, _| s.set_placeholder("Search chats…"));
+        search.update(cx, |s, _| {
+            s.set_placeholder("Search chats…");
+            s.set_font_size(13.);
+        });
         cx.subscribe(&search, |this, _, _: &composer::Changed, cx| {
             this.search_changed(cx)
         })
@@ -399,6 +428,7 @@ impl ChatsView {
             repository: repository::RepositoryUi::new(cx),
             app_settings,
             settings_open: false,
+            settings_section: settings::SettingsSection::default(),
             global_settings_save: settings::GlobalSettingsSave::default(),
             settings_focus: None,
             model_search: cx.new(Composer::new_single_line),
@@ -485,6 +515,7 @@ impl ChatsView {
         for provider in PROVIDERS {
             let editor = cx.new(Composer::new_single_line);
             editor.update(cx, |e, _| {
+                e.set_font_size(13.);
                 e.set_placeholder("Automatic executable discovery")
             });
             view.path_editors.insert(provider, editor);
@@ -612,6 +643,7 @@ impl ChatsView {
         }
         if !self.states.contains_key(&id) {
             let composer = cx.new(Composer::new);
+            composer.update(cx, |editor, _| editor.set_font_size(15.));
             cx.subscribe(&composer, move |this, _, _: &composer::Submitted, cx| {
                 this.send(id, cx)
             })
@@ -655,6 +687,7 @@ impl ChatsView {
                     error: None,
                     error_details: false,
                     copied: None,
+                    copied_code: None,
                     pending: None,
                     submitted: None,
                     retry_of: None,
@@ -664,10 +697,26 @@ impl ChatsView {
                     markdown: MarkdownCache::default(),
                     rich: HashMap::new(),
                     horizontal: HashMap::new(),
+                    interaction_scroll: ScrollHandle::new(),
                     importing: false,
                     enqueue_pending: false,
                 },
             );
+        }
+        if let Some(draft) = self
+            .session
+            .new_chat
+            .as_ref()
+            .filter(|draft| draft.id == id.to_string())
+        {
+            let state = self.states.get_mut(&id).expect("draft view exists");
+            state.preferences = draft.preferences.clone();
+            state.attachments = draft.draft.attachments.clone();
+            state
+                .composer
+                .update(cx, |editor, cx| editor.load_draft(&draft.draft, cx));
+            state.loaded = true;
+            return;
         }
         let service = self.services.clone();
         let sender = self.sender.clone();
@@ -941,14 +990,7 @@ impl ChatsView {
                 }
             }
             UiEvent::Search(_, _) => {}
-            UiEvent::Created(result) => match result {
-                Ok(chat) => {
-                    let id = chat.id;
-                    self.chats.insert(0, chat);
-                    self.open_chat(id, None, cx);
-                }
-                Err(error) => self.banner = Some(error),
-            },
+            UiEvent::Started(id, draft, result) => self.started_chat(id, draft, result, cx),
             UiEvent::Deleted(id) => {
                 self.chats.retain(|c| c.id != id);
                 // Deletion already removed the persisted draft; do not save it on close.
@@ -1048,6 +1090,12 @@ impl ChatsView {
                 }
                 if let Some(state) = self.states.get_mut(&id) {
                     state.activity = None;
+                    if let Some(request_id) = state.pending.as_ref().and_then(|pending| {
+                        matches!(&pending.request.kind, InteractionKind::Approval(_))
+                            .then(|| pending.request.id.clone())
+                    }) {
+                        clear_approval_text(state, &request_id);
+                    }
                     state.pending = None;
                     if let Err(error) = result {
                         state.error = Some(error);
@@ -1176,6 +1224,13 @@ impl ChatsView {
                 return;
             }
             ConversationEvent::Interaction { interaction, .. } => {
+                if let Some(request_id) = state.pending.as_ref().and_then(|pending| {
+                    matches!(&pending.request.kind, InteractionKind::Approval(_))
+                        .then(|| pending.request.id.clone())
+                }) {
+                    clear_approval_text(state, &request_id);
+                }
+                state.interaction_scroll = ScrollHandle::new();
                 let count = match &interaction.kind {
                     InteractionKind::Questions(q) => q.len(),
                     _ => 0,
@@ -1183,7 +1238,10 @@ impl ChatsView {
                 let editors = (0..count)
                     .map(|_| {
                         let editor = cx.new(Composer::new_single_line);
-                        editor.update(cx, |s, _| s.set_placeholder("Your answer…"));
+                        editor.update(cx, |s, _| {
+                            s.set_placeholder("Your answer…");
+                            s.set_font_size(13.);
+                        });
                         cx.subscribe(&editor, move |this, _, _: &composer::Submitted, cx| {
                             this.respond(id, true, cx)
                         })
@@ -1306,6 +1364,12 @@ impl ChatsView {
     }
 
     fn draft_changed(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if self.is_new_chat(id) {
+            self.save_new_chat_draft(cx);
+            self.save_session();
+            cx.notify();
+            return;
+        }
         if let Some(state) = self.states.get_mut(&id)
             && state.loaded
         {
@@ -1423,7 +1487,26 @@ impl ChatsView {
         }
         state.enqueue_pending = true;
         state.error = None;
-        if self.persist.send(Persist::Enqueue(id, draft)).is_err() {
+        let command = if let Some(new_chat) = self
+            .session
+            .new_chat
+            .as_mut()
+            .filter(|new_chat| new_chat.id == id.to_string())
+        {
+            new_chat.submitted = Some(draft.clone());
+            let preferences = state.preferences.clone();
+            self.save_new_chat_draft(cx);
+            self.save_session();
+            Persist::StartChat(StartChatInput {
+                chat_id: id,
+                preferences,
+                draft,
+            })
+        } else {
+            Persist::Enqueue(id, draft)
+        };
+        if self.persist.send(command).is_err() {
+            let state = self.states.get_mut(&id).expect("chat view exists");
             state.enqueue_pending = false;
             state.error = Some("The message queue is unavailable. Your draft is retained.".into());
         }
@@ -1515,12 +1598,17 @@ impl ChatsView {
             prefs.new_session = true;
         }
         self.metadata.insert(id, prefs.clone());
+        let new_chat = self.is_new_chat(id);
         if let Some(state) = self.states.get_mut(&id) {
             state.preferences = prefs.clone();
-            state.settings_pending = true;
+            state.settings_pending = !new_chat;
             state.settings_error = false;
         }
-        let _ = self.persist.send(Persist::Preferences(id, prefs));
+        if new_chat {
+            self.draft_changed(id, cx);
+        } else {
+            let _ = self.persist.send(Persist::Preferences(id, prefs));
+        }
         if self.popup.is_some() {
             self.focus_composer = true;
         }
@@ -1535,6 +1623,9 @@ impl ChatsView {
         let Some(pending) = state.pending.take() else {
             return;
         };
+        if matches!(&pending.request.kind, InteractionKind::Approval(_)) {
+            clear_approval_text(state, &pending.request.id);
+        }
         self.focus_composer = true;
         let mut answers = pending.answers;
         if let InteractionKind::Questions(questions) = &pending.request.kind {
@@ -1549,6 +1640,7 @@ impl ChatsView {
                 .any(|q| answers.get(&q.id).is_none_or(|a| a.is_empty()))
             {
                 state.error = Some("Answer each question before continuing.".into());
+                state.interaction_scroll = ScrollHandle::new();
                 state.pending = Some(PendingInteraction {
                     details: false,
                     request: pending.request,
@@ -1758,12 +1850,15 @@ impl Render for ChatsView {
                         .left_0()
                         .top_0()
                         .bottom_0()
-                        .w(px(260.))
+                        .w(px(SIDEBAR_WIDTH))
                         .on_click(|_, _, cx| cx.stop_propagation())
                         .child(sidebar),
                 );
             (
-                div().w(px(52.)).flex_shrink_0().into_any_element(),
+                div()
+                    .w(px(SIDEBAR_RAIL_WIDTH))
+                    .flex_shrink_0()
+                    .into_any_element(),
                 Some(overlay.into_any_element()),
             )
         } else {
@@ -1830,9 +1925,9 @@ impl Render for ChatsView {
             detail = detail.child(self.render_transcript(id, window, cx));
             let compact_request = pending && window.viewport_size().height < px(600.);
             let interaction_height = if compact_request {
-                px(100.)
+                (window.viewport_size().height * 0.35).clamp(px(140.), px(180.))
             } else {
-                (window.bounds().size.height * 0.3).clamp(px(120.), px(280.))
+                (window.viewport_size().height * 0.3).clamp(px(180.), px(280.))
             };
             if let Some(interaction) = self.render_interaction(id, interaction_height, cx) {
                 detail = detail.child(
@@ -1848,15 +1943,18 @@ impl Render for ChatsView {
                 );
             }
             let state = &self.states[&id];
-            let status = state.activity.map(|a| a.label().to_owned());
+            let status = state
+                .activity
+                .filter(|_| state.pending.is_none())
+                .map(|a| a.label().to_owned());
             let error = state.error.clone();
             if let Some(status) = status.filter(|_| !compact_request) {
                 detail = detail.child(
                     div()
                         .flex_shrink_0()
                         .px(self.content_inset)
-                        .py_2()
-                        .text_sm()
+                        .py_1()
+                        .text_size(px(13.))
                         .text_color(rgb(ACCENT))
                         .w_full()
                         .flex()
@@ -1943,7 +2041,7 @@ impl Render for ChatsView {
                         .text_center()
                         .text_xs()
                         .text_color(rgb(MUTED))
-                        .child("Answer the request above to continue. Your draft is saved."),
+                        .child("Your draft is saved."),
                 );
             }
         } else {
@@ -1967,13 +2065,8 @@ impl Render for ChatsView {
                     )
                     .child(muted("Open a chat from the sidebar, or start a new one."))
                     .child(
-                        button("empty-new-chat", "+  New chat").on_click(cx.listener(
-                            |this, _, _, _| {
-                                let _ = this
-                                    .persist
-                                    .send(Persist::CreateChat(this.new_chat_settings()));
-                            },
-                        )),
+                        button("empty-new-chat", "+  New chat")
+                            .on_click(cx.listener(|this, _, _, cx| this.new_chat(cx))),
                     ),
             );
         }
@@ -2039,14 +2132,13 @@ impl Render for ChatsView {
             .capture_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 this.handle_workspace_key(event, window, cx);
             }))
+            .capture_key_up(cx.listener(|this, event: &gpui::KeyUpEvent, window, cx| {
+                this.handle_settings_key_up(event, window, cx);
+            }))
             .on_action(cx.listener(|this, _: &crate::OpenSettings, window, cx| {
                 this.open_settings(window, cx)
             }))
-            .on_action(cx.listener(|this, _: &crate::NewChat, _, _| {
-                let _ = this
-                    .persist
-                    .send(Persist::CreateChat(this.new_chat_settings()));
-            }))
+            .on_action(cx.listener(|this, _: &crate::NewChat, _, cx| this.new_chat(cx)))
             .on_action(cx.listener(|this, _: &crate::CloseTab, window, cx| {
                 if this.settings_open {
                     this.close_settings(window, cx);
@@ -2068,6 +2160,13 @@ impl Render for ChatsView {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &crate::SearchChats, window, cx| {
+                if this.settings_open {
+                    if matches!(this.popup, Some(Popup::Settings(_))) {
+                        this.dismiss_popup(window, cx);
+                    }
+                    this.settings_section = settings::SettingsSection::Providers;
+                    cx.notify();
+                }
                 if matches!(this.popup, Some(Popup::Models)) || this.settings_open {
                     this.model_search.focus_handle(cx).focus(window);
                 } else {

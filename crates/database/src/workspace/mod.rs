@@ -245,15 +245,23 @@ impl WorkspaceQueries for SqliteChatStore {
             .collect()
     }
     async fn attachment_references(&self) -> Result<Vec<PathBuf>, PersistenceError> {
-        Ok(
+        let mut paths: Vec<_> =
             sqlx::query_file_scalar!("src/workspace/sql/attachment_references.sql")
                 .fetch_all(self.pool())
                 .await
                 .map_err(PersistenceError::new)?
                 .into_iter()
                 .map(PathBuf::from)
-                .collect(),
-        )
+                .collect();
+        if let Some(new_chat) = self.session().await?.new_chat {
+            for file in new_chat.draft.attachments {
+                paths.push(file.path);
+                if let Some(preview) = file.preview_path {
+                    paths.push(preview);
+                }
+            }
+        }
+        Ok(paths)
     }
 }
 

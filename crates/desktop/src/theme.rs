@@ -19,6 +19,47 @@ pub const MUTED: u32 = 0xb4afbe;
 pub const DANGER: u32 = 0xf39caa;
 pub const BORDER: u32 = 0x414047;
 pub const SEND: u32 = 0xf4f3f7;
+pub const SIDEBAR_WIDTH: f32 = 248.;
+pub const SIDEBAR_RAIL_WIDTH: f32 = 48.;
+
+pub fn compact_button(id: impl Into<ElementId>, label: impl Into<String>) -> Stateful<gpui::Div> {
+    compact_button_with_hover(id, label, PANEL_HOVER)
+}
+
+pub fn compact_button_with_hover(
+    id: impl Into<ElementId>,
+    label: impl Into<String>,
+    hover: u32,
+) -> Stateful<gpui::Div> {
+    button_with_hover(id, label, hover)
+        .px_2()
+        .py_1()
+        .text_size(px(13.))
+}
+
+pub fn icon_button(id: impl Into<ElementId>, name: &'static str) -> Stateful<gpui::Div> {
+    icon_button_with_hover(id, name, PANEL_HOVER)
+}
+
+pub fn icon_button_with_hover(
+    id: impl Into<ElementId>,
+    name: &'static str,
+    hover: u32,
+) -> Stateful<gpui::Div> {
+    compact_button_with_hover(id, "", hover)
+        .size(px(28.))
+        .flex_shrink_0()
+        .px_0()
+        .py_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon(name).size(px(15.)).text_color(rgb(MUTED)))
+}
+
+pub fn quiet_border() -> gpui::Rgba {
+    gpui::rgba((BORDER << 8) | 0x66)
+}
 
 pub fn button(id: impl Into<ElementId>, label: impl Into<String>) -> Stateful<gpui::Div> {
     button_with_hover(id, label, PANEL_HOVER)
@@ -169,6 +210,13 @@ impl gpui::AssetSource for Icons {
             "compose" => include_bytes!("../assets/icons/compose.svg"),
             "queue" => include_bytes!("../assets/icons/queue.svg"),
             "copy" => include_bytes!("../assets/icons/copy.svg"),
+            "search" => include_bytes!("../assets/icons/search.svg"),
+            "sidebar" => include_bytes!("../assets/icons/sidebar.svg"),
+            "settings" => include_bytes!("../assets/icons/settings.svg"),
+            "plus" => include_bytes!("../assets/icons/plus.svg"),
+            "close" => include_bytes!("../assets/icons/close.svg"),
+            "chevron-down" => include_bytes!("../assets/icons/chevron-down.svg"),
+            "arrow-up" => include_bytes!("../assets/icons/arrow-up.svg"),
             _ => return Ok(None),
         };
         Ok(Some(std::borrow::Cow::Borrowed(bytes)))

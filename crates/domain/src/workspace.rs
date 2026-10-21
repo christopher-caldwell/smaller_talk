@@ -85,6 +85,35 @@ pub struct SessionState {
     pub sidebar_collapsed: bool,
     /// Message index plus offset within the message, independent of window size.
     pub scroll_positions: BTreeMap<String, (usize, f32)>,
+    /// One reusable, unsent conversation; it is not part of saved chat history.
+    #[serde(default)]
+    pub new_chat: Option<NewChatDraft>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct NewChatDraft {
+    pub id: String,
+    pub preferences: ChatPreferences,
+    pub draft: Draft,
+    /// Allows restart recovery if the first send committed before the UI acknowledged it.
+    pub submitted: Option<Draft>,
+}
+
+impl NewChatDraft {
+    pub fn remaining_draft(&self) -> Draft {
+        let mut remaining = self.draft.clone();
+        if let Some(submitted) = &self.submitted {
+            if remaining.text == submitted.text {
+                remaining.text.clear();
+                remaining.selection_start = 0;
+                remaining.selection_end = 0;
+            }
+            remaining
+                .attachments
+                .retain(|file| !submitted.attachments.iter().any(|sent| sent.id == file.id));
+        }
+        remaining
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

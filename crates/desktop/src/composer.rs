@@ -75,6 +75,7 @@ pub struct Composer {
     picker_navigation: bool,
     single_line: bool,
     max_rows: usize,
+    font_size: f32,
     content_height: Pixels,
     reveal_cursor: bool,
 }
@@ -102,6 +103,7 @@ impl Composer {
             picker_navigation: false,
             single_line,
             max_rows: 7,
+            font_size: 16.,
             content_height: px(24.),
             reveal_cursor: true,
             undo: Vec::new(),
@@ -160,6 +162,10 @@ impl Composer {
     }
     pub fn set_placeholder(&mut self, text: &str) {
         self.placeholder = text.to_owned().into();
+    }
+
+    pub fn set_font_size(&mut self, font_size: f32) {
+        self.font_size = font_size;
     }
 
     pub fn content(&self) -> String {
@@ -1050,7 +1056,7 @@ impl Render for Composer {
             .min_w(px(0.))
             .text_color(rgb(super::TEXT))
             .line_height(px(24.))
-            .text_size(px(16.))
+            .text_size(px(self.font_size))
             .child(div().w_full().child(TextElement { input: cx.entity() }))
     }
 }

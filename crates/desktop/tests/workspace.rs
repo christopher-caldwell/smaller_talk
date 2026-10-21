@@ -145,6 +145,7 @@ async fn projects_search_drafts_attachments_and_tabs_survive_restart() {
         active_tab: Some(chat.id.to_string()),
         sidebar_collapsed: true,
         scroll_positions: [(chat.id.to_string(), (3, 42.))].into_iter().collect(),
+        new_chat: None,
     };
     db.save_session(&session).await.unwrap();
     for query in ["MEMORY", "research", "100%_needle", "CAFÉ", "éCOLE"] {

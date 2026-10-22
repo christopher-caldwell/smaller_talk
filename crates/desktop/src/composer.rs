@@ -45,6 +45,34 @@ actions!(
     ]
 );
 
+fn skill_query_at_cursor(
+    content: &str,
+    cursor: usize,
+    skills: &[SkillMention],
+) -> Option<(Range<usize>, String)> {
+    let start = content[..cursor]
+        .char_indices()
+        .rfind(|(_, character)| character.is_whitespace())
+        .map_or(0, |(i, character)| i + character.len_utf8());
+    let token = &content[start..cursor];
+    let query = token.strip_prefix('$')?;
+    if !query.is_empty() && !query.bytes().any(|c| c.is_ascii_lowercase()) {
+        return None;
+    }
+    if !query
+        .bytes()
+        .all(|c| c.is_ascii_alphanumeric() || b"_:-".contains(&c))
+        || skills.iter().any(|m| m.range == (start..cursor))
+    {
+        return None;
+    }
+    let probe = format!("{}x ", &content[..cursor]);
+    if !skill_tokens(&probe).iter().any(|(r, _)| r.start == start) {
+        return None;
+    }
+    Some((start..cursor, query.into()))
+}
+
 pub struct Changed;
 impl EventEmitter<Changed> for Composer {}
 
@@ -208,27 +236,7 @@ impl Composer {
         if self.composing() || !self.selected_range.is_empty() {
             return None;
         }
-        let cursor = self.selected_range.end;
-        let start = self.content[..cursor]
-            .rfind(char::is_whitespace)
-            .map_or(0, |i| i + 1);
-        let token = &self.content[start..cursor];
-        let query = token.strip_prefix('$')?;
-        if !query.is_empty() && !query.bytes().any(|c| c.is_ascii_lowercase()) {
-            return None;
-        }
-        if !query
-            .bytes()
-            .all(|c| c.is_ascii_alphanumeric() || b"_:-".contains(&c))
-            || self.skills.iter().any(|m| m.range == (start..cursor))
-        {
-            return None;
-        }
-        let probe = format!("{}x ", &self.content[..cursor]);
-        if !skill_tokens(&probe).iter().any(|(r, _)| r.start == start) {
-            return None;
-        }
-        Some((start..cursor, query.into()))
+        skill_query_at_cursor(&self.content, self.selected_range.end, &self.skills)
     }
     pub fn select_skill(
         &mut self,
@@ -1326,4 +1334,27 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("shift-enter", Newline, Some("Composer")),
         KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("Composer")),
     ]);
+}
+
+#[cfg(test)]
+mod skill_query_tests {
+    use super::skill_query_at_cursor;
+
+    #[test]
+    fn unicode_whitespace_never_splits_a_character() {
+        for whitespace in ['\u{00a0}', '\u{2003}', '\u{3000}'] {
+            for text in [
+                format!("hello{whitespace}world"),
+                format!("hello{whitespace}$review"),
+            ] {
+                assert_eq!(skill_query_at_cursor(&text, text.len(), &[]), None);
+            }
+            let text = format!("🦀{whitespace}world $review");
+            let cursor = text.len();
+            assert_eq!(
+                skill_query_at_cursor(&text, cursor, &[]),
+                Some((cursor - 7..cursor, "review".into()))
+            );
+        }
+    }
 }

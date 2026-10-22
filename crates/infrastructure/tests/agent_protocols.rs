@@ -319,6 +319,110 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
+async fn codex_skill_discovery_failure_rejects_steering_and_keeps_the_turn_running() {
+    use smaller_talk_application::{SteerCommand, SteerInput, SteerOutcome};
+
+    let temp = tempfile::tempdir().unwrap();
+    let script = executable(
+        temp.path(),
+        "steer-discovery-error",
+        r##"#!/usr/bin/env python3
+import json,sys
+send=lambda v:print(json.dumps(v),flush=True)
+for line in sys.stdin:
+ r=json.loads(line);m=r.get('method')
+ if m=='initialize':send({'id':r['id'],'result':{}})
+ elif m=='skills/list':send({'id':r['id'],'error':{'code':-32603,'message':'Synthetic discovery failure'}})
+ elif m=='thread/start':send({'id':r['id'],'result':{'thread':{'id':'thread'}}})
+ elif m=='turn/start':
+  send({'id':r['id'],'result':{'turn':{'id':'native-turn'}}})
+  send({'method':'item/agentMessage/delta','params':{'threadId':'thread','itemId':'before','delta':'Before'}})
+ elif m=='turn/steer':
+  assert r['params']['expectedTurnId']=='native-turn'
+  assert r['params']['input']==[{'type':'text','text':'Continue','text_elements':[]}]
+  send({'id':r['id'],'result':{'turnId':'native-turn'}})
+  send({'method':'item/agentMessage/delta','params':{'threadId':'thread','itemId':'after','delta':'After'}})
+  send({'method':'turn/completed','params':{'threadId':'thread','turn':{'status':'completed'}}})
+"##,
+    );
+    let request = request(temp.path(), Provider::Codex);
+    let workspace = request.workspace.clone();
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let (_, responses) = mpsc::unbounded_channel();
+    let (controls, control_rx) = mpsc::unbounded_channel();
+    let task = tokio::spawn(async move {
+        CodexAdapter::new(script)
+            .execute_controlled(request, events, responses, control_rx)
+            .await
+    });
+    let accepted_id = Uuid::new_v4();
+    let mut rejected = false;
+    let mut accepted = false;
+    let mut continued = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while let Some(event) = receiver.recv().await {
+            match event {
+                ExecutionEvent::TextDelta(text) if text == "Before" => {
+                    let (result, response) = tokio::sync::oneshot::channel();
+                    controls
+                        .send(SteerCommand {
+                            input: SteerInput {
+                                id: Uuid::new_v4(),
+                                prompt: "$review".into(),
+                                attachments: vec![],
+                                skills: vec![SkillMention {
+                                    range: 0..7,
+                                    reference: SkillReference {
+                                        provider: Provider::Codex,
+                                        name: "review".into(),
+                                        path: workspace.join("SKILL.md"),
+                                        workspace: workspace.clone(),
+                                    },
+                                }],
+                            },
+                            result,
+                        })
+                        .unwrap();
+                    match response
+                        .await
+                        .expect("steering must receive a definite outcome")
+                    {
+                        SteerOutcome::Rejected(error) => {
+                            assert!(error.contains("Synthetic discovery failure"))
+                        }
+                        other => panic!("expected rejection, got {other:?}"),
+                    }
+                    rejected = true;
+                    let (result, response) = tokio::sync::oneshot::channel();
+                    controls
+                        .send(SteerCommand {
+                            input: SteerInput {
+                                id: accepted_id,
+                                prompt: "Continue".into(),
+                                attachments: vec![],
+                                skills: vec![],
+                            },
+                            result,
+                        })
+                        .unwrap();
+                    assert!(matches!(response.await.unwrap(), SteerOutcome::Accepted));
+                }
+                ExecutionEvent::InputAccepted(input) => {
+                    assert_eq!(input.id, accepted_id);
+                    accepted = true;
+                }
+                ExecutionEvent::TextDelta(text) if text == "After" => continued = true,
+                _ => {}
+            }
+        }
+        task.await.unwrap().unwrap();
+    })
+    .await
+    .unwrap();
+    assert!(rejected && accepted && continued);
+}
+
+#[tokio::test]
 async fn claude_steering_waits_for_replayed_uuid_and_both_result_boundaries() {
     let temp = tempfile::tempdir().unwrap();
     let script = executable(

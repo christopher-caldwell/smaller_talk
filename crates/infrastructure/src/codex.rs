@@ -285,7 +285,13 @@ impl CodexAdapter {
                         let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue;
                     }
                     if !command.input.skills.is_empty() {
-                        let entries = self.discover_skills(&request.workspace).await?;
+                        let entries = match self.discover_skills(&request.workspace).await {
+                            Ok(entries) => entries,
+                            Err(error) => {
+                                let _ = command.result.send(SteerOutcome::Rejected(error.to_string()));
+                                continue;
+                            }
+                        };
                         if let Err(error) = crate::skills::validate_selected(&entries, Provider::Codex, &request.workspace, &command.input.prompt, &command.input.skills) {
                             let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue;
                         }

@@ -746,9 +746,7 @@ impl ChatsView {
                 cx.notify();
             })
             .detach();
-            // Keep off-screen history virtualized. Measuring every message builds
-            // its Markdown views and grows GPUI's retained element arena.
-            let list = ListState::new(0, ListAlignment::Bottom, px(300.));
+            let list = ListState::new(0, ListAlignment::Bottom, px(300.)).measure_all();
             let weak = cx.entity().downgrade();
             list.set_scroll_handler(move |event, _, cx| {
                 let follow = !event.is_scrolled;

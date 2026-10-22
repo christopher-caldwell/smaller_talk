@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/taffy"]
 members = [
     "crates/domain",
     "crates/application",
@@ -32,3 +33,7 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 uuid = "1"
+
+[patch.crates-io]
+# Backport the node-context drop fix without changing GPUI's layout API.
+taffy = { path = "vendor/taffy" }

@@ -25,5 +25,6 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 async-trait.workspace = true
 sqlx.workspace = true
 tempfile = "3"
+taffy = { version = "=0.9.0", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
 tokio = { workspace = true, features = ["time", "test-util"] }
 uuid = { workspace = true, features = ["v4"] }

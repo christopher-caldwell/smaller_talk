@@ -14,6 +14,16 @@ pub(super) struct State {
 }
 
 impl ChatsView {
+    #[cfg(target_os = "macos")]
+    pub(super) fn benchmark_memory_reclaimed(&self, elapsed: Duration) {
+        if let Some(benchmark) = &self.benchmark {
+            benchmark.log.emit(
+                "memory_reclaimed",
+                json!({"allocator":"mimalloc-v2", "elapsed_ms":elapsed.as_secs_f64() * 1000.}),
+            );
+        }
+    }
+
     pub(crate) fn attach_benchmark(&mut self, session: Session, cx: &mut Context<Self>) {
         let Session { log, mut commands } = session;
         self.benchmark = Some(State {

@@ -23,6 +23,7 @@ syntect = { version = "5.3.0", default-features = false, features = ["default-fa
 
 [target.'cfg(target_os = "macos")'.dependencies]
 mimalloc = { version = "=0.1.52", features = ["v2", "secure"] }
+libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended"] }
 
 [dev-dependencies]
 async-trait.workspace = true

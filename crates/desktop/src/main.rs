@@ -28,6 +28,15 @@ use tokio::runtime::Builder;
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+#[cfg(target_os = "macos")]
+fn reclaim_transcript_memory() -> std::time::Duration {
+    let started = std::time::Instant::now();
+    // SAFETY: mimalloc permits collection of the current thread's heap at any
+    // time. It returns only unused pages and preserves all live allocations.
+    unsafe { libmimalloc_sys::mi_collect(true) };
+    started.elapsed()
+}
+
 actions!(
     smaller_talk,
     [

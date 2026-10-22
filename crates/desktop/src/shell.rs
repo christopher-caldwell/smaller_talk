@@ -1512,9 +1512,16 @@ impl ChatsView {
         if self.states.get(&id).is_some_and(|s| s.activity.is_none()) {
             self.release_response_display(id);
         }
+        #[cfg(target_os = "macos")]
+        let mut reclaim_memory = false;
         if let Some(state) = self.states.get_mut(&id)
             && state.activity.is_none()
         {
+            #[cfg(target_os = "macos")]
+            {
+                reclaim_memory =
+                    state.messages.iter().map(|m| m.body.len()).sum::<usize>() >= 256 * 1024;
+            }
             state.messages.clear();
             state.list.reset(0);
             state.rich.clear();
@@ -1526,6 +1533,21 @@ impl ChatsView {
         self.popup = None;
         self.save_session();
         cx.notify();
+        #[cfg(target_os = "macos")]
+        if reclaim_memory {
+            cx.spawn(async move |this, cx| {
+                // Let the empty transcript render and GPUI finish deferred
+                // entity destruction before collecting this large batch.
+                cx.background_executor()
+                    .timer(Duration::from_millis(250))
+                    .await;
+                let _ = this.update(cx, |this, _| {
+                    let elapsed = crate::reclaim_transcript_memory();
+                    this.benchmark_memory_reclaimed(elapsed);
+                });
+            })
+            .detach();
+        }
     }
 
     fn draft_changed(&mut self, id: Uuid, cx: &mut Context<Self>) {

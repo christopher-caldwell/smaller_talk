@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/taffy"]
+exclude = ["vendor/taffy", "vendor/gpui"]
 members = [
     "crates/domain",
     "crates/application",
@@ -37,3 +37,5 @@ uuid = "1"
 [patch.crates-io]
 # Backport the node-context drop fix without changing GPUI's layout API.
 taffy = { path = "vendor/taffy" }
+# Release oversized frame buffers after large transcripts stop using them.
+gpui = { path = "vendor/gpui" }

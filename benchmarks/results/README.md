@@ -9,6 +9,13 @@ Full reports, samples, databases, responses, and copied binaries stay local unde
 `.dev/memory-bench/`. The earlier narrative reports in `docs/benchmarks/` are also
 ignored. This directory contains results and comparison metadata only.
 
+`comparisons/` contains selected measurements and links to the source result
+records. The [history driver control](comparisons/2026-10-22-history-driver-control.json)
+compares ordinary UI interaction with the native driver using the same binary
+and history fixture. Its new trials use fixed 30-second observation windows;
+the record includes the final 10-second medians and a longer ordinary-app idle
+check. These are exploratory observations from a busy host.
+
 The history includes the existing manual run and automated validation attempts,
 including incomplete/failed attempts. Re-export an existing suite or capture with:
 

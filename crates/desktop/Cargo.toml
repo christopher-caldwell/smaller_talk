@@ -21,6 +21,9 @@ tokio = { workspace = true, features = ["time"] }
 uuid.workspace = true
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mimalloc = { version = "=0.1.52", features = ["v2", "secure"] }
+
 [dev-dependencies]
 async-trait.workspace = true
 log = "0.4"

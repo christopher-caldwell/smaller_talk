@@ -1,0 +1,252 @@
+{
+  "schema_version": 1,
+  "run_id": "29f6bbfafd7f4261bab9f51b42f4676c",
+  "started_at": "2026-10-22T19:39:50.798484+00:00",
+  "benchmark_protocol": 1,
+  "label": "compact-layout-live-check",
+  "context": "busy",
+  "outcome": "completed",
+  "expected_attempts": 2,
+  "source": {
+    "revision": "b55c6553d994f6b6a9e6b972b3f3854e8b6c0aba",
+    "branch": "perf/reclaim-history-buffers",
+    "dirty": true
+  },
+  "host": {
+    "macos": "26.3.1",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "live",
+      "build": "candidate",
+      "binary_sha256": "0f18e3b3a5a9912ef3bf7df9e82dcd5ab5c2705505d055e38437dd9dc1662423",
+      "attempts": {
+        "completed": 1
+      },
+      "verification": [
+        "verified_automated"
+      ],
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "provider_version": "codex-cli 0.163.0",
+      "provider_sha256": "8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31",
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": null,
+        "history_sha256": null,
+        "history_messages": null,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3,
+        "retention_cycles": 0,
+        "chunk_chars": null,
+        "chunk_interval_s": null
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "launch",
+          "runs": 1,
+          "samples": 1,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 8.562,
+          "app_rss_peak_mib": 8.562,
+          "group_rss_peak_mib": 8.562,
+          "app_footprint_median_mib": 2.485,
+          "app_footprint_peak_mib": 2.485,
+          "group_footprint_peak_mib": 2.485
+        },
+        {
+          "phase": "settle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 101.719,
+          "app_rss_peak_mib": 101.719,
+          "group_rss_peak_mib": 101.719,
+          "app_footprint_median_mib": 84.048,
+          "app_footprint_peak_mib": 90.392,
+          "group_footprint_peak_mib": 90.392
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 101.734,
+          "app_rss_peak_mib": 101.734,
+          "group_rss_peak_mib": 101.734,
+          "app_footprint_median_mib": 77.704,
+          "app_footprint_peak_mib": 77.704,
+          "group_footprint_peak_mib": 77.704
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 13,
+          "codex_samples": 13,
+          "non_app_process_samples": 13,
+          "other_process_names": [
+            "codex",
+            "node",
+            "node_repl",
+            "python",
+            "railway",
+            "uv"
+          ],
+          "app_rss_median_mib": 103.734,
+          "app_rss_peak_mib": 114.438,
+          "group_rss_peak_mib": 719.453,
+          "app_footprint_median_mib": 86.938,
+          "app_footprint_peak_mib": 96.626,
+          "group_footprint_peak_mib": 441.04
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 114.547,
+          "app_rss_peak_mib": 114.547,
+          "group_rss_peak_mib": 114.547,
+          "app_footprint_median_mib": 90.36,
+          "app_footprint_peak_mib": 96.704,
+          "group_footprint_peak_mib": 96.704
+        }
+      ]
+    },
+    {
+      "scenario": "playback",
+      "build": "candidate",
+      "binary_sha256": "0f18e3b3a5a9912ef3bf7df9e82dcd5ab5c2705505d055e38437dd9dc1662423",
+      "attempts": {
+        "completed": 1
+      },
+      "verification": [
+        "verified_automated"
+      ],
+      "model": "benchmark-playback",
+      "effort": "low",
+      "provider_version": null,
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "history_sha256": "fa60cf7e6205b52577c511131ba6f9c7c93a3a897cd89a9b8905140fa49da9f5",
+        "history_messages": 200,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3,
+        "retention_cycles": 0,
+        "chunk_chars": 80,
+        "chunk_interval_s": 0.08
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "launch",
+          "runs": 1,
+          "samples": 1,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 8.562,
+          "app_rss_peak_mib": 8.562,
+          "group_rss_peak_mib": 8.562,
+          "app_footprint_median_mib": 2.485,
+          "app_footprint_peak_mib": 2.485,
+          "group_footprint_peak_mib": 2.485
+        },
+        {
+          "phase": "settle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 102.625,
+          "app_rss_peak_mib": 102.625,
+          "group_rss_peak_mib": 102.625,
+          "app_footprint_median_mib": 84.392,
+          "app_footprint_peak_mib": 90.735,
+          "group_footprint_peak_mib": 90.735
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 102.641,
+          "app_rss_peak_mib": 102.641,
+          "group_rss_peak_mib": 102.641,
+          "app_footprint_median_mib": 78.048,
+          "app_footprint_peak_mib": 78.048,
+          "group_footprint_peak_mib": 78.048
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 5,
+          "codex_samples": 0,
+          "non_app_process_samples": 5,
+          "other_process_names": [
+            "Python"
+          ],
+          "app_rss_median_mib": 106.141,
+          "app_rss_peak_mib": 117.391,
+          "group_rss_peak_mib": 136.625,
+          "app_footprint_median_mib": 87.157,
+          "app_footprint_peak_mib": 96.454,
+          "group_footprint_peak_mib": 105.501
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 114.469,
+          "app_rss_peak_mib": 114.469,
+          "group_rss_peak_mib": 114.469,
+          "app_footprint_median_mib": 90.126,
+          "app_footprint_peak_mib": 96.47,
+          "group_footprint_peak_mib": 96.47
+        },
+        {
+          "phase": "closed-baseline",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 1,
+          "other_process_names": [
+            "gh",
+            "git"
+          ],
+          "app_rss_median_mib": 114.734,
+          "app_rss_peak_mib": 114.734,
+          "group_rss_peak_mib": 115.328,
+          "app_footprint_median_mib": 96.657,
+          "app_footprint_peak_mib": 96.657,
+          "group_footprint_peak_mib": 96.657
+        }
+      ]
+    }
+  ]
+}

@@ -22,6 +22,12 @@ use std::sync::Arc;
 use theme::*;
 use tokio::runtime::Builder;
 
+// Separate Rust's transient transcript allocations from long-lived AppKit
+// allocations, and return freed pages without waiting for system pressure.
+#[cfg(target_os = "macos")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 actions!(
     smaller_talk,
     [

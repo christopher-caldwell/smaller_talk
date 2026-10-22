@@ -22,6 +22,12 @@ measurements, separate heap diagnostics, ordinary UI validation, and a real
 Codex job. It distinguishes the final fix from the earlier virtualization
 experiment, which was not retained.
 
+The [two-drawable follow-up](comparisons/2026-10-22-two-metal-drawables.json)
+records the macOS renderer's surface-memory reduction, three paired history
+runs, a normal-use control with longer settling, native resize/copy checks, and
+a real Codex job. It also preserves the inconclusive small-chat collection
+experiment that was reverted, and records the remaining transient history peak.
+
 The history includes the existing manual run and automated validation attempts,
 including incomplete/failed attempts. Re-export an existing suite or capture with:
 

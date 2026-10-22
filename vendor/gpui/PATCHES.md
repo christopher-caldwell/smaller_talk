@@ -46,4 +46,5 @@ allocation, and reuse during repeated large frames. Native UI and memory runs
 provide integration evidence for the private layout and frame code.
 
 Remove this override when a compatible GPUI release provides bounded frame
-capacity, after repeating the history and native UI checks.
+capacity, after repeating the history and native UI checks and reviewing its
+drawable count against the app's surface-memory budget.

@@ -1,0 +1,250 @@
+{
+  "schema_version": 1,
+  "run_id": "d1579421abbc475abaf9704d83ef56aa",
+  "started_at": "2026-10-22T23:29:55.571597+00:00",
+  "benchmark_protocol": 1,
+  "label": "two-drawables-live-codex",
+  "context": "busy",
+  "outcome": "completed",
+  "expected_attempts": 2,
+  "source": {
+    "revision": "4093619f14d5c274aa3cd7e32548dd2983bacabe",
+    "branch": "perf/trim-idle-transcript-memory",
+    "dirty": true
+  },
+  "host": {
+    "macos": "26.3.1",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "live",
+      "build": "candidate",
+      "binary_sha256": "41038acba08fc69865dad8dc61fb06c42aa5e559cd608e9a4c955ef3f252cd81",
+      "attempts": {
+        "completed": 1
+      },
+      "verification": [
+        "verified_automated"
+      ],
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "provider_version": "codex-cli 0.163.0",
+      "provider_sha256": "8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31",
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": null,
+        "history_sha256": null,
+        "history_messages": null,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3,
+        "retention_cycles": 0,
+        "chunk_chars": null,
+        "chunk_interval_s": null
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "launch",
+          "runs": 1,
+          "samples": 1,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 9.281,
+          "app_rss_peak_mib": 9.281,
+          "group_rss_peak_mib": 9.281,
+          "app_footprint_median_mib": 3.094,
+          "app_footprint_peak_mib": 3.094,
+          "group_footprint_peak_mib": 3.094
+        },
+        {
+          "phase": "settle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 110.344,
+          "app_rss_peak_mib": 110.344,
+          "group_rss_peak_mib": 110.344,
+          "app_footprint_median_mib": 74.892,
+          "app_footprint_peak_mib": 74.892,
+          "group_footprint_peak_mib": 74.892
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 110.344,
+          "app_rss_peak_mib": 110.344,
+          "group_rss_peak_mib": 110.344,
+          "app_footprint_median_mib": 68.548,
+          "app_footprint_peak_mib": 68.548,
+          "group_footprint_peak_mib": 68.548
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 13,
+          "codex_samples": 13,
+          "non_app_process_samples": 13,
+          "other_process_names": [
+            "codex",
+            "node",
+            "node_repl",
+            "python",
+            "railway",
+            "uv",
+            "zsh"
+          ],
+          "app_rss_median_mib": 113.281,
+          "app_rss_peak_mib": 126.906,
+          "group_rss_peak_mib": 734.672,
+          "app_footprint_median_mib": 79.11,
+          "app_footprint_peak_mib": 91.548,
+          "group_footprint_peak_mib": 446.133
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 127.125,
+          "app_rss_peak_mib": 127.125,
+          "group_rss_peak_mib": 127.125,
+          "app_footprint_median_mib": 85.376,
+          "app_footprint_peak_mib": 91.72,
+          "group_footprint_peak_mib": 91.72
+        }
+      ]
+    },
+    {
+      "scenario": "playback",
+      "build": "candidate",
+      "binary_sha256": "41038acba08fc69865dad8dc61fb06c42aa5e559cd608e9a4c955ef3f252cd81",
+      "attempts": {
+        "completed": 1
+      },
+      "verification": [
+        "verified_automated"
+      ],
+      "model": "benchmark-playback",
+      "effort": "low",
+      "provider_version": null,
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "history_sha256": "fa60cf7e6205b52577c511131ba6f9c7c93a3a897cd89a9b8905140fa49da9f5",
+        "history_messages": 200,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3,
+        "retention_cycles": 0,
+        "chunk_chars": 80,
+        "chunk_interval_s": 0.08
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "launch",
+          "runs": 1,
+          "samples": 1,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 9.281,
+          "app_rss_peak_mib": 9.281,
+          "group_rss_peak_mib": 9.281,
+          "app_footprint_median_mib": 3.094,
+          "app_footprint_peak_mib": 3.094,
+          "group_footprint_peak_mib": 3.094
+        },
+        {
+          "phase": "settle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 109.672,
+          "app_rss_peak_mib": 109.672,
+          "group_rss_peak_mib": 109.672,
+          "app_footprint_median_mib": 74.267,
+          "app_footprint_peak_mib": 74.267,
+          "group_footprint_peak_mib": 74.267
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 109.672,
+          "app_rss_peak_mib": 109.672,
+          "group_rss_peak_mib": 109.672,
+          "app_footprint_median_mib": 67.923,
+          "app_footprint_peak_mib": 67.923,
+          "group_footprint_peak_mib": 67.923
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 5,
+          "codex_samples": 0,
+          "non_app_process_samples": 5,
+          "other_process_names": [
+            "Python"
+          ],
+          "app_rss_median_mib": 115.156,
+          "app_rss_peak_mib": 126.5,
+          "group_rss_peak_mib": 145.781,
+          "app_footprint_median_mib": 78.736,
+          "app_footprint_peak_mib": 88.032,
+          "group_footprint_peak_mib": 97.111
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 123.672,
+          "app_rss_peak_mib": 123.672,
+          "group_rss_peak_mib": 123.672,
+          "app_footprint_median_mib": 81.689,
+          "app_footprint_peak_mib": 88.032,
+          "group_footprint_peak_mib": 88.032
+        },
+        {
+          "phase": "closed-baseline",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 124.188,
+          "app_rss_peak_mib": 124.188,
+          "group_rss_peak_mib": 124.188,
+          "app_footprint_median_mib": 88.454,
+          "app_footprint_peak_mib": 88.47,
+          "group_footprint_peak_mib": 88.47
+        }
+      ]
+    }
+  ]
+}

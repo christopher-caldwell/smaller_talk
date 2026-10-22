@@ -55,6 +55,7 @@ impl TaffyLayoutEngine {
             // old tree is cleared here after drawing, before any new requests.
             self.taffy = TaffyTree::with_capacity(node_count.saturating_mul(2).max(256));
             self.peak_node_count = 0;
+            crate::frame_memory::did_reclaim();
         } else {
             self.taffy.clear();
             self.peak_node_count = self.peak_node_count.max(node_count);
@@ -65,9 +66,11 @@ impl TaffyLayoutEngine {
         self.computed_layouts.clear();
         if self.absolute_layout_bounds.capacity() > retained_bounds.saturating_mul(2) {
             self.absolute_layout_bounds.shrink_to(retained_bounds);
+            crate::frame_memory::did_reclaim();
         }
         if self.computed_layouts.capacity() > retained_layouts.saturating_mul(2) {
             self.computed_layouts.shrink_to(retained_layouts);
+            crate::frame_memory::did_reclaim();
         }
     }
 

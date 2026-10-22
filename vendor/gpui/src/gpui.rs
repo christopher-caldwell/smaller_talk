@@ -20,6 +20,7 @@ pub mod colors;
 mod element;
 mod elements;
 mod executor;
+mod frame_memory;
 mod geometry;
 mod global;
 mod input;

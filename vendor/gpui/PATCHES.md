@@ -8,7 +8,7 @@ The published `.cargo_vcs_info.json` identifies revision
 the registry package, rather than that revision alone, is the source of truth.
 `Cargo.toml.orig` preserves the upstream workspace manifest.
 
-Only three source files are changed:
+Four original source files are changed, and one private helper is added:
 
 - `src/arena.rs`: after dropping elements and invalidating handles, release
   surplus chunks when a later frame uses less than a quarter of retained
@@ -19,13 +19,21 @@ Only three source files are changed:
   in the layout bounds map and computed-layout set using their latest usage.
 - `src/window.rs`: trim oversized cleared frame-state containers based on their
   most recent usage, retaining two times that usage or at least 256 entries.
+- `src/gpui.rs` registers the private `src/frame_memory.rs` helper. After actual
+  buffer reclamation, macOS receives one `malloc_zone_pressure_relief(NULL, 0)`
+  call at the end of that frame, after the element arena has been cleared.
+  [Apple's public header](https://github.com/apple-oss-distributions/libmalloc/blob/main/include/malloc/malloc.h)
+  documents these arguments as requesting reclamation of unused memory across
+  the process's malloc zones. This is conditional on reclaimed storage, not a
+  per-frame call during ordinary rendering. Other platforms only trim buffers.
 
 Ordinary frames and equally large successive frames retain reusable storage.
 No live frame state is evicted. Layout, text shaping, and list measurement are
 unchanged. Opening large history still has a transient allocation peak; this
 patch targets capacity retained after the large frame is gone. Alternating very
 large and small frames can require more allocations, which should be considered
-when assessing responsiveness.
+when assessing responsiveness. macOS allocator reclamation can also add work to
+the frames that shrink buffers; debug logging records its duration and bytes.
 
 `crates/desktop/tests/frame_arena.rs` exercises the actual arena source, including
 upstream arena tests, destructor ordering, invalid old handles, subsequent

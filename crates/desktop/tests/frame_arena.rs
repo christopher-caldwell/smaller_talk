@@ -3,6 +3,9 @@
 #[allow(dead_code)]
 #[path = "../../../vendor/gpui/src/arena.rs"]
 mod arena;
+#[allow(dead_code)]
+#[path = "../../../vendor/gpui/src/frame_memory.rs"]
+mod frame_memory;
 
 use arena::Arena;
 use std::{cell::Cell, rc::Rc};

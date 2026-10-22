@@ -222,6 +222,7 @@ impl ArenaClearNeeded {
         ELEMENT_ARENA.with_borrow_mut(|element_arena| {
             element_arena.clear();
         });
+        crate::frame_memory::release_reclaimed();
     }
 }
 
@@ -748,9 +749,11 @@ impl Frame {
         self.accessed_element_states.clear();
         if self.element_states.capacity() > retained_states.saturating_mul(2) {
             self.element_states.shrink_to(retained_states);
+            crate::frame_memory::did_reclaim();
         }
         if self.accessed_element_states.capacity() > retained_states.saturating_mul(2) {
             self.accessed_element_states.shrink_to(retained_states);
+            crate::frame_memory::did_reclaim();
         }
         self.mouse_listeners.clear();
         self.dispatch_tree.clear();

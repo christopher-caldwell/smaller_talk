@@ -1,0 +1,343 @@
+{
+  "schema": "memory-context-retention-investigation/v1",
+  "created_at": "2026-10-22T18:33:49.933304+00:00",
+  "context": "busy",
+  "final_implementation": "Taffy 0.9.0 clear/remove context-drop backport; original transcript measure_all behavior retained",
+  "upstream_fix": "https://github.com/DioxusLabs/taffy/pull/1181",
+  "fix_revision": "c5537fa052c21fb1556057639d9a8363f86752f8",
+  "regression_tests": {
+    "before_patch": {
+      "passed": 0,
+      "failed": 2,
+      "observed_drops": [
+        0,
+        0
+      ],
+      "expected_drops": [
+        8,
+        1
+      ]
+    },
+    "after_patch": {
+      "passed": 2,
+      "failed": 0
+    },
+    "workspace_passed": 127,
+    "authenticated_tests_ignored": 6,
+    "format": "passed",
+    "clippy_warnings_denied": "passed"
+  },
+  "dependency_backport": {
+    "version": "0.9.0",
+    "original_registry_checksum": "a13e5d13f79d558b5d353a98072ca8ca0e99da429467804de959aa8c83c9a004",
+    "original_source_files_verified": 61,
+    "modified_upstream_source_files": [
+      "src/tree/taffy_tree.rs"
+    ],
+    "added_source_lines": 2
+  },
+  "diagnostic_baseline": {
+    "intrusive": true,
+    "tools": [
+      "heap --showSizes",
+      "vmmap -summary",
+      "MallocStackLogging=lite with malloc_history"
+    ],
+    "profile_runs": {
+      "heap_vmmap": "without stack logging",
+      "allocation_stack": "separate instrumented run"
+    },
+    "profiles": [
+      {
+        "phase": "closed-baseline",
+        "live_heap_nodes": 70275,
+        "live_heap_bytes": 36542800,
+        "physical_footprint_display": "91.7M",
+        "iosurface_display": "41.0M"
+      },
+      {
+        "phase": "history-1",
+        "live_heap_nodes": 158373,
+        "live_heap_bytes": 326519280,
+        "physical_footprint_display": "369.8M",
+        "iosurface_display": "41.0M"
+      },
+      {
+        "phase": "retained-1",
+        "live_heap_nodes": 133753,
+        "live_heap_bytes": 317789504,
+        "physical_footprint_display": "313.4M",
+        "iosurface_display": "41.0M"
+      },
+      {
+        "phase": "retained-3",
+        "live_heap_nodes": 199726,
+        "live_heap_bytes": 531478400,
+        "physical_footprint_display": "516.8M",
+        "iosurface_display": "41.0M"
+      }
+    ],
+    "retained_text_shaping_allocations_mib_approx": 150,
+    "offscreen_layout_all_items_share_mib_approx": 145,
+    "allocation_stack": [
+      "gpui::elements::list::StateInner::layout_all_items",
+      "Drawable::layout_as_root",
+      "TaffyLayoutEngine::compute_layout",
+      "TextLayout::layout",
+      "WindowTextSystem::shape_text",
+      "SmallVec::reserve_one_unchecked"
+    ],
+    "retained_1_1540096_byte_text_layout_blocks": 102,
+    "retained_3_1540096_byte_text_layout_blocks": 203
+  },
+  "paired_results": {
+    "results_file": "benchmarks/results/20261022T181954.609332Z-f7916894d396.json",
+    "independent_pairs": 3,
+    "randomization_seed": 1729,
+    "minimum_settle_s": 3,
+    "measurement": "Median app ri_phys_footprint per phase, then median across three independent runs; MiB",
+    "binary_sha256": {
+      "baseline": "014d3d249fd83011b0d16ed08eae967c5fa95a86476711d71b164b0f105cae01",
+      "candidate": "69320b966033f7ebc82fe8ea5e7a71dc46ead53c54ee406467d7545f6128d619"
+    },
+    "workload": {
+      "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+      "response_fixture_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+      "history_sha256": "fa60cf7e6205b52577c511131ba6f9c7c93a3a897cd89a9b8905140fa49da9f5",
+      "history_messages": 200,
+      "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+      "settle_s": 3,
+      "retention_cycles": 3,
+      "chunk_chars": 80,
+      "chunk_interval_s": 0.08
+    },
+    "phase_results": {
+      "baseline": {
+        "closed-baseline": {
+          "app_footprint_median_mib": 94.782,
+          "app_footprint_peak_mib": 97.954,
+          "app_rss_median_mib": 115.797,
+          "samples": 7,
+          "codex_samples": 0
+        },
+        "retained-1": {
+          "app_footprint_median_mib": 320.423,
+          "app_footprint_peak_mib": 323.251,
+          "app_rss_median_mib": 374.188,
+          "samples": 9,
+          "codex_samples": 0
+        },
+        "retained-2": {
+          "app_footprint_median_mib": 456.408,
+          "app_footprint_peak_mib": 460.408,
+          "app_rss_median_mib": 511.016,
+          "samples": 9,
+          "codex_samples": 0
+        },
+        "retained-3": {
+          "app_footprint_median_mib": 485.829,
+          "app_footprint_peak_mib": 489.829,
+          "app_rss_median_mib": 541.203,
+          "samples": 9,
+          "codex_samples": 0
+        }
+      },
+      "candidate": {
+        "closed-baseline": {
+          "app_footprint_median_mib": 95.267,
+          "app_footprint_peak_mib": 96.735,
+          "app_rss_median_mib": 114.641,
+          "samples": 8,
+          "codex_samples": 0
+        },
+        "retained-1": {
+          "app_footprint_median_mib": 273.517,
+          "app_footprint_peak_mib": 277.517,
+          "app_rss_median_mib": 370.156,
+          "samples": 9,
+          "codex_samples": 0
+        },
+        "retained-2": {
+          "app_footprint_median_mib": 187.439,
+          "app_footprint_peak_mib": 191.439,
+          "app_rss_median_mib": 381.656,
+          "samples": 9,
+          "codex_samples": 0
+        },
+        "retained-3": {
+          "app_footprint_median_mib": 195.236,
+          "app_footprint_peak_mib": 199.236,
+          "app_rss_median_mib": 390.891,
+          "samples": 9,
+          "codex_samples": 0
+        }
+      }
+    },
+    "per_pair": [
+      {
+        "pair": 1,
+        "builds": {
+          "baseline": {
+            "closed_baseline_mib": 96.157,
+            "after_cycle3_mib": 488.923,
+            "growth_mib": 392.766
+          },
+          "candidate": {
+            "closed_baseline_mib": 96.517,
+            "after_cycle3_mib": 195.236,
+            "growth_mib": 98.719
+          }
+        }
+      },
+      {
+        "pair": 2,
+        "builds": {
+          "candidate": {
+            "closed_baseline_mib": 92.735,
+            "after_cycle3_mib": 222.267,
+            "growth_mib": 129.532
+          },
+          "baseline": {
+            "closed_baseline_mib": 94.782,
+            "after_cycle3_mib": 485.829,
+            "growth_mib": 391.047
+          }
+        }
+      },
+      {
+        "pair": 3,
+        "builds": {
+          "candidate": {
+            "closed_baseline_mib": 95.267,
+            "after_cycle3_mib": 190.361,
+            "growth_mib": 95.094
+          },
+          "baseline": {
+            "closed_baseline_mib": 93.938,
+            "after_cycle3_mib": 459.704,
+            "growth_mib": 365.766
+          }
+        }
+      }
+    ],
+    "baseline_provenance": {
+      "results_file": "benchmarks/results/20261022T164426.219401Z-d80dca840d32.json",
+      "source": {
+        "revision": "69c863cd25b29b66479c14b3689da227410ea562",
+        "branch": null,
+        "dirty": true
+      },
+      "binary_sha256": "014d3d249fd83011b0d16ed08eae967c5fa95a86476711d71b164b0f105cae01"
+    }
+  },
+  "normal_launch": {
+    "results_file": "benchmarks/results/20261022T182626.164571Z-bc7a46e3b4db.json",
+    "driver_active": false,
+    "history_cycles": 1,
+    "phase_results": {
+      "closed-baseline": {
+        "app_footprint_median_mib": 91.282,
+        "app_footprint_peak_mib": 91.329,
+        "app_rss_median_mib": 119.344,
+        "samples": 71,
+        "codex_samples": 0
+      },
+      "retained-1": {
+        "app_footprint_median_mib": 194.329,
+        "app_footprint_peak_mib": 194.392,
+        "app_rss_median_mib": 216.0,
+        "samples": 30,
+        "codex_samples": 0
+      }
+    },
+    "live_heap_nodes_after_close": 83163,
+    "live_heap_bytes_after_close": 124697952,
+    "profiling_after_capture_finished": true,
+    "closed_observation_s": 30,
+    "additional_idle_s": 60,
+    "additional_idle_results": {
+      "phase": "long-idle",
+      "runs": 1,
+      "samples": 60,
+      "codex_samples": 0,
+      "non_app_process_samples": 0,
+      "other_process_names": [],
+      "app_rss_median_mib": 216.0,
+      "app_rss_peak_mib": 216.0,
+      "group_rss_peak_mib": 216.0,
+      "app_footprint_median_mib": 194.329,
+      "app_footprint_peak_mib": 194.329,
+      "group_footprint_peak_mib": 194.329
+    },
+    "native_ui_checks": [
+      "exact persisted playback response",
+      "completed response followed to latest",
+      "first history user message example 0 after one native scroll",
+      "Return to Latest displayed final Rust tests",
+      "native tab close button returned to empty view"
+    ],
+    "remaining_1540096_byte_text_layout_blocks": 0
+  },
+  "live_codex": {
+    "results_file": "benchmarks/results/20261022T183218.595699Z-b564b9ee05a9.json",
+    "model": "gpt-6-luna",
+    "effort": "low",
+    "provider_version": "codex-cli 0.163.0",
+    "completed": true,
+    "work": [
+      {
+        "phase": "work",
+        "runs": 1,
+        "samples": 12,
+        "codex_samples": 11,
+        "non_app_process_samples": 11,
+        "other_process_names": [
+          "codex",
+          "node",
+          "node_repl",
+          "python",
+          "railway",
+          "uv",
+          "zsh"
+        ],
+        "app_rss_median_mib": 94.211,
+        "app_rss_peak_mib": 105.234,
+        "group_rss_peak_mib": 707.688,
+        "app_footprint_median_mib": 86.884,
+        "app_footprint_peak_mib": 96.954,
+        "group_footprint_peak_mib": 435.602
+      }
+    ],
+    "post": [
+      {
+        "phase": "post",
+        "runs": 1,
+        "samples": 3,
+        "codex_samples": 0,
+        "non_app_process_samples": 0,
+        "other_process_names": [],
+        "app_rss_median_mib": 105.234,
+        "app_rss_peak_mib": 105.234,
+        "group_rss_peak_mib": 105.234,
+        "app_footprint_median_mib": 90.61,
+        "app_footprint_peak_mib": 90.61,
+        "group_footprint_peak_mib": 90.61
+      }
+    ]
+  },
+  "earlier_virtualization_experiment": {
+    "results_file": "benchmarks/results/20261022T180018.213748Z-fb4c74ead61f.json",
+    "revision": "aa42eb1",
+    "final_implementation": false,
+    "reason": "Removing measure_all reduced allocation work but changed large native-scroll behavior for unmeasured history. The final change preserves the original height map and fixes context lifetime instead.",
+    "incomplete_normal_validation": "benchmarks/results/20261022T180607.137477Z-a934a959c63a.json"
+  },
+  "limitations": [
+    "Busy host; three pairs are exploratory and have no confidence interval or release verdict.",
+    "The old pinned binary is identified by its hash and original results, independently of the current collector source revision.",
+    "One-second sampling can miss transient history-layout allocation peaks.",
+    "GPUI element arenas and layout buffers can retain reusable capacity; this patch releases stranded node contexts rather than forcing all memory back to baseline.",
+    "The normal UI check is one launch and one history cycle; automated pairing covers three cycles per launch.",
+    "Heap/VM and allocation-stack profiling is intrusive and was performed separately from scored paired measurements."
+  ]
+}

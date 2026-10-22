@@ -16,6 +16,12 @@ and history fixture. Its new trials use fixed 30-second observation windows;
 the record includes the final 10-second medians and a longer ordinary-app idle
 check. These are exploratory observations from a busy host.
 
+The [context-retention investigation](comparisons/2026-10-22-history-context-retention.json)
+records the Taffy context cleanup backport, before/after drop tests, paired
+measurements, separate heap diagnostics, ordinary UI validation, and a real
+Codex job. It distinguishes the final fix from the earlier virtualization
+experiment, which was not retained.
+
 The history includes the existing manual run and automated validation attempts,
 including incomplete/failed attempts. Re-export an existing suite or capture with:
 

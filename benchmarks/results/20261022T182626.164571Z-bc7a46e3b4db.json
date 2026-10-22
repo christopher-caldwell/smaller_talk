@@ -1,0 +1,201 @@
+{
+  "schema_version": 1,
+  "run_id": "5275d384-206d-43de-b99f-e77fa3268d34",
+  "started_at": "2026-10-22T18:26:26.164571+00:00",
+  "benchmark_protocol": null,
+  "label": "Normal UI control, driver absent, 30s settling",
+  "context": "busy",
+  "outcome": "measurement_only",
+  "expected_attempts": 1,
+  "source": {
+    "revision": "c5537fa052c21fb1556057639d9a8363f86752f8",
+    "branch": "fix/history-memory-retention",
+    "dirty": true
+  },
+  "host": {
+    "macos": "26.3.1",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "manual-ui-playback",
+      "build": "candidate",
+      "binary_sha256": "69320b966033f7ebc82fe8ea5e7a71dc46ead53c54ee406467d7545f6128d619",
+      "attempts": {
+        "measurement_only": 1
+      },
+      "verification": [
+        "native_ui_observed_and_database_verified; no in-app driver"
+      ],
+      "model": "benchmark-playback",
+      "effort": "low",
+      "provider_version": null,
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "history_sha256": "fa60cf7e6205b52577c511131ba6f9c7c93a3a897cd89a9b8905140fa49da9f5",
+        "history_messages": 200,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3.0,
+        "retention_cycles": 1,
+        "chunk_chars": 80,
+        "chunk_interval_s": 0.08
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "settle",
+          "runs": 1,
+          "samples": 15,
+          "codex_samples": 0,
+          "non_app_process_samples": 1,
+          "other_process_names": [
+            "claude",
+            "env"
+          ],
+          "app_rss_median_mib": 101.703,
+          "app_rss_peak_mib": 101.828,
+          "group_rss_peak_mib": 101.828,
+          "app_footprint_median_mib": 77.938,
+          "app_footprint_peak_mib": 90.626,
+          "group_footprint_peak_mib": 90.626
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 9,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 99.531,
+          "app_rss_peak_mib": 99.859,
+          "group_rss_peak_mib": 99.859,
+          "app_footprint_median_mib": 78.079,
+          "app_footprint_peak_mib": 78.392,
+          "group_footprint_peak_mib": 78.392
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 15,
+          "codex_samples": 0,
+          "non_app_process_samples": 5,
+          "other_process_names": [
+            "Python"
+          ],
+          "app_rss_median_mib": 95.453,
+          "app_rss_peak_mib": 106.609,
+          "group_rss_peak_mib": 125.656,
+          "app_footprint_median_mib": 88.657,
+          "app_footprint_peak_mib": 97.235,
+          "group_footprint_peak_mib": 106.204
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 16,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 106.516,
+          "app_rss_peak_mib": 119.406,
+          "group_rss_peak_mib": 119.406,
+          "app_footprint_median_mib": 90.798,
+          "app_footprint_peak_mib": 104.017,
+          "group_footprint_peak_mib": 104.017
+        },
+        {
+          "phase": "closed-baseline",
+          "runs": 1,
+          "samples": 71,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 119.344,
+          "app_rss_peak_mib": 119.391,
+          "group_rss_peak_mib": 119.391,
+          "app_footprint_median_mib": 91.282,
+          "app_footprint_peak_mib": 91.329,
+          "group_footprint_peak_mib": 91.329
+        },
+        {
+          "phase": "history-1",
+          "runs": 1,
+          "samples": 16,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 244.422,
+          "app_rss_peak_mib": 375.859,
+          "group_rss_peak_mib": 375.859,
+          "app_footprint_median_mib": 221.478,
+          "app_footprint_peak_mib": 328.017,
+          "group_footprint_peak_mib": 328.017
+        },
+        {
+          "phase": "history-1-top",
+          "runs": 1,
+          "samples": 16,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 375.812,
+          "app_rss_peak_mib": 375.859,
+          "group_rss_peak_mib": 375.859,
+          "app_footprint_median_mib": 271.611,
+          "app_footprint_peak_mib": 284.329,
+          "group_footprint_peak_mib": 284.329
+        },
+        {
+          "phase": "history-1-bottom",
+          "runs": 1,
+          "samples": 59,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 375.766,
+          "app_rss_peak_mib": 375.828,
+          "group_rss_peak_mib": 375.828,
+          "app_footprint_median_mib": 203.095,
+          "app_footprint_peak_mib": 271.626,
+          "group_footprint_peak_mib": 271.626
+        },
+        {
+          "phase": "retained-1",
+          "runs": 1,
+          "samples": 30,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 216.0,
+          "app_rss_peak_mib": 216.062,
+          "group_rss_peak_mib": 216.062,
+          "app_footprint_median_mib": 194.329,
+          "app_footprint_peak_mib": 194.392,
+          "group_footprint_peak_mib": 194.392
+        },
+        {
+          "phase": "long-idle",
+          "runs": 1,
+          "samples": 60,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 216.0,
+          "app_rss_peak_mib": 216.0,
+          "group_rss_peak_mib": 216.0,
+          "app_footprint_median_mib": 194.329,
+          "app_footprint_peak_mib": 194.329,
+          "group_footprint_peak_mib": 194.329
+        }
+      ]
+    }
+  ]
+}

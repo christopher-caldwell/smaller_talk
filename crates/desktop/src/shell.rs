@@ -1519,7 +1519,8 @@ impl ChatsView {
         {
             #[cfg(target_os = "macos")]
             {
-                reclaim_memory = !state.messages.is_empty();
+                reclaim_memory =
+                    state.messages.iter().map(|m| m.body.len()).sum::<usize>() >= 256 * 1024;
             }
             state.messages.clear();
             state.list.reset(0);
@@ -1536,7 +1537,7 @@ impl ChatsView {
         if reclaim_memory {
             cx.spawn(async move |this, cx| {
                 // Let the empty transcript render and GPUI finish deferred
-                // entity destruction before collecting the released storage.
+                // entity destruction before collecting this large batch.
                 cx.background_executor()
                     .timer(Duration::from_millis(250))
                     .await;

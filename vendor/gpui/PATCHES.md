@@ -8,7 +8,7 @@ The published `.cargo_vcs_info.json` identifies revision
 the registry package, rather than that revision alone, is the source of truth.
 `Cargo.toml.orig` preserves the upstream workspace manifest.
 
-Only five source files are changed:
+Only six source files are changed:
 
 - `src/arena.rs`: after dropping elements and invalidating handles, release
   surplus chunks when a later frame uses less than a quarter of retained
@@ -24,6 +24,12 @@ Only five source files are changed:
   grow onto the heap without a run limit. This cuts the mostly unused inline
   storage multiplied across thousands of offscreen lines. Text shaping,
   wrapping, decoration merging, and painting algorithms are unchanged.
+- `src/platform/mac/metal_renderer.rs`: use two Metal drawables instead of
+  three. Core Animation supports both counts. This bounds full-window surface
+  storage at the existing resolution, with less queued rendering headroom.
+  GPU-heavy workloads may stall sooner; native scrolling, streaming, resizing,
+  and memory measurements must accompany this tradeoff. See Apple's
+  [maximumDrawableCount documentation](https://developer.apple.com/documentation/quartzcore/cametallayer/maximumdrawablecount).
 
 Ordinary frames and equally large successive frames retain reusable storage.
 No live frame state is evicted. Layout and list measurement are unchanged.

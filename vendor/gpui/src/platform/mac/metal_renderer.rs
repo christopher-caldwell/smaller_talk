@@ -143,7 +143,9 @@ impl MetalRenderer {
         layer.set_device(&device);
         layer.set_pixel_format(MTLPixelFormat::BGRA8Unorm);
         layer.set_opaque(false);
-        layer.set_maximum_drawable_count(3);
+        // Two drawables bound full-window surface storage for this UI. Metal
+        // still synchronizes reuse; there is one fewer queued frame of headroom.
+        layer.set_maximum_drawable_count(2);
         unsafe {
             let _: () = msg_send![&*layer, setAllowsNextDrawableTimeout: NO];
             let _: () = msg_send![&*layer, setNeedsDisplayOnBoundsChange: YES];

@@ -374,7 +374,7 @@ impl WindowTextSystem {
             "text argument should not contain newlines"
         );
 
-        let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
+        let mut decoration_runs = SmallVec::<[DecorationRun; 4]>::new();
         for run in runs {
             if let Some(last_run) = decoration_runs.last_mut()
                 && last_run.color == run.color
@@ -426,7 +426,7 @@ impl WindowTextSystem {
             font_runs.clear();
             let line_end = line_start + line_text.len();
 
-            let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
+            let mut decoration_runs = SmallVec::<[DecorationRun; 4]>::new();
             let mut run_start = line_start;
             while run_start < line_end {
                 let Some(run) = runs.peek_mut() else {

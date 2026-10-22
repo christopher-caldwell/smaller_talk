@@ -116,11 +116,9 @@ impl Arena {
         if self.chunks.len() > used_chunks.saturating_mul(4).max(4) {
             self.chunks.truncate(used_chunks);
             self.chunks.shrink_to_fit();
-            crate::frame_memory::did_reclaim();
         }
         if self.elements.capacity() > retained_elements.saturating_mul(2) {
             self.elements.shrink_to(retained_elements);
-            crate::frame_memory::did_reclaim();
         }
     }
 

@@ -1,4 +1,4 @@
-# GPUI 0.2.2 frame capacity reclamation
+# GPUI 0.2.2 transcript memory bounds
 
 This is the published GPUI 0.2.2 crate, including its Apache 2.0 license. The
 registry package checksum is
@@ -8,7 +8,7 @@ The published `.cargo_vcs_info.json` identifies revision
 the registry package, rather than that revision alone, is the source of truth.
 `Cargo.toml.orig` preserves the upstream workspace manifest.
 
-Four original source files are changed, and one private helper is added:
+Only five source files are changed:
 
 - `src/arena.rs`: after dropping elements and invalidating handles, release
   surplus chunks when a later frame uses less than a quarter of retained
@@ -19,21 +19,20 @@ Four original source files are changed, and one private helper is added:
   in the layout bounds map and computed-layout set using their latest usage.
 - `src/window.rs`: trim oversized cleared frame-state containers based on their
   most recent usage, retaining two times that usage or at least 256 entries.
-- `src/gpui.rs` registers the private `src/frame_memory.rs` helper. After actual
-  buffer reclamation, macOS receives one `malloc_zone_pressure_relief(NULL, 0)`
-  call at the end of that frame, after the element arena has been cleared.
-  [Apple's public header](https://github.com/apple-oss-distributions/libmalloc/blob/main/include/malloc/malloc.h)
-  documents these arguments as requesting reclamation of unused memory across
-  the process's malloc zones. This is conditional on reclaimed storage, not a
-  per-frame call during ordinary rendering. Other platforms only trim buffers.
+- `src/text_system.rs` and `src/text_system/line.rs`: reserve four inline
+  decoration runs per shaped/wrapped line, rather than 32. Complex lines still
+  grow onto the heap without a run limit. This cuts the mostly unused inline
+  storage multiplied across thousands of offscreen lines. Text shaping,
+  wrapping, decoration merging, and painting algorithms are unchanged.
 
 Ordinary frames and equally large successive frames retain reusable storage.
-No live frame state is evicted. Layout, text shaping, and list measurement are
-unchanged. Opening large history still has a transient allocation peak; this
-patch targets capacity retained after the large frame is gone. Alternating very
+No live frame state is evicted. Layout and list measurement are unchanged.
+Opening large history still has a transient allocation peak; this patch reduces
+per-line storage and capacity retained after that frame. Alternating very
 large and small frames can require more allocations, which should be considered
-when assessing responsiveness. macOS allocator reclamation can also add work to
-the frames that shrink buffers; debug logging records its duration and bytes.
+when assessing responsiveness. Lines with more than four decoration runs also
+use a heap allocation that was previously inline. Native history, formatted
+text, streaming, selection, copying, and live Codex runs are integration checks.
 
 `crates/desktop/tests/frame_arena.rs` exercises the actual arena source, including
 upstream arena tests, destructor ordering, invalid old handles, subsequent

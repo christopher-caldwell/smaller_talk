@@ -88,9 +88,18 @@ fn main() -> anyhow::Result<()> {
     };
     let path = startup::database_path()?;
     let runtime = Builder::new_multi_thread()
+        // These tasks drive async I/O; blocking file work has its own pool.
+        // Avoid an idle executor and allocator cache for every host CPU.
+        .worker_threads(2)
         .enable_all()
         .build()
         .context("could not start the async runtime")?;
+    if let Some(benchmark) = &benchmark {
+        benchmark.log.emit(
+            "runtime_config",
+            serde_json::json!({"tokio_workers":runtime.metrics().num_workers()}),
+        );
+    }
     match command.as_deref() {
         Some("db-create") => {
             runtime.block_on(create_empty_database(&path))?;

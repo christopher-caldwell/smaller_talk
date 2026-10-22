@@ -22,10 +22,12 @@ struct Connection {
 }
 pub struct AgentRouter {
     connections: Mutex<BTreeMap<Provider, Connection>>,
+    skill_locations: Mutex<crate::SkillLocations>,
 }
 impl AgentRouter {
     pub fn new(codex: CodexAdapter, claude: ClaudeAdapter) -> Arc<Self> {
         Arc::new(Self {
+            skill_locations: Mutex::new(crate::SkillLocations::default()),
             connections: Mutex::new(
                 [
                     (
@@ -50,6 +52,23 @@ impl AgentRouter {
                 .into(),
             ),
         })
+    }
+    pub fn configure_skill_locations(&self, locations: crate::SkillLocations) {
+        if let Ok(mut current) = self.skill_locations.lock() {
+            *current = locations;
+        }
+    }
+    pub(crate) fn skill_locations(&self) -> crate::SkillLocations {
+        self.skill_locations
+            .lock()
+            .map(|l| l.clone())
+            .unwrap_or_default()
+    }
+    pub(crate) fn skill_revision(&self, provider: Provider) -> u64 {
+        self.connections
+            .lock()
+            .map(|c| c[&provider].revision)
+            .unwrap_or(u64::MAX)
     }
     fn connection(&self, provider: Provider) -> Result<Connection, ExecutionError> {
         let connection = self
@@ -201,6 +220,7 @@ impl ExecutionAdapter for AgentRouter {
             }
             Provider::Claude => {
                 ClaudeAdapter::new(c.executable)
+                    .with_skill_locations(self.skill_locations())
                     .execute_controlled(request, events, responses, controls)
                     .await
             }

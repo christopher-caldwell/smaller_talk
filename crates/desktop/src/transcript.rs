@@ -175,6 +175,20 @@ impl ChatsView {
                     .line_height(px(24.))
                     .child(text),
             );
+            let message_id = message.id;
+            body = body.child(
+                button(
+                    element_id("message-instructions", message_id),
+                    "Instructions",
+                )
+                .text_size(px(11.))
+                .text_color(rgb(MUTED))
+                .px_1()
+                .py_0()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.inspect_message_instructions(chat, message_id, window, cx)
+                })),
+            );
         } else {
             body = body.child(
                 row()

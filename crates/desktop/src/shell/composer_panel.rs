@@ -10,7 +10,8 @@ impl ChatsView {
         let state = &self.states[&id];
         let settings = state.preferences.execution.clone();
         let working = state.activity.is_some();
-        let settings_locked = working || state.settings_pending || state.enqueue_pending;
+        let settings_locked =
+            working || state.settings_pending || state.enqueue_pending || state.queue_edit_pending;
         // Use the measured conversation width; leave room for the fixed controls.
         let model_width = (self.last_width - px(240.)).clamp(px(48.), px(210.));
         let model = self
@@ -47,12 +48,29 @@ impl ChatsView {
             Some(ProviderReadiness::Ready)
         );
         let model_available = self.selected_model(id).is_some();
-        let can_send = state.loaded
+        let current_workspace = effective_workspace(
+            &self.services.launch_folder,
+            &state.preferences,
+            &self.projects,
+        )
+        .ok();
+        let entries = self.skill_entries();
+        let selected_skills_valid = state.composer.read(cx).skills().iter().all(|m| {
+            m.reference.provider == settings.provider
+                && current_workspace.as_ref() == Some(&m.reference.workspace)
+                && (!self.skill_catalog_checked()
+                    || entries
+                        .iter()
+                        .any(|e| e.reference == m.reference && e.unavailable.is_none()))
+        });
+        let can_send = selected_skills_valid
+            && state.loaded
             && provider_enabled
             && provider_ready
             && model_available
             && !self.global_settings_save.is_saving()
             && !state.enqueue_pending
+            && !state.queue_edit_pending
             && !state.importing
             && !state.settings_pending
             && !state.settings_error
@@ -134,14 +152,76 @@ impl ChatsView {
             }
             composer = composer.child(files);
         }
+        for mention in state.composer.read(cx).skills() {
+            let unavailable = mention.reference.provider != settings.provider
+                || current_workspace.as_ref() != Some(&mention.reference.workspace)
+                || (self.skill_catalog_checked()
+                    && !entries
+                        .iter()
+                        .any(|d| d.reference == mention.reference && d.unavailable.is_none()));
+            if unavailable {
+                let remove = mention.range.clone();
+                let replace = mention.range.clone();
+                composer = composer.child(
+                    row()
+                        .gap_1()
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_xs()
+                                .text_color(rgb(DANGER))
+                                .child(format!(
+                                    "${} needs a source for this provider and folder",
+                                    mention.reference.name
+                                )),
+                        )
+                        .child(
+                            compact_button(
+                                element_id("replace-skill", mention.range.start),
+                                "Replace",
+                            )
+                            .text_xs()
+                            .on_click(cx.listener(
+                                move |this, _, window, cx| {
+                                    this.open_skills(window, cx);
+                                    this.skill_ui.range = Some(replace.clone());
+                                },
+                            )),
+                        )
+                        .child(
+                            compact_button(
+                                element_id("remove-skill", mention.range.start),
+                                "Remove",
+                            )
+                            .text_xs()
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if let Some(state) = this.states.get(&id) {
+                                        state
+                                            .composer
+                                            .update(cx, |e, cx| e.remove_skill(remove.clone(), cx));
+                                    }
+                                },
+                            )),
+                        ),
+                );
+            }
+        }
+        if state.queue_edit_pending {
+            composer = composer.child(muted("Restoring queued message…"));
+        }
         if state.importing {
             composer = composer.child(muted("Saving attachments…"));
         }
         composer = composer.child(state.composer.clone());
         let attach = icon_button("attach-files", "plus")
-            .tooltip(hint("Attach images or files"))
+            .when(self.popup.is_none(), |b| {
+                b.tooltip(hint("Attach files or choose skills"))
+            })
             .flex_shrink_0()
-            .on_click(cx.listener(move |this, _, _, cx| this.pick_files(id, cx)));
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_picker(Popup::Attachments, window, cx)
+            }));
         let model = self
             .picker_control(
                 "model-picker",
@@ -238,7 +318,9 @@ impl ChatsView {
             }))
         });
         let send = compact_button("send-message", "")
-            .tooltip(hint(if !provider_enabled {
+            .tooltip(hint(if !selected_skills_valid {
+                "Replace or remove unresolved skills before sending"
+            } else if !provider_enabled {
                 "Enable this provider in Settings or choose another model"
             } else if !provider_ready {
                 "Check provider installation and sign-in in Settings, then Refresh"
@@ -292,7 +374,10 @@ impl ChatsView {
             .child(selection)
             .child(div().flex_1().min_w(px(0.)))
             .child(send);
-        composer.child(controls).into_any_element()
+        self.picker_control("skills-picker", composer.child(controls), cx)
+            .w_full()
+            .max_w(px(800.))
+            .into_any_element()
     }
 }
 
@@ -419,6 +504,15 @@ impl ChatsView {
                                 cx.notify();
                             }))
                         }),
+                );
+            }
+            if !sending && !uncertain {
+                line = line.child(
+                    compact_button(element_id("edit-queued", id), "Edit")
+                        .text_xs()
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.edit_queued_message(chat, id, cx);
+                        })),
                 );
             }
             line = line.child(

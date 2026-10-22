@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "UPDATE chats\nSET adapter_key = ?, native_session_id = ?, instructions_fingerprint = ?\nWHERE id = ?\nRETURNING id;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "597a5ce995130dba44c158930d89a004a1bbe4069aa152e0ee5250dadc339361"
+}

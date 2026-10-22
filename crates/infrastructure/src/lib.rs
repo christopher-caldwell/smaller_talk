@@ -17,3 +17,6 @@ pub use repository::GitRepositoryReader;
 
 mod rewriting;
 pub use rewriting::CliTextGenerator;
+
+mod skills;
+pub use skills::SkillLocations;

@@ -49,7 +49,7 @@ async fn chat_creation_rolls_back_when_default_preferences_cannot_be_saved() {
         .execute(db.pool())
         .await
         .unwrap();
-    let chats = ChatService::new(db.clone(), db.clone()).with_setup_store(db.clone());
+    let chats = ChatService::new(db.clone(), db.clone()).with_setup_writes(db.clone());
     assert!(
         chats
             .create_chat_with_defaults(Some(ExecutionSettings::default()))

@@ -23,6 +23,33 @@ impl ChatsView {
             .gap_1()
             .on_click(|_, _, cx| cx.stop_propagation());
         match *popup {
+            Popup::Attachments => {
+                if let Some(id) = self.active {
+                    content = content
+                        .child(
+                            compact_button("attach-menu-files", "Attach files…").on_click(
+                                cx.listener(move |this, _, window, cx| {
+                                    this.dismiss_popup(window, cx);
+                                    this.pick_files(id, cx);
+                                }),
+                            ),
+                        )
+                        .child(compact_button("attach-menu-skills", "Skills…").on_click(
+                            cx.listener(|this, _, window, cx| this.open_skills(window, cx)),
+                        ));
+                }
+            }
+            Popup::Skills => {
+                content = content.child(self.render_skills(cx));
+            }
+            Popup::SkillDetails => {
+                content = content.child(
+                    div()
+                        .text_sm()
+                        .child(self.skill_ui.preview.clone().unwrap_or_default()),
+                );
+            }
+
             Popup::Models | Popup::Effort | Popup::Settings(_) => {
                 if matches!(popup, Popup::Models) {
                     content = content.child(
@@ -321,6 +348,7 @@ impl ChatsView {
                                         let _ = this.update(cx, |this, cx| {
                                             this.folder_editor.update(cx, |s, cx| {
                                                 let draft = Draft {
+                                                    skills: Vec::new(),
                                                     text: path,
                                                     ..Default::default()
                                                 };
@@ -358,35 +386,48 @@ impl ChatsView {
                         );
                     }
                 }
-                content = content
-                    .child(
-                        button("edit-project", "Edit project…").on_click(cx.listener(
-                            move |this, _, window, cx| this.begin_project(Some(id), window, cx),
-                        )),
-                    )
-                    .child(
-                        button("remove-project", "Remove project (keep chats)")
-                            .text_color(rgb(DANGER))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if this.states.values().any(|s| {
-                                    s.activity.is_some()
-                                        && s.preferences.project_id == Some(id.to_string())
-                                }) {
-                                    this.banner = Some(
+                content =
+                    content
+                        .child(
+                            button("edit-project", "Edit project…").on_click(cx.listener(
+                                move |this, _, window, cx| this.begin_project(Some(id), window, cx),
+                            )),
+                        )
+                        .child(button("project-instructions", "Instructions…").on_click(
+                            cx.listener(move |this, _, window, cx| {
+                                this.open_instruction_scope(
+                                    super::instructions::InstructionScope::Project(id),
+                                    window,
+                                    cx,
+                                );
+                            }),
+                        ))
+                        .child(
+                            button("remove-project", "Remove project (keep chats)")
+                                .text_color(rgb(DANGER))
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if this.states.values().any(|s| {
+                                        s.activity.is_some()
+                                            && s.preferences.project_id == Some(id.to_string())
+                                    }) {
+                                        this.banner = Some(
                                         "Wait for this project’s active chats before removing it."
                                             .into(),
                                     );
-                                } else {
-                                    let _ = this.persist.send(Persist::RemoveProject(id));
-                                }
-                                this.popup = None;
-                                this.focus_composer = true;
-                                cx.notify();
-                            })),
-                    );
+                                    } else {
+                                        let _ = this.persist.send(Persist::RemoveProject(id));
+                                    }
+                                    this.popup = None;
+                                    this.focus_composer = true;
+                                    cx.notify();
+                                })),
+                        );
             }
         }
-        let anchored = matches!(popup, Popup::Models | Popup::Effort | Popup::Settings(_));
+        let anchored = matches!(
+            popup,
+            Popup::Models | Popup::Effort | Popup::Skills | Popup::Attachments | Popup::Settings(_)
+        );
         let context_menu = matches!(
             popup,
             Popup::Chat(_) | Popup::Assign(_) | Popup::ProjectMenu(_)
@@ -431,7 +472,9 @@ impl ChatsView {
             };
             backdrop = backdrop.child(anchor.child(content));
         } else if anchored {
-            let key = if matches!(popup, Popup::Models) {
+            let key = if matches!(popup, Popup::Skills | Popup::Attachments) {
+                "skills-picker"
+            } else if matches!(popup, Popup::Models) {
                 "model-picker"
             } else {
                 "effort-picker"

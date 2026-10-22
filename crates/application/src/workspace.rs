@@ -2,10 +2,12 @@ use std::{path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
 use smaller_talk_domain::*;
-use thiserror::Error;
 use uuid::Uuid;
 
 use crate::PersistenceError;
+
+mod errors;
+pub use errors::*;
 
 #[async_trait]
 pub trait WorkspaceQueries: Send + Sync {
@@ -50,7 +52,7 @@ pub trait WorkspaceWrites: Send + Sync {
 }
 
 #[async_trait]
-pub trait SteeredInputStore: Send + Sync {
+pub trait SteeredInputWrites: Send + Sync {
     /// Persist the assistant segment and accepted steering input as one atomic
     /// local mutation, including its attachments and turn association.
     async fn persist_steered_input(
@@ -58,6 +60,7 @@ pub trait SteeredInputStore: Send + Sync {
         assistant: Option<crate::NewMessage>,
         user: crate::NewMessage,
         attachments: &[Attachment],
+        skills: &[SkillMention],
         turn: Uuid,
     ) -> Result<(Option<Message>, Message), PersistenceError>;
 }
@@ -71,18 +74,6 @@ pub trait AttachmentStorage: Send + Sync {
     ) -> Result<(), crate::ExecutionError>;
 }
 
-#[derive(Debug, Error)]
-pub enum WorkspaceError {
-    #[error("Workspace storage failed: {0}")]
-    Storage(#[from] PersistenceError),
-    #[error("A project name cannot be empty")]
-    EmptyName,
-    #[error("The working folder does not exist: {0}")]
-    MissingFolder(String),
-    #[error("The selected chat or project no longer exists")]
-    NotFound,
-}
-
 pub struct WorkspaceService {
     queries: Arc<dyn WorkspaceQueries>,
     writes: Arc<dyn WorkspaceWrites>,
@@ -92,71 +83,75 @@ impl WorkspaceService {
     pub fn new(queries: Arc<dyn WorkspaceQueries>, writes: Arc<dyn WorkspaceWrites>) -> Self {
         Self { queries, writes }
     }
-    pub async fn list_projects(&self) -> Result<Vec<Project>, WorkspaceError> {
+    pub async fn list_projects(&self) -> Result<Vec<Project>, ListProjectsError> {
         Ok(self.queries.list_projects().await?)
     }
-    pub async fn preferences(&self, id: Uuid) -> Result<ChatPreferences, WorkspaceError> {
+    pub async fn preferences(&self, id: Uuid) -> Result<ChatPreferences, LoadChatPreferencesError> {
         Ok(self.queries.preferences(id).await?)
     }
-    pub async fn draft(&self, id: Uuid) -> Result<Draft, WorkspaceError> {
+    pub async fn draft(&self, id: Uuid) -> Result<Draft, LoadDraftError> {
         Ok(self.queries.draft(id).await?)
     }
-    pub async fn session(&self) -> Result<SessionState, WorkspaceError> {
+    pub async fn session(&self) -> Result<SessionState, LoadSessionError> {
         Ok(self.queries.session().await?)
     }
-    pub async fn chat_previews(&self) -> Result<Vec<(Uuid, String)>, WorkspaceError> {
+    pub async fn chat_previews(&self) -> Result<Vec<(Uuid, String)>, ListChatPreviewsError> {
         Ok(self.queries.chat_previews().await?)
     }
-    pub async fn search(&self, text: &str) -> Result<Vec<SearchHit>, WorkspaceError> {
+    pub async fn search(&self, text: &str) -> Result<Vec<SearchHit>, SearchChatsError> {
         Ok(self.queries.search(text).await?)
     }
     pub async fn message_attachments(
         &self,
         id: Uuid,
-    ) -> Result<Vec<(Uuid, Attachment)>, WorkspaceError> {
+    ) -> Result<Vec<(Uuid, Attachment)>, ListMessageAttachmentsError> {
         Ok(self.queries.message_attachments(id).await?)
     }
-    pub async fn attachment_references(&self) -> Result<Vec<PathBuf>, WorkspaceError> {
+    pub async fn attachment_references(
+        &self,
+    ) -> Result<Vec<PathBuf>, ListAttachmentReferencesError> {
         Ok(self.queries.attachment_references().await?)
     }
-    pub async fn last_turn(&self, id: Uuid) -> Result<Option<TurnSummary>, WorkspaceError> {
+    pub async fn last_turn(&self, id: Uuid) -> Result<Option<TurnSummary>, LoadLastTurnError> {
         Ok(self.queries.last_turn(id).await?)
     }
-    pub async fn save_draft(&self, id: Uuid, draft: &Draft) -> Result<(), WorkspaceError> {
+    pub async fn save_draft(&self, id: Uuid, draft: &Draft) -> Result<(), SaveDraftError> {
         Ok(self.writes.save_draft(id, draft).await?)
     }
-    pub async fn save_session(&self, session: &SessionState) -> Result<(), WorkspaceError> {
+    pub async fn save_session(&self, session: &SessionState) -> Result<(), SaveSessionError> {
         Ok(self.writes.save_session(session).await?)
     }
-    pub async fn recover_interrupted_turns(&self) -> Result<(), WorkspaceError> {
+    pub async fn recover_interrupted_turns(&self) -> Result<(), RecoverInterruptedTurnsError> {
         Ok(self.writes.recover_interrupted_turns().await?)
     }
-    pub async fn save_project(&self, mut project: Project) -> Result<Project, WorkspaceError> {
+    pub async fn save_project(&self, mut project: Project) -> Result<Project, SaveProjectError> {
         project.name = project.name.trim().to_owned();
         if project.name.is_empty() {
-            return Err(WorkspaceError::EmptyName);
+            return Err(SaveProjectError::EmptyName);
         }
         if let Some(folder) = &project.folder {
             if !folder.is_dir() {
-                return Err(WorkspaceError::MissingFolder(folder.display().to_string()));
+                return Err(SaveProjectError::MissingFolder(
+                    folder.display().to_string(),
+                ));
             }
             project.folder = Some(folder.canonicalize().map_err(PersistenceError::new)?);
         }
         self.writes.save_project(&project).await?;
         Ok(project)
     }
-    pub async fn remove_project(&self, id: Uuid) -> Result<(), WorkspaceError> {
+    pub async fn remove_project(&self, id: Uuid) -> Result<(), RemoveProjectError> {
         if self.writes.remove_project(id).await? {
             Ok(())
         } else {
-            Err(WorkspaceError::NotFound)
+            Err(RemoveProjectError::NotFound)
         }
     }
     pub async fn save_preferences(
         &self,
         chat_id: Uuid,
         mut preferences: ChatPreferences,
-    ) -> Result<(), WorkspaceError> {
+    ) -> Result<(), SaveChatPreferencesError> {
         if let Some(id) = &preferences.project_id
             && !self
                 .queries
@@ -165,7 +160,7 @@ impl WorkspaceService {
                 .iter()
                 .any(|p| p.id.to_string() == *id)
         {
-            return Err(WorkspaceError::NotFound);
+            return Err(SaveChatPreferencesError::NotFound);
         }
         let old = self.queries.preferences(chat_id).await?;
         if old.execution.provider != preferences.execution.provider
@@ -176,7 +171,7 @@ impl WorkspaceService {
         if self.writes.save_preferences(chat_id, &preferences).await? {
             Ok(())
         } else {
-            Err(WorkspaceError::NotFound)
+            Err(SaveChatPreferencesError::NotFound)
         }
     }
 }

@@ -5,7 +5,11 @@ use thiserror::Error;
 
 mod chats;
 mod queue;
+mod transaction;
+pub use transaction::SqliteUnitOfWork;
+mod instructions;
 mod settings;
+mod skills;
 mod workspace;
 pub use chats::SqliteChatStore;
 

@@ -40,6 +40,7 @@ async fn sqlite_chat_history_survives_reopen_and_delete_cascades() {
         title: "Bound fixture".to_owned(),
         created_at: proposed_created_at,
         binding: Some(ExecutionBinding {
+            instructions_fingerprint: None,
             adapter_key: "test-adapter".to_owned(),
             native_session_id: "test-session".to_owned(),
         }),
@@ -170,6 +171,7 @@ async fn renaming_preserves_chat_identity_binding_messages_and_survives_reopen()
     assert_eq!(second.title, "Untitled");
 
     let binding = ExecutionBinding {
+        instructions_fingerprint: None,
         adapter_key: "codex".into(),
         native_session_id: "thread-rename-fixture".into(),
     };

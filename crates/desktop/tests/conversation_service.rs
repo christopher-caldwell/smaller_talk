@@ -34,6 +34,7 @@ impl ExecutionAdapter for RecordingExecutor {
             .push(request.clone());
         if request.binding.is_none() {
             let _ = events.send(ExecutionEvent::BindingEstablished(ExecutionBinding {
+                instructions_fingerprint: None,
                 adapter_key: "codex".into(),
                 native_session_id: "native-thread-1".into(),
             }));

@@ -6,6 +6,8 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+yaml-rust = "0.4.5"
+json5 = "0.4"
 async-trait.workspace = true
 serde_json.workspace = true
 smaller-talk-application = { path = "../application" }

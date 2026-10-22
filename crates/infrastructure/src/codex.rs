@@ -33,6 +33,42 @@ impl CodexAdapter {
         }
     }
 
+    pub(crate) async fn discover_skills(
+        &self,
+        workspace: &std::path::Path,
+    ) -> Result<Vec<SkillDescriptor>, ExecutionError> {
+        timeout(Duration::from_secs(25), async {
+            let mut child = Command::new(&self.executable).args(["app-server", "--stdio"]).current_dir(workspace)
+                .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn()
+                .map_err(|e| ExecutionError::with_source("Could not start Codex skill discovery", e))?;
+            let mut stdin = child.stdin.take().ok_or_else(|| ExecutionError::new("Codex stdin is unavailable"))?;
+            let mut stdout = BufReader::new(child.stdout.take().ok_or_else(|| ExecutionError::new("Codex stdout is unavailable"))?);
+            if let Some(stderr) = child.stderr.take() { tokio::spawn(read_stderr(stderr)); }
+            send_request(&mut stdin, 10, "initialize", json!({"clientInfo":{"name":CLIENT_NAME,"version":CLIENT_VERSION},"capabilities":{"experimentalApi":true}})).await?;
+            read_response(&mut stdout, &mut stdin, 10).await?;
+            send_notification(&mut stdin, "initialized", json!({})).await?;
+            send_request(&mut stdin, 11, "skills/list", json!({"cwds":[workspace],"forceReload":true})).await?;
+            let result = read_response(&mut stdout, &mut stdin, 11).await?;
+            let scoped = result["data"].as_array().and_then(|rows| rows.iter().find(|r| r["cwd"].as_str().is_some_and(|p| std::path::Path::new(p) == workspace)))
+                .ok_or_else(|| ExecutionError::new("Codex did not return skills for this folder"))?;
+            if scoped["errors"].as_array().is_some_and(|e| !e.is_empty()) { return Err(ExecutionError::new(format!("Codex skill discovery reported: {}", scoped["errors"]))); }
+            let mut entries = Vec::new();
+            for skill in scoped["skills"].as_array().into_iter().flatten() {
+                let name = skill["name"].as_str().ok_or_else(|| ExecutionError::new("Codex skill has no name"))?;
+                let path = skill["path"].as_str().ok_or_else(|| ExecutionError::new("Codex skill has no source path"))?;
+                entries.push(SkillDescriptor {
+                    reference: SkillReference { provider: Provider::Codex, name: name.into(), path: path.into(), workspace: workspace.to_owned() },
+                    description: skill["interface"]["shortDescription"].as_str().or_else(|| skill["description"].as_str()).unwrap_or_default().into(),
+                    source: skill["scope"].as_str().unwrap_or("Provider").into(), command: name.into(),
+                    unavailable: (skill["enabled"].as_bool() == Some(false)).then(|| "This skill is disabled in Codex".into()),
+                });
+            }
+            drop(stdin);
+            if timeout(Duration::from_secs(2), child.wait()).await.is_err() { let _ = child.kill().await; let _ = child.wait().await; }
+            Ok(entries)
+        }).await.map_err(|_| ExecutionError::new("Codex skill discovery timed out"))?
+    }
+
     async fn discover_models(&self) -> Result<ProviderCapabilities, ExecutionError> {
         timeout(Duration::from_secs(25), async {
             let mut child = Command::new(&self.executable).args(["app-server", "--stdio"])
@@ -145,6 +181,9 @@ impl CodexAdapter {
         };
         let mut thread_params =
             json!({ "cwd": request.workspace.to_string_lossy(), "model": request.settings.model });
+        if !request.instructions.text.is_empty() {
+            thread_params["developerInstructions"] = json!(request.instructions.text);
+        }
         if let Some(binding) = &request.binding {
             thread_params["threadId"] = json!(binding.native_session_id);
             thread_params["excludeTurns"] = json!(true);
@@ -159,6 +198,7 @@ impl CodexAdapter {
             })?
             .to_owned();
         let binding = ExecutionBinding {
+            instructions_fingerprint: None,
             adapter_key: ADAPTER_KEY.to_owned(),
             native_session_id: thread_id.clone(),
         };
@@ -171,11 +211,32 @@ impl CodexAdapter {
                 )
             })?;
 
-        let mut input =
-            vec![json!({ "type": "text", "text": request.full_prompt(), "text_elements": [] })];
-        for file in request.attachments.iter().filter(|a| a.is_image()) {
-            input.push(json!({ "type": "localImage", "path": file.path }));
+        let mut text = request.full_prompt();
+        let mut skills = request.skills.clone();
+        for replay in &request.retry_inputs {
+            let header = format!(
+                "\n\nConfirmed user steering accepted for this interrupted turn (message ID {}):\n",
+                replay.id
+            );
+            let start = text.len() + header.len();
+            text.push_str(&header);
+            text.push_str(&replay.text_with_files());
+            skills.extend(replay.skills.iter().cloned().map(|mut m| {
+                m.range.start += start;
+                m.range.end += start;
+                m
+            }));
         }
+        // Original ranges refer to the current prompt, before full_prompt's history prefix.
+        let prefix = request
+            .prior_context
+            .as_ref()
+            .map_or(0, |c| c.len() + "\n\nCurrent user message:\n".len());
+        for mention in skills.iter_mut().take(request.skills.len()) {
+            mention.range.start += prefix;
+            mention.range.end += prefix;
+        }
+        let input = native_input(&text, &request.attachments, &skills)?;
         let mut params = json!({
             "threadId": thread_id, "cwd": request.workspace,
             "input": input, "model": request.settings.model, "effort": request.settings.effort,
@@ -223,13 +284,21 @@ impl CodexAdapter {
                     if let Err(error) = crate::steering::validate(&command.input).await {
                         let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue;
                     }
-                    let mut input = vec![json!({"type":"text", "text":command.input.text_with_files(), "text_elements":[]})];
-                    for file in command.input.attachments.iter().filter(|f| f.is_image()) { input.push(json!({"type":"localImage", "path":file.path})); }
+                    if !command.input.skills.is_empty() {
+                        let entries = self.discover_skills(&request.workspace).await?;
+                        if let Err(error) = crate::skills::validate_selected(&entries, Provider::Codex, &request.workspace, &command.input.prompt, &command.input.skills) {
+                            let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue;
+                        }
+                    }
+                    let input = native_input(&command.input.text_with_files(), &command.input.attachments, &command.input.skills)?;
                     send_request(&mut stdin, 4, "turn/steer", json!({"threadId": thread_id, "expectedTurnId": turn_id, "input":input})).await?;
                     pending_steer = Some(command);
                     continue;
                 }
             };
+            if value["method"] == "skills/changed" {
+                let _ = events.send(ExecutionEvent::SkillsChanged);
+            }
             if value.get("id") == Some(&json!(4)) {
                 if let Some(command) = pending_steer.take() {
                     if value.get("error").is_some() {
@@ -711,8 +780,57 @@ fn summarize_stderr(stderr: &str) -> &str {
     }
 }
 
+fn native_input(
+    text: &str,
+    attachments: &[Attachment],
+    skills: &[SkillMention],
+) -> Result<Vec<Value>, ExecutionError> {
+    let mut input = vec![json!({"type":"text","text":text,"text_elements":[]})];
+    let mut seen = std::collections::HashSet::new();
+    for mention in skills {
+        if !mention.matches(text) || mention.reference.provider != Provider::Codex {
+            return Err(ExecutionError::new(
+                "The selected skill no longer matches the message",
+            ));
+        }
+        if seen.insert(&mention.reference.path) {
+            input.push(
+                json!({"type":"skill","name":mention.reference.name,"path":mention.reference.path}),
+            );
+        }
+    }
+    for file in attachments.iter().filter(|a| a.is_image()) {
+        input.push(json!({"type":"localImage","path":file.path}));
+    }
+    Ok(input)
+}
+
 #[cfg(test)]
 mod tests {
+    use smaller_talk_domain::{Provider, SkillMention, SkillReference};
+    #[test]
+    fn skill_inputs_keep_distinct_sources_and_deduplicate_repeated_mentions() {
+        let mention = |range, path: &str| SkillMention {
+            range,
+            reference: SkillReference {
+                provider: Provider::Codex,
+                name: "review".into(),
+                path: path.into(),
+                workspace: "/work".into(),
+            },
+        };
+        let skills = vec![
+            mention(0..7, "/one/SKILL.md"),
+            mention(8..15, "/two/SKILL.md"),
+            mention(16..23, "/one/SKILL.md"),
+        ];
+        let input = super::native_input("$review $review $review", &[], &skills).unwrap();
+        assert_eq!(input.len(), 3);
+        assert_eq!(input[1]["path"], "/one/SKILL.md");
+        assert_eq!(input[2]["path"], "/two/SKILL.md");
+        assert!(super::native_input("changed", &[], &skills).is_err());
+    }
+
     use std::{error::Error, path::PathBuf};
 
     use smaller_talk_application::{ExecutionEvent, ExecutionRequest};
@@ -724,6 +842,9 @@ mod tests {
 
     fn request(workspace: PathBuf) -> ExecutionRequest {
         ExecutionRequest {
+            skills: Vec::new(),
+            retry_inputs: Vec::new(),
+            instructions: Default::default(),
             chat_id: Uuid::new_v4(),
             binding: None,
             workspace,
@@ -805,8 +926,12 @@ for line in sys.stdin:
         CodexAdapter::new(&script)
             .execute(
                 ExecutionRequest {
+                    skills: Vec::new(),
+                    retry_inputs: Vec::new(),
+                    instructions: Default::default(),
                     chat_id: Uuid::new_v4(),
                     binding: Some(smaller_talk_domain::ExecutionBinding {
+                        instructions_fingerprint: None,
                         adapter_key: "codex".into(),
                         native_session_id: "native-thread-123".into(),
                     }),

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO message_skills (message_id, payload) VALUES (?, ?);\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "af932d088322d090de6cd8550472204d9e5c2c242cba7a5ec9178ce12cb8745b"
+}

@@ -31,3 +31,12 @@ Accepted steered messages are saved between assistant segments with their attach
 - Debug RSS samples on the same 40-message long-history view at the default window size: previous build 128,608 KiB; queue build 126,976 KiB. A narrower two-turn/concurrent-tab sample used 70,992 KiB. These are individual observations affected by window geometry and macOS compression, not a stable benchmark or a claim that queuing reduces memory. Queue previews and the existing closed-view cache cleanup remain bounded.
 
 Run `SMALLER_TALK_LIVE=1 SQLX_OFFLINE=true cargo test -p smaller-talk-desktop --test live_providers authenticated_queue_and_steering_both_providers --locked -- --ignored --nocapture` to repeat the authenticated queue smoke test.
+
+
+## Capacity policy and transaction ownership
+
+The enqueue feature service owns the capacity decision using Domain's `QueueCapacity` and `MAX_QUEUED_MESSAGES`. A full queue returns `EnqueueError::Full`, not a storage/I/O failure. The coordinator forwards this outcome without clearing the draft or starting delivery.
+
+This workflow uses an application-owned `UnitOfWorkFactory<U>` and typed `QueueStore<U>`. SQLite reserves the writer with `BEGIN IMMEDIATE` before reading occupancy; the read, insert, and matching draft removal all use the same supplied transaction. Commit consumes the unit of work, and SQLx rolls back uncommitted work on drop. No independent pool acquisition occurs between begin and commit. Other independent queue Writes retain their existing adapter-owned transaction semantics.
+
+Real SQLite tests verify the full-queue outcome and retained draft, eight concurrent submissions through two separate pools competing for the final slot (one succeeds, seven return Full), and an injected draft-removal failure on a one-connection pool (the inserted entry rolls back, the draft survives, and a later enqueue commits). No migration is required for this architecture correction.

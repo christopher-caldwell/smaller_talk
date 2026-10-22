@@ -1,6 +1,6 @@
-use crate::SqliteChatStore;
+use crate::{SqliteChatStore, SqliteUnitOfWork};
 use async_trait::async_trait;
-use smaller_talk_application::{PersistenceError, QueueQueries, QueueWrites};
+use smaller_talk_application::{PersistenceError, QueueQueries, QueueStore, QueueWrites};
 use smaller_talk_domain::*;
 use uuid::Uuid;
 
@@ -48,30 +48,32 @@ impl QueueQueries for SqliteChatStore {
 
 #[async_trait]
 impl QueueWrites for SqliteChatStore {
-    async fn enqueue(&self, entry: &QueuedMessage) -> Result<(), PersistenceError> {
+    async fn edit_queued(
+        &self,
+        chat: Uuid,
+        entry: Uuid,
+    ) -> Result<Option<Draft>, PersistenceError> {
+        let chat = chat.to_string();
+        let entry = entry.to_string();
         let mut tx = self.pool().begin().await.map_err(PersistenceError::new)?;
-        let chat = entry.chat_id.to_string();
-        let id = entry.id.to_string();
-        let payload = serde_json::to_string(&entry.draft).map_err(PersistenceError::new)?;
-        let count: i64 = sqlx::query_file_scalar!("src/queue/sql/count.sql", chat)
-            .fetch_one(&mut *tx)
+        let payload = sqlx::query_file_scalar!("src/queue/sql/edit.sql", chat, entry)
+            .fetch_optional(&mut *tx)
             .await
             .map_err(PersistenceError::new)?;
-        if count >= 100 {
-            return Err(PersistenceError::new(std::io::Error::other(
-                "This chat already has 100 queued messages. Wait for delivery or remove an entry.",
-            )));
-        }
-        sqlx::query_file!("src/queue/sql/enqueue.sql", id, chat, payload)
-            .execute(&mut *tx)
-            .await
-            .map_err(PersistenceError::new)?;
-        sqlx::query_file!("src/queue/sql/clear_draft.sql", chat, payload, payload)
-            .execute(&mut *tx)
-            .await
-            .map_err(PersistenceError::new)?;
-        tx.commit().await.map_err(PersistenceError::new)
+        let draft = if let Some(payload) = payload {
+            let draft: Draft = serde_json::from_str(&payload).map_err(PersistenceError::new)?;
+            sqlx::query_file!("src/workspace/sql/save_draft.sql", payload, chat)
+                .execute(&mut *tx)
+                .await
+                .map_err(PersistenceError::new)?;
+            Some(draft)
+        } else {
+            None
+        };
+        tx.commit().await.map_err(PersistenceError::new)?;
+        Ok(draft)
     }
+
     async fn transition(
         &self,
         id: Uuid,
@@ -129,5 +131,41 @@ impl QueueWrites for SqliteChatStore {
             .await
             .map_err(PersistenceError::new)?;
         tx.commit().await.map_err(PersistenceError::new)
+    }
+}
+
+#[async_trait]
+impl QueueStore<SqliteUnitOfWork> for SqliteChatStore {
+    async fn capacity(
+        &self,
+        uow: &mut SqliteUnitOfWork,
+        chat: Uuid,
+    ) -> Result<QueueCapacity, PersistenceError> {
+        let chat = chat.to_string();
+        let count: i64 = sqlx::query_file_scalar!("src/queue/sql/count.sql", chat)
+            .fetch_one(&mut *uow.transaction)
+            .await
+            .map_err(PersistenceError::new)?;
+        Ok(QueueCapacity {
+            queued: u64::try_from(count).map_err(PersistenceError::new)?,
+        })
+    }
+    async fn enqueue(
+        &self,
+        uow: &mut SqliteUnitOfWork,
+        entry: &QueuedMessage,
+    ) -> Result<(), PersistenceError> {
+        let chat = entry.chat_id.to_string();
+        let id = entry.id.to_string();
+        let payload = serde_json::to_string(&entry.draft).map_err(PersistenceError::new)?;
+        sqlx::query_file!("src/queue/sql/enqueue.sql", id, chat, payload)
+            .execute(&mut *uow.transaction)
+            .await
+            .map_err(PersistenceError::new)?;
+        sqlx::query_file!("src/queue/sql/clear_draft.sql", chat, payload, payload)
+            .execute(&mut *uow.transaction)
+            .await
+            .map_err(PersistenceError::new)?;
+        Ok(())
     }
 }

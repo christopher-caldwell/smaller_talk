@@ -1,36 +1,47 @@
-# Skills in Smaller Talk: design options
+# Skills in Smaller Talk
 
-Research date: October 19, 2026. This is a proposal, not an implemented feature.
+Implemented for issue #1. Skills belong to a message and retain the selected provider, exact source path, and resolution workspace. Saving a reference does not snapshot a skill's historical contents.
 
-## Recommended: discover through the provider, select in the composer
+## Composer
 
-Type `/` to search the active provider’s available skills. The existing `+` attachment control could also offer “Skills…” for discoverability; both entry points would open the same small picker. Show a name, short description, provider, and project/personal source. Selecting a skill adds a removable reference to the draft and leaves room for ordinary instructions and files. Start with one explicit skill per message, then consider multiple only after testing each provider’s actual expansion behavior.
+Type `$` to search skills, or choose **+ → Skills…**. Both entry points use the same bounded list, with name, description, source, Refresh, and Inspect. Inspect reads instructions without running scripts. The composer displays editable `$name` text with subtle highlighting, rather than a permanent skill control or a separate chip row.
 
-The selection applies to that message. It should not become a permanent chat setting. Keep native automatic skill discovery separate: the agent may still use its configured skills without an explicit selection.
+Enter accepts an active suggestion; it does not also send. Arrows navigate and Escape dismisses. Ordinary send/newline shortcuts work outside the picker. The editor's snapshots include skill identity, so undo and redo restore the selected source with the text. Deleting or changing a name removes its association; inserting a delimiter after it preserves the source.
 
-This fits the current chat interface without introducing a skill marketplace, editor, installation manager, or additional sidebar section.
+Known names in prose resolve automatically when unambiguous. Duplicate Codex names require choosing a source. Escaped markers, currency, uppercase shell variables, shell expansion/assignment syntax, inline code, and fenced code remain literal. Unknown names remain ordinary text. Use an escape or code formatting when a literal lowercase variable would otherwise match a known skill.
 
-## What the references establish
+Pasted `[$label](path)` links become visible mentions only when the exact path matches an available entry in the current catalog. Relative paths resolve against the effective workspace; local `file:` links are also accepted. Unknown links remain unchanged. A same-named skill at another path is never a substitute for a saved reference.
 
-**Codex:** the app-server supports `skills/list` scoped by working directories. It can refresh discovery and emits `skills/changed` for invalidation. Explicit invocation supports a `$name` marker plus a structured `skill` input containing the name and SKILL.md path. Send that native reference rather than copying every skill body into each prompt. [Official OpenAI documentation](https://learn.chatgpt.com/docs/app-server#skills).
+The native UI comparison used the regular highlighted editor and a temporary bolder prototype that deleted mentions atomically. The regular editor remains the default: it preserves familiar cursor editing and lets users correct names normally.
 
-**Claude:** skills use `/name` invocation, with provider-specific configuration affecting discoverability and manual versus automatic activation. The catalog must respect `user-invocable`, `disable-model-invocation`, and effective visibility overrides. The native CLI should handle instruction expansion and skill execution. [Claude Code skills documentation](https://code.claude.com/docs/en/skills).
+## Discovery and provider behavior
 
-**T3:** its skill search filters user-invocable entries and ranks names/descriptions. Its Claude discovery code accounts for configuration roots, project roots, duplicate names, and overrides; its dispatch code translates references into native slash invocation. The dispatch source contains a one-skill assumption that differs from newer documented Claude stacking behavior, so it is an implementation reference rather than a protocol specification. [Search](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/providerSkillSearch.ts), [Claude discovery](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/Drivers/ClaudeSkills.ts), [Claude dispatch](https://github.com/pingdotgg/t3code/blob/main/apps/server/src/provider/Drivers/ClaudeSkillDispatch.ts).
+Application owns the skill service and catalog/inspection contracts. Infrastructure owns protocol details, filesystem metadata, provider configuration interpretation, and native command construction. Discovery uses the same effective workspace function as sending: the assigned project folder, falling back to the launch folder.
 
-**Zed:** its own agent presents a lightweight catalog and loads bodies on demand. Its skill tool includes the skill directory when constructing context, so relative resources resolve correctly. Zed explicitly separates its own skills from external agents’ native skills. Smaller Talk runs external CLIs, so copy the catalog experience rather than Zed’s agent runtime. [Skill tool source](https://github.com/zed-industries/zed/blob/main/crates/agent/src/tools/skill_tool.rs), [Zed skills](https://zed.dev/docs/ai/skills), [External-agent boundaries](https://zed.dev/docs/ai/external-agents).
+Catalogs are separate from model discovery and cached for 60 seconds by provider, configuration revision, and workspace. Opening the picker uses the cache or refreshes expired data; typing filters cached descriptors. Explicit refresh bypasses the cache. Provider/project generations reject stale UI results. Codex `skills/changed` invalidates cached results during an active connection; no permanent watcher process is required. Dispatch always revalidates selected references.
 
-## Two smaller or broader alternatives
+- **Codex:** discovery uses workspace-scoped `skills/list`. Initial input and steering use a shared builder that sends readable text, exact `{type: "skill", name, path}` references, and image inputs. Multiple distinct skills are supported; repeated references to the same source are deduplicated. Unsupported structured input fails without a text-only fallback. See [Codex app-server skills](https://learn.chatgpt.com/docs/app-server#skills).
+- **Claude:** discovery reads configured personal, project/ancestor, and managed roots, legacy commands, enabled plugin install records, and declared plugin skill/command directories. JSONC settings and frontmatter visibility are respected. Skills that disable automatic invocation remain available for explicit invocation. Native precedence selects which source a command names; shadowed sources cannot be selected as if `/name` targeted their paths. At dispatch the exact source is checked again, and the CLI must advertise the command.
+- **Claude transport:** one explicit skill per message. History, leading prose, file references, and images remain separate from the final `/command arguments` text block. Accepted inputs recovered for retry are replayed in chronological order as separate native messages. Permission requests retain the existing interaction workflow. This follows the noninteractive limitation described in [Claude's skills documentation](https://code.claude.com/docs/en/skills#stack-several-skills-in-one-message).
 
-| Option | Benefit | Cost |
-| --- | --- | --- |
-| Native text invocation only | Users type Codex `$name` or Claude `/name`; minimal interface work. | Poor discovery, no source disambiguation, and no explicit validation. Text-only behavior through our adapters still needs live verification. |
-| Shared app-owned skill folder | Potentially reusable instructions across providers. | Requires provider-specific root configuration, naming/override rules, and compatibility handling. A common folder does not guarantee equivalent provider behavior. Defer until cross-provider reuse is actually needed. |
+Native automatic skill discovery remains enabled. Only selections attached to current inputs, or confirmed inputs explicitly recovered for retry, become native invocation metadata. Historical transcript mentions remain context.
 
-## Implementation boundaries if approved
+## Persistence and recovery
 
-Add application-owned skill descriptors and draft selections. Keep protocol discovery, configuration interpretation, and native invocation in the provider adapters. Scope catalog caches by provider and effective project folder; refresh after folder/provider changes. Load descriptions first, with bounded search results, rather than retaining full bodies in GPUI views.
+`Draft.skills` defaults to an empty list when older JSON is loaded. Drafts, the unsent new chat in session state, and durable queue payloads store references and mention ranges. Migration `0006_message_skills.sql` adds delivered-message metadata. Initial messages and accepted steering persist their metadata in the same transaction as the message and its existing associated records.
 
-Record the invoked provider, skill identity, and source reference with the turn. Preserve selections through retries and draft restoration. If the user switches providers, show an unresolved reference until an explicit compatible choice is made; do not silently match by name. A shared name can resolve to different instructions.
+Queue acknowledgement and first-send recovery compare selected identities as well as visible text, so changing a source while submission completes cannot erase the revised draft. Retry loads the original references and confirmed steering metadata. Changes to an already delivered input's selection require a new message.
 
-Claude transport needs a focused live prototype: the current adapter combines prior conversation with the prompt, and native slash expansion depends on text-block placement. Confirm that skill arguments, project configuration, images, prior context, errors, and permission requests survive that transport before promising a generic cross-provider skill chip. Let the CLI execute any skill scripts under its existing policies; merely listing or previewing a skill must not execute them.
+Unavailable, disabled, or mismatched references block delivery and pause queues with the provider's actionable reason. The composer offers Replace and Remove for unresolved sources. A queued entry's **Edit** action atomically moves its complete draft back to an empty composer, preserving references. An existing saved draft prevents that transfer; failed persistence rolls it back. The composer pauses editing while this short transfer completes; its draft writes and the transfer are serialized to prevent an older autosave from overwriting the recovered message.
+
+Run `just db-migrate` before launching an existing installation. Ordinary startup still does not migrate the database.
+
+## Verification and limits
+
+Verification used macOS, Codex CLI 0.163.0, and Claude Code 2.1.303. Synthetic live skills contained response markers that were absent from the user prompts, distinguishing actual instruction use from payload assertions. Both adapters passed invocation, arguments, images, and resumed-session checks; Codex additionally passed a live two-skill invocation.
+
+Deterministic tests cover protocol payloads, Claude precedence/visibility/plugins, exact-path resolution, cache scoping, Unicode edit ranges, legacy JSON, real SQLite draft and queue reopening, source-aware acknowledgements, atomic metadata rollback, accepted steering recovery, and failed queue-to-draft transfer. Native UI checks exercised autocomplete, Enter-to-select, highlighting, pasted exact-path links, Unicode paste, deletion/undo, native dead-key composition, restart persistence, and a synthetic invocation.
+
+These checks establish the installed CLI behavior. Other versions must still accept the verified native transports; unsupported commands or selected references fail explicitly. Claude entries without a resolvable local source, including built-in commands without a source file, are not offered as exact-source skills. Native Japanese/Chinese IME sessions, remote filesystems, and every enterprise/plugin deployment were not exercised.
+
+Installation, editing skill files, marketplaces, shared provider storage, and permanent chat-level selections are outside this feature.

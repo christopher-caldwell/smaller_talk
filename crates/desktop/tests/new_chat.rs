@@ -23,6 +23,7 @@ fn pending() -> NewChatDraft {
             ..Default::default()
         },
         draft: Draft {
+            skills: Vec::new(),
             text: "My unsent draft 🦀".into(),
             selection_start: 3,
             selection_end: 8,
@@ -76,7 +77,7 @@ async fn first_send_atomically_creates_one_named_chat_with_settings_and_queued_c
         preferences: draft.preferences.clone(),
         draft: draft.draft.clone(),
     };
-    let service = ChatService::new(db.clone(), db.clone()).with_setup_store(db.clone());
+    let service = ChatService::new(db.clone(), db.clone()).with_setup_writes(db.clone());
     let chat = service.start_chat(input.clone()).await.unwrap();
     assert_eq!(chat.title, draft.draft.text);
     assert_eq!(db.list_chats().await.unwrap(), vec![chat]);
@@ -94,11 +95,12 @@ async fn first_send_atomically_creates_one_named_chat_with_settings_and_queued_c
 async fn whitespace_first_send_creates_nothing_but_attachment_only_input_is_valid() {
     let temp = tempfile::tempdir().unwrap();
     let db = store(&temp.path().join("db.sqlite3")).await;
-    let service = ChatService::new(db.clone(), db.clone()).with_setup_store(db.clone());
+    let service = ChatService::new(db.clone(), db.clone()).with_setup_writes(db.clone());
     let mut input = StartChatInput {
         chat_id: Uuid::new_v4(),
         preferences: ChatPreferences::default(),
         draft: Draft {
+            skills: Vec::new(),
             text: " \n\t ".into(),
             ..Default::default()
         },
@@ -136,7 +138,7 @@ async fn failed_settings_or_queue_write_rolls_back_creation_and_keeps_the_unsent
             "CREATE TRIGGER fail_first_send BEFORE INSERT ON {table} BEGIN SELECT RAISE(FAIL, 'injected write failure'); END"
         );
         sqlx::query(&sql).execute(db.pool()).await.unwrap();
-        let service = ChatService::new(db.clone(), db.clone()).with_setup_store(db.clone());
+        let service = ChatService::new(db.clone(), db.clone()).with_setup_writes(db.clone());
         let input = StartChatInput {
             chat_id: Uuid::parse_str(&draft.id).unwrap(),
             preferences: draft.preferences,

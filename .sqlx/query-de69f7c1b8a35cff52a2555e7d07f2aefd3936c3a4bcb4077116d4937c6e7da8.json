@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM drafts WHERE chat_id = ?1\nAND COALESCE(json_extract(payload, '$.skills'), '[]') = COALESCE(json_extract(?2, '$.skills'), '[]')\nAND json_extract(payload, '$.text') = json_extract(?2, '$.text')\nAND json_extract(payload, '$.attachments') = json_extract(?3, '$.attachments');\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "de69f7c1b8a35cff52a2555e7d07f2aefd3936c3a4bcb4077116d4937c6e7da8"
+}

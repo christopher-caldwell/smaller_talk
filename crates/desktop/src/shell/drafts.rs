@@ -101,6 +101,7 @@ mod tests {
             id: id.to_string(),
             preferences: ChatPreferences::default(),
             draft: Draft {
+                skills: Vec::new(),
                 text: "first message".into(),
                 ..Default::default()
             },

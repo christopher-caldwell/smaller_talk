@@ -1,11 +1,13 @@
 mod composer_panel;
 mod drafts;
+mod instructions;
 mod menus;
 mod navigation;
 mod polish;
 mod repository;
 mod rewriting;
 mod settings;
+mod skills;
 use polish::*;
 
 use std::{
@@ -33,6 +35,9 @@ use crate::{
 
 #[derive(Clone)]
 pub struct Services {
+    pub skills: Arc<SkillService>,
+    pub skill_queries: Arc<dyn SkillQueries>,
+    pub instructions: Arc<InstructionService>,
     pub display: Arc<dyn DisplayQueries>,
     pub rewriter: Arc<RewriteService>,
     pub settings: Arc<SettingsService>,
@@ -48,6 +53,7 @@ pub struct Services {
 }
 
 pub(crate) struct ChatViewState {
+    pub queue_edit_pending: bool,
     pub composer: Entity<Composer>,
     pub attachments: Vec<Attachment>,
     pub files: HashMap<Uuid, Vec<Attachment>>,
@@ -91,6 +97,7 @@ fn clear_approval_text(state: &mut ChatViewState, request_id: &str) {
 }
 
 struct LoadedChat {
+    skills: HashMap<Uuid, Vec<SkillMention>>,
     queued_ids: Vec<Uuid>,
     messages: Vec<Message>,
     preferences: ChatPreferences,
@@ -101,6 +108,9 @@ struct LoadedChat {
 
 #[derive(Clone, Copy)]
 pub(crate) enum Popup {
+    Attachments,
+    Skills,
+    SkillDetails,
     Models,
     Effort,
     Settings(settings::SettingsPicker),
@@ -113,6 +123,8 @@ pub(crate) enum Popup {
 }
 
 enum Persist {
+    EditQueue(Uuid, Uuid),
+    ProjectInstructions(Uuid, CustomInstructions),
     Enqueue(Uuid, Draft),
     Respond(Uuid, InteractionResponse),
     Draft(Uuid, Draft),
@@ -128,6 +140,15 @@ enum Persist {
 }
 
 enum UiEvent {
+    QueueEdited(Uuid, Result<Draft, String>),
+    Skills(
+        u64,
+        (Uuid, Provider, PathBuf, u64),
+        Result<Vec<SkillDescriptor>, String>,
+    ),
+    SkillPreview(u64, String),
+    InstructionsLoaded(u64, Result<instructions::LoadedInstructions, String>),
+    ProjectInstructionsSaved(Uuid, CustomInstructions, Result<(), String>),
     Queue(QueueEvent),
     Enqueued(Uuid, Draft, Result<(), String>),
     Loaded(Uuid, Result<LoadedChat, String>),
@@ -162,6 +183,8 @@ enum UiEvent {
 }
 
 pub struct ChatsView {
+    skill_ui: skills::SkillUi,
+    instructions: instructions::InstructionUi,
     pub services: Services,
     pub(crate) chats: Vec<Chat>,
     pub(crate) projects: Vec<Project>,
@@ -241,6 +264,27 @@ impl ChatsView {
             while let Some(command) = writes.recv().await {
                 let result: Result<(), String> = async {
                     match command {
+                        Persist::EditQueue(chat, entry) => {
+                            let result = storage
+                                .queue
+                                .edit(EditQueueInput {
+                                    chat_id: chat,
+                                    entry_id: entry,
+                                })
+                                .await
+                                .map_err(|e| e.to_string());
+                            let _ = notices.send(UiEvent::QueueEdited(chat, result));
+                        }
+
+                        Persist::ProjectInstructions(id, value) => {
+                            let result = storage
+                                .instructions
+                                .save_project(id, &value)
+                                .await
+                                .map_err(|e| e.to_string());
+                            let _ =
+                                notices.send(UiEvent::ProjectInstructionsSaved(id, value, result));
+                        }
                         Persist::Respond(id, response) => {
                             storage.queue.respond(RespondQueueInput {
                                 chat_id: id,
@@ -414,6 +458,7 @@ impl ChatsView {
         })
         .detach();
         let mut view = Self {
+            instructions: instructions::InstructionUi::new(cx),
             services,
             chats,
             projects,
@@ -423,6 +468,7 @@ impl ChatsView {
             session,
             active,
             popup: None,
+            skill_ui: Default::default(),
             catalogs: HashMap::new(),
             rewriting: Default::default(),
             repository: repository::RepositoryUi::new(cx),
@@ -469,9 +515,24 @@ impl ChatsView {
         view.model_search
             .update(cx, |editor, _| editor.set_placeholder("Search models…"));
         cx.subscribe(
+            &view.instructions.editor,
+            |this, editor, _: &composer::Changed, cx| {
+                if !this.instructions.loading && !this.instructions.read_only {
+                    this.instructions.draft.text = editor.read(cx).content();
+                    this.instructions.remember();
+                    this.instructions.notice = None;
+                }
+                cx.notify();
+            },
+        )
+        .detach();
+        cx.subscribe(
             &view.model_search,
             |this, editor, _: &composer::Changed, cx| {
                 this.model_query = editor.read(cx).content();
+                if matches!(this.popup, Some(Popup::Skills)) {
+                    this.skill_ui.query = this.model_query.clone();
+                }
                 this.popup_index = 0;
                 this.popup_scroll.set_offset(gpui::point(px(0.), px(0.)));
                 cx.notify();
@@ -486,7 +547,7 @@ impl ChatsView {
         cx.subscribe(
             &view.model_search,
             |this, _, _: &composer::Submitted, cx| {
-                if matches!(this.popup, Some(Popup::Models)) {
+                if matches!(this.popup, Some(Popup::Models | Popup::Skills)) {
                     this.picker_requested = this
                         .picker_choices()
                         .get(this.popup_index)
@@ -499,7 +560,7 @@ impl ChatsView {
         cx.subscribe(
             &view.model_search,
             |this, _, event: &composer::Navigate, cx| {
-                if matches!(this.popup, Some(Popup::Models)) {
+                if matches!(this.popup, Some(Popup::Models | Popup::Skills)) {
                     let count = this.picker_choices().len();
                     if count > 0 {
                         this.popup_index = (this.popup_index as isize + event.0 as isize)
@@ -645,14 +706,39 @@ impl ChatsView {
             let composer = cx.new(Composer::new);
             composer.update(cx, |editor, _| editor.set_font_size(15.));
             cx.subscribe(&composer, move |this, _, _: &composer::Submitted, cx| {
+                if matches!(this.popup, Some(Popup::Skills)) {
+                    this.picker_requested = this
+                        .picker_choices()
+                        .get(this.popup_index)
+                        .map(|c| c.action.clone());
+                    cx.notify();
+                    return;
+                }
                 this.send(id, cx)
             })
             .detach();
             cx.subscribe(&composer, move |this, _, _: &composer::Changed, cx| {
-                this.draft_changed(id, cx)
+                this.composer_skills_changed(id, cx)
             })
             .detach();
-            cx.subscribe(&composer, |this, _, _: &composer::Canceled, cx| {
+            cx.subscribe(&composer, |this, _, event: &composer::Navigate, cx| {
+                if matches!(this.popup, Some(Popup::Skills)) {
+                    let count = this.picker_choices().len();
+                    if count > 0 {
+                        this.popup_index = (this.popup_index as isize + event.0 as isize)
+                            .rem_euclid(count as isize)
+                            as usize;
+                    }
+                    cx.notify();
+                }
+            })
+            .detach();
+            cx.subscribe(&composer, move |this, _, _: &composer::Canceled, cx| {
+                if let Some(state) = this.states.get(&id) {
+                    state
+                        .composer
+                        .update(cx, |e, _| e.set_picker_navigation(false));
+                }
                 this.popup = None;
                 cx.notify();
             })
@@ -675,6 +761,7 @@ impl ChatsView {
             self.states.insert(
                 id,
                 ChatViewState {
+                    queue_edit_pending: false,
                     composer,
                     attachments: vec![],
                     files: HashMap::new(),
@@ -725,17 +812,42 @@ impl ChatsView {
         self.services.runtime.spawn(async move {
             let _ = ready.await;
             let result = async {
+                let messages = service
+                    .conversation
+                    .list_messages(id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let last_turn = service
+                    .workspace
+                    .last_turn(id)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                let mut skill_messages = std::collections::BTreeSet::new();
+                if let Some(turn) = &last_turn {
+                    skill_messages.insert(turn.user_message_id);
+                }
+                if let Some(message) = messages.last().filter(|m| m.role == MessageRole::User) {
+                    skill_messages.insert(message.id);
+                }
+                let mut skills = HashMap::new();
+                for message in skill_messages {
+                    skills.insert(
+                        message,
+                        service
+                            .skill_queries
+                            .message_skills(id, message)
+                            .await
+                            .map_err(|e| e.to_string())?,
+                    );
+                }
                 Ok::<_, String>(LoadedChat {
+                    skills,
                     queued_ids: service
                         .queue
                         .queued_ids(id)
                         .await
                         .map_err(|error| error.to_string())?,
-                    messages: service
-                        .conversation
-                        .list_messages(id)
-                        .await
-                        .map_err(|e| e.to_string())?,
+                    messages,
                     preferences: service
                         .workspace
                         .preferences(id)
@@ -751,11 +863,7 @@ impl ChatsView {
                         .message_attachments(id)
                         .await
                         .map_err(|e| e.to_string())?,
-                    last_turn: service
-                        .workspace
-                        .last_turn(id)
-                        .await
-                        .map_err(|e| e.to_string())?,
+                    last_turn,
                 })
             }
             .await;
@@ -765,6 +873,38 @@ impl ChatsView {
 
     fn apply_event(&mut self, event: UiEvent, cx: &mut Context<Self>) {
         match event {
+            UiEvent::QueueEdited(id, result) => {
+                if let Some(state) = self.states.get_mut(&id) {
+                    state.queue_edit_pending = false;
+                    state.composer.update(cx, |e, cx| e.set_editable(true, cx));
+                    match result {
+                        Ok(draft) => {
+                            state.attachments = draft.attachments.clone();
+                            state.composer.update(cx, |e, cx| e.load_draft(&draft, cx));
+                            self.focus_composer = true;
+                        }
+                        Err(error) => state.error = Some(error),
+                    }
+                }
+                self.draft_changed(id, cx);
+            }
+            UiEvent::Skills(generation, context, result) => {
+                self.skills_loaded(generation, context, result, cx)
+            }
+            UiEvent::SkillPreview(generation, text) => {
+                if generation == self.skill_ui.generation {
+                    self.skill_ui.preview = Some(text);
+                }
+            }
+            UiEvent::InstructionsLoaded(generation, result) => {
+                self.instructions_loaded(generation, result, cx)
+            }
+            UiEvent::ProjectInstructionsSaved(id, value, result) => self.instruction_save_result(
+                instructions::InstructionScope::Project(id),
+                value,
+                result,
+                cx,
+            ),
             UiEvent::Enqueued(id, draft, result) => {
                 if let Some(state) = self.states.get_mut(&id) {
                     state.enqueue_pending = false;
@@ -773,7 +913,9 @@ impl ChatsView {
                             state.attachments.retain(|file| {
                                 !draft.attachments.iter().any(|sent| sent.id == file.id)
                             });
-                            if state.composer.read(cx).content() == draft.text {
+                            if state.composer.read(cx).content() == draft.text
+                                && state.composer.read(cx).skills() == draft.skills
+                            {
                                 state.composer.update(cx, |s, cx| s.reset(cx));
                             }
                         }
@@ -889,6 +1031,7 @@ impl ChatsView {
                         state.error = Some(loaded.last_turn.as_ref().and_then(|t| t.error.clone()).unwrap_or_else(|| "The previous response did not complete. Your saved message is still here.".into()));
                         if loaded.draft.text.is_empty() && state.attachments.is_empty() {
                             let draft = Draft {
+                                skills: loaded.skills.get(&last.id).cloned().unwrap_or_default(),
                                 text: last.body.clone(),
                                 attachments: state.files.get(&last.id).cloned().unwrap_or_default(),
                                 selection_start: last.body.len(),
@@ -897,7 +1040,10 @@ impl ChatsView {
                             state.attachments = draft.attachments.clone();
                             state.composer.update(cx, |s, cx| s.load_draft(&draft, cx));
                             state.retry_of = Some(last.id);
-                        } else if loaded.draft.text == last.body {
+                        } else if loaded.draft.text == last.body
+                            && loaded.draft.skills
+                                == loaded.skills.get(&last.id).cloned().unwrap_or_default()
+                        {
                             state.retry_of = Some(last.id);
                         }
                     }
@@ -953,6 +1099,12 @@ impl ChatsView {
                 }
             }
             UiEvent::GlobalSaved(settings, result) => {
+                self.instruction_save_result(
+                    instructions::InstructionScope::Global,
+                    settings.instructions.clone(),
+                    result.clone(),
+                    cx,
+                );
                 let (_, pending) = self.global_settings_save.acknowledge();
                 match result {
                     Ok(()) => {
@@ -1135,6 +1287,10 @@ impl ChatsView {
     }
 
     fn apply_conversation(&mut self, event: ConversationEvent, cx: &mut Context<Self>) {
+        if let ConversationEvent::SkillsChanged { chat_id } = &event {
+            self.skill_catalog_changed(*chat_id, cx);
+            return;
+        }
         if let ConversationEvent::FinalAnswer { answer, .. } = &event {
             self.rewriting
                 .sources
@@ -1148,6 +1304,7 @@ impl ChatsView {
             ConversationEvent::UserMessage(m) | ConversationEvent::AssistantMessage(m) => m.chat_id,
             ConversationEvent::AssistantDelta { chat_id, .. }
             | ConversationEvent::AssistantSnapshot { chat_id, .. }
+            | ConversationEvent::SkillsChanged { chat_id }
             | ConversationEvent::SteeringAvailable { chat_id, .. }
             | ConversationEvent::Activity { chat_id, .. }
             | ConversationEvent::FinalAnswer { chat_id, .. }
@@ -1161,7 +1318,9 @@ impl ChatsView {
         let draft_changed = matches!(&event, ConversationEvent::UserMessage(_));
         let changed;
         match event {
-            ConversationEvent::SteeringAvailable { .. } | ConversationEvent::FinalAnswer { .. } => {
+            ConversationEvent::SkillsChanged { .. }
+            | ConversationEvent::SteeringAvailable { .. }
+            | ConversationEvent::FinalAnswer { .. } => {
                 return;
             }
             ConversationEvent::UserMessage(message) => {
@@ -1174,7 +1333,9 @@ impl ChatsView {
                     state
                         .attachments
                         .retain(|file| !draft.attachments.iter().any(|sent| sent.id == file.id));
-                    if state.composer.read(cx).content() == draft.text {
+                    if state.composer.read(cx).content() == draft.text
+                        && state.composer.read(cx).skills() == draft.skills
+                    {
                         state.composer.update(cx, |s, cx| s.reset(cx));
                     }
                 }
@@ -1364,6 +1525,10 @@ impl ChatsView {
     }
 
     fn draft_changed(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if self.states.get(&id).is_some_and(|s| s.queue_edit_pending) {
+            cx.notify();
+            return;
+        }
         if self.is_new_chat(id) {
             self.save_new_chat_draft(cx);
             self.save_session();
@@ -1424,6 +1589,9 @@ impl ChatsView {
     }
 
     fn send(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if !self.states.contains_key(&id) || !self.prepare_skill_send(id, cx) {
+            return;
+        }
         if self.global_settings_save.is_saving() {
             return;
         }
@@ -1474,6 +1642,7 @@ impl ChatsView {
             return;
         };
         if !state.loaded
+            || state.queue_edit_pending
             || state.importing
             || state.settings_pending
             || state.settings_error
@@ -1554,7 +1723,7 @@ impl ChatsView {
         let Some(state) = self.states.get_mut(&id) else {
             return;
         };
-        if state.importing {
+        if state.importing || state.queue_edit_pending {
             return;
         }
         state.importing = true;
@@ -2167,7 +2336,7 @@ impl Render for ChatsView {
                     this.settings_section = settings::SettingsSection::Providers;
                     cx.notify();
                 }
-                if matches!(this.popup, Some(Popup::Models)) || this.settings_open {
+                if matches!(this.popup, Some(Popup::Models | Popup::Skills)) || this.settings_open {
                     this.model_search.focus_handle(cx).focus(window);
                 } else {
                     this.focus_search(window, cx);

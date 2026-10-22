@@ -37,20 +37,12 @@ async fn workspace_migration_preserves_legacy_history_and_bindings() {
         .await
         .unwrap();
     let old = SqliteChatStore::new(pool.clone());
-    let chats = ChatService::new(Arc::new(old.clone()), Arc::new(old.clone()));
-    let chat = chats.create_empty_chat().await.unwrap();
-    old.save_execution_binding(
-        chat.id,
-        ExecutionBinding {
-            adapter_key: "codex".into(),
-            native_session_id: "old-native-session".into(),
-        },
-    )
-    .await
-    .unwrap();
+    let chat_id = Uuid::new_v4();
+    sqlx::query("INSERT INTO chats (id, title, created_at, adapter_key, native_session_id) VALUES (?, 'Legacy', 0, 'codex', 'old-native-session')")
+        .bind(chat_id.to_string()).execute(&pool).await.unwrap();
     old.append_message(NewMessage {
         id: Uuid::new_v4(),
-        chat_id: chat.id,
+        chat_id,
         role: MessageRole::User,
         body: "Saved before the upgrade".into(),
         created_at: chrono::Utc::now(),
@@ -62,7 +54,7 @@ async fn workspace_migration_preserves_legacy_history_and_bindings() {
     let upgraded = SqliteChatStore::new(open_existing(&path).await.unwrap());
     assert_eq!(
         upgraded
-            .find_chat(chat.id)
+            .find_chat(chat_id)
             .await
             .unwrap()
             .unwrap()
@@ -72,12 +64,12 @@ async fn workspace_migration_preserves_legacy_history_and_bindings() {
         "old-native-session"
     );
     assert_eq!(
-        upgraded.list_messages(chat.id).await.unwrap()[0].body,
+        upgraded.list_messages(chat_id).await.unwrap()[0].body,
         "Saved before the upgrade"
     );
     assert!(upgraded.list_projects().await.unwrap().is_empty());
     assert_eq!(
-        upgraded.preferences(chat.id).await.unwrap(),
+        upgraded.preferences(chat_id).await.unwrap(),
         ChatPreferences::default()
     );
 }
@@ -134,6 +126,7 @@ async fn projects_search_drafts_attachments_and_tabs_survive_restart() {
         .await
         .unwrap();
     let draft = Draft {
+        skills: Vec::new(),
         text: "unfinished 🦀".into(),
         attachments: vec![file.clone()],
         selection_start: 0,
@@ -216,6 +209,7 @@ impl ExecutionAdapter for RecordingAgent {
     ) -> Result<(), ExecutionError> {
         self.requests.lock().unwrap().push(request.clone());
         let _ = events.send(ExecutionEvent::BindingEstablished(ExecutionBinding {
+            instructions_fingerprint: None,
             adapter_key: request.settings.provider.key().into(),
             native_session_id: Uuid::new_v4().to_string(),
         }));
@@ -259,6 +253,7 @@ async fn send(
     service
         .send_turn(
             SendTurnInput {
+                skills: Vec::new(),
                 chat_id: id,
                 prompt: text.into(),
                 attachments: vec![],
@@ -513,6 +508,7 @@ async fn delayed_draft_save_after_chat_deletion_is_ignored() {
     let deleted = chats.create_empty_chat().await.unwrap();
     let retained = chats.create_empty_chat().await.unwrap();
     let draft = Draft {
+        skills: Vec::new(),
         text: "Unsent text".into(),
         ..Draft::default()
     };

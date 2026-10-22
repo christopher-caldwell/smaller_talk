@@ -16,6 +16,7 @@ async fn turn(
     let (output, mut events) = mpsc::unbounded_channel();
     let (responses, receiver) = mpsc::unbounded_channel();
     let input = SendTurnInput {
+        skills: Vec::new(),
         chat_id,
         prompt: prompt.into(),
         attachments,
@@ -206,8 +207,18 @@ async fn authenticated_queue_and_steering_both_providers() {
             .with_workspace(db.clone(), db.clone()),
         );
         let (output, mut events) = mpsc::unbounded_channel();
-        let queue = QueueCoordinator::start(db.clone(), db.clone(), service, output);
-        queue.enqueue(EnqueueInput { chat_id: chat.id, draft: Draft { text: "Do not use tools or change files. Count from 1 to 100, writing each number on its own line.".into(), ..Default::default() } }).await.unwrap();
+        let queue = QueueCoordinator::start(
+            db.clone(),
+            db.clone(),
+            Arc::new(EnqueueService::<SqliteUnitOfWork>::new(
+                db.clone(),
+                db.clone(),
+            )),
+            service,
+            output,
+        );
+        queue.enqueue(EnqueueInput { chat_id: chat.id, draft: Draft {
+            skills: Vec::new(), text: "Do not use tools or change files. Count from 1 to 100, writing each number on its own line.".into(), ..Default::default() } }).await.unwrap();
         let mut submitted = false;
         let mut steered = false;
         let mut accepted = false;
@@ -223,8 +234,10 @@ async fn authenticated_queue_and_steering_both_providers() {
                     available: true,
                     ..
                 }) if !submitted => {
-                    queue.enqueue(EnqueueInput { chat_id: chat.id, draft: Draft { text: "Change direction now: reply with only STEER-ACCEPTED-27. Do not use tools.".into(), ..Default::default() } }).await.unwrap();
-                    queue.enqueue(EnqueueInput { chat_id: chat.id, draft: Draft { text: "Do not use tools or change files. Reply only QUEUE-FOLLOWUP-42.".into(), ..Default::default() } }).await.unwrap();
+                    queue.enqueue(EnqueueInput { chat_id: chat.id, draft: Draft {
+            skills: Vec::new(), text: "Change direction now: reply with only STEER-ACCEPTED-27. Do not use tools.".into(), ..Default::default() } }).await.unwrap();
+                    queue.enqueue(EnqueueInput { chat_id: chat.id, draft: Draft {
+            skills: Vec::new(), text: "Do not use tools or change files. Reply only QUEUE-FOLLOWUP-42.".into(), ..Default::default() } }).await.unwrap();
                     submitted = true;
                 }
                 QueueEvent::Snapshot(_, snapshot)

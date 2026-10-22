@@ -7,6 +7,8 @@ mod settings;
 pub use settings::*;
 mod repository;
 pub use repository::*;
+mod instructions;
+pub use instructions::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Chat {
@@ -20,6 +22,7 @@ pub struct Chat {
 pub struct ExecutionBinding {
     pub adapter_key: String,
     pub native_session_id: String,
+    pub instructions_fingerprint: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -36,3 +39,6 @@ pub enum MessageRole {
     User,
     Assistant,
 }
+
+mod skills;
+pub use skills::*;

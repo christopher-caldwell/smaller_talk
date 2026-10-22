@@ -5,6 +5,7 @@ pub(super) enum SettingsSection {
     #[default]
     Providers,
     ResponseDisplay,
+    Instructions,
 }
 
 #[derive(Clone, Copy)]
@@ -245,7 +246,7 @@ impl ChatsView {
         }
         cx.notify();
     }
-    fn save_global(&mut self, settings: AppSettings, cx: &mut Context<Self>) {
+    pub(super) fn save_global(&mut self, settings: AppSettings, cx: &mut Context<Self>) {
         let Some(settings) = self.global_settings_save.request(settings) else {
             cx.notify();
             return;
@@ -260,7 +261,7 @@ impl ChatsView {
         }
         cx.notify();
     }
-    fn settings_for_edit(&self) -> AppSettings {
+    pub(super) fn settings_for_edit(&self) -> AppSettings {
         self.global_settings_save
             .edit_base()
             .cloned()
@@ -820,6 +821,7 @@ impl ChatsView {
         for (section, label) in [
             (SettingsSection::Providers, "Providers & Models"),
             (SettingsSection::ResponseDisplay, "Response Display"),
+            (SettingsSection::Instructions, "Instructions"),
         ] {
             let selected = self.settings_section == section;
             tabs = tabs.child(
@@ -828,6 +830,13 @@ impl ChatsView {
                     cx,
                     move |this, window, cx| {
                         this.settings_section = section;
+                        if section == SettingsSection::Instructions {
+                            this.open_instruction_scope(
+                                super::instructions::InstructionScope::Global,
+                                window,
+                                cx,
+                            );
+                        }
                         this.focus.focus(window);
                         cx.notify();
                     },
@@ -845,6 +854,7 @@ impl ChatsView {
         let page = match self.settings_section {
             SettingsSection::Providers => self.render_provider_page(&settings, cx),
             SettingsSection::ResponseDisplay => self.render_response_page(&settings, cx),
+            SettingsSection::Instructions => self.render_instructions(cx),
         };
         let header = div()
             .w_full()
@@ -895,6 +905,7 @@ impl ChatsView {
         let scroll_id = match self.settings_section {
             SettingsSection::Providers => "settings-providers-scroll",
             SettingsSection::ResponseDisplay => "settings-response-scroll",
+            SettingsSection::Instructions => "settings-instructions-scroll",
         };
         div()
             .flex_1()

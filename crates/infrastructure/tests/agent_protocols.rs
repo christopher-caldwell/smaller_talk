@@ -17,6 +17,12 @@ fn request(root: &std::path::Path, provider: Provider) -> ExecutionRequest {
     let image = root.join("image.png");
     std::fs::write(&image, b"image-data").unwrap();
     ExecutionRequest {
+        skills: Vec::new(),
+        retry_inputs: Vec::new(),
+        instructions: InstructionSnapshot {
+            text: "APP_RULE_FIXTURE".into(),
+            ..Default::default()
+        },
         chat_id: Uuid::new_v4(),
         binding: None,
         workspace: root.into(),
@@ -88,10 +94,13 @@ for line in sys.stdin:
  if m=='initialize':
   assert r['params']['capabilities']['experimentalApi']
   send({'id':r['id'],'result':{}})
- elif m=='thread/start':send({'id':r['id'],'result':{'thread':{'id':'native-codex'}}})
+ elif m=='thread/start':
+  assert r['params']['developerInstructions']=='APP_RULE_FIXTURE'
+  send({'id':r['id'],'result':{'thread':{'id':'native-codex'}}})
  elif m=='turn/start':
   p=r['params'];assert p['model']=='fixture-model';assert p['effort']=='low'
   assert p['collaborationMode']['mode']=='plan'
+  assert p['collaborationMode']['settings']['developer_instructions'] is None
   assert p['input'][1]['type']=='localImage'
   assert 'Saved visible context' in p['input'][0]['text']
   send({'id':r['id'],'result':{'turn':{'id':'turn'}}})
@@ -182,6 +191,7 @@ for line in sys.stdin:
   send({'type':'control_response','response':{'subtype':'success','request_id':r['request_id'],'response':{'models':[{'value':'default','resolvedModel':'fixture-model','displayName':'Fixture model','supportsEffort':True,'supportedEffortLevels':['low','high']}]}}})
  elif r['type']=='user':
   assert '--permission-mode' in sys.argv and sys.argv[sys.argv.index('--permission-mode')+1]=='plan'
+  assert sys.argv[sys.argv.index('--append-system-prompt')+1]=='APP_RULE_FIXTURE'
   c=r['message']['content'];assert 'Saved visible context' in c[0]['text'];assert c[1]['source']['media_type']=='image/png';assert base64.b64decode(c[1]['source']['data'])==b'image-data'
   send({'type':'system','subtype':'init','session_id':'native-claude'})
   send({'type':'control_request','request_id':'q','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','input':{'questions':[{'question':'Which color?','options':[{'label':'Blue'}]}]}}})
@@ -367,6 +377,7 @@ async fn verify_steering(agent: impl ExecutionAdapter + 'static, request: Execut
                 controls
                     .send(SteerCommand {
                         input: SteerInput {
+                            skills: Vec::new(),
                             id,
                             prompt: "Correction".into(),
                             attachments: files.clone(),

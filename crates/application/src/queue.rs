@@ -1,6 +1,8 @@
 //! Durable delivery is independent of UI lifetime. One actor serializes claims and completion.
+mod enqueue;
 use crate::*;
 use async_trait::async_trait;
+pub use enqueue::*;
 use std::{collections::HashMap, error::Error, sync::Arc};
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -14,10 +16,6 @@ pub enum QueueError {
     #[error("Message queue is unavailable")]
     Unavailable,
 }
-#[derive(Debug, thiserror::Error)]
-#[error("Could not enqueue the message: {0}")]
-pub struct EnqueueError(#[from] QueueError);
-
 #[derive(Debug, thiserror::Error)]
 #[error("Could not list queued messages: {0}")]
 pub struct ListQueuedIdsError(#[from] QueueError);
@@ -44,7 +42,9 @@ pub trait QueueQueries: Send + Sync {
 
 #[async_trait]
 pub trait QueueWrites: Send + Sync {
-    async fn enqueue(&self, entry: &QueuedMessage) -> Result<(), PersistenceError>;
+    /// Atomically move an undelivered queue draft into an empty composer draft.
+    async fn edit_queued(&self, chat: Uuid, entry: Uuid)
+    -> Result<Option<Draft>, PersistenceError>;
     async fn transition(
         &self,
         id: Uuid,
@@ -75,6 +75,12 @@ pub struct SteerQueueInput {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EditQueueInput {
+    pub chat_id: Uuid,
+    pub entry_id: Uuid,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RemoveQueueInput {
     pub chat_id: Uuid,
     pub entry_id: Uuid,
@@ -94,6 +100,7 @@ pub struct RespondQueueInput {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SteerInput {
+    pub skills: Vec<SkillMention>,
     pub id: Uuid,
     pub prompt: String,
     pub attachments: Vec<Attachment>,
@@ -136,6 +143,7 @@ pub struct QueueCoordinator {
     commands: mpsc::UnboundedSender<Command>,
 }
 enum Command {
+    Edit(Uuid, Uuid, oneshot::Sender<Result<Draft, QueueError>>),
     Enqueue(Uuid, Draft, oneshot::Sender<Result<(), EnqueueError>>),
     Refresh(Uuid),
     Ids(Uuid, oneshot::Sender<Result<Vec<Uuid>, ListQueuedIdsError>>),
@@ -158,7 +166,8 @@ struct Running {
     has_steered: bool,
     steering_available: bool,
 }
-struct Coordinator {
+struct Coordinator<U: UnitOfWork> {
+    enqueuer: Arc<EnqueueService<U>>,
     queries: Arc<dyn QueueQueries>,
     writes: Arc<dyn QueueWrites>,
     service: Arc<ConversationService>,
@@ -168,15 +177,17 @@ struct Coordinator {
 }
 impl QueueCoordinator {
     /// Call once after startup recovery, while inside the application's runtime.
-    pub fn start(
+    pub fn start<U: UnitOfWork + 'static>(
         queries: Arc<dyn QueueQueries>,
         writes: Arc<dyn QueueWrites>,
+        enqueuer: Arc<EnqueueService<U>>,
         service: Arc<ConversationService>,
         output: mpsc::UnboundedSender<QueueEvent>,
     ) -> Self {
         let (sender, receiver) = mpsc::unbounded_channel();
         tokio::spawn(
             Coordinator {
+                enqueuer,
                 queries,
                 writes,
                 service,
@@ -196,8 +207,8 @@ impl QueueCoordinator {
         let (tx, rx) = oneshot::channel();
         self.commands
             .send(Command::Enqueue(chat, draft, tx))
-            .map_err(|_| QueueError::Unavailable)?;
-        rx.await.map_err(|_| QueueError::Unavailable)?
+            .map_err(|_| EnqueueError::Unavailable)?;
+        rx.await.map_err(|_| EnqueueError::Unavailable)?
     }
     pub async fn queued_ids(&self, chat: Uuid) -> Result<Vec<Uuid>, ListQueuedIdsError> {
         let (tx, rx) = oneshot::channel();
@@ -211,6 +222,13 @@ impl QueueCoordinator {
     }
     pub fn resume(&self, chat: Uuid) {
         let _ = self.commands.send(Command::Resume(chat));
+    }
+    pub async fn edit(&self, input: EditQueueInput) -> Result<Draft, QueueError> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(Command::Edit(input.chat_id, input.entry_id, tx))
+            .map_err(|_| QueueError::Unavailable)?;
+        rx.await.map_err(|_| QueueError::Unavailable)?
     }
     pub fn remove(&self, input: RemoveQueueInput) {
         let _ = self
@@ -233,7 +251,7 @@ impl QueueCoordinator {
             .send(Command::Respond(input.chat_id, input.response));
     }
 }
-impl Coordinator {
+impl<U: UnitOfWork + 'static> Coordinator<U> {
     async fn publish(&self, chat: Uuid) -> Result<(), QueueError> {
         let mut queue = self
             .queries
@@ -312,6 +330,7 @@ impl Coordinator {
                 .send_queued_turn(
                     SendTurnInput {
                         chat_id: chat,
+                        skills: entry.draft.skills,
                         prompt: entry.draft.text,
                         attachments: entry.draft.attachments,
                         retry_of: None,
@@ -332,7 +351,8 @@ impl Coordinator {
     async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
         while let Some(command) = commands.recv().await {
             let chat = match &command {
-                Command::Enqueue(c, ..)
+                Command::Edit(c, ..)
+                | Command::Enqueue(c, ..)
                 | Command::Ids(c, _)
                 | Command::Refresh(c)
                 | Command::Resume(c)
@@ -355,23 +375,16 @@ impl Coordinator {
     async fn handle(&mut self, command: Command) -> Result<(), QueueError> {
         match command {
             Command::Enqueue(chat, draft, reply) => {
-                let result = if draft.text.trim().is_empty() && draft.attachments.is_empty() {
-                    Err(EnqueueError::from(QueueError::from(
-                        "Add a message or attachment first",
-                    )))
-                } else {
-                    self.writes
-                        .enqueue(&QueuedMessage {
-                            id: Uuid::new_v4(),
-                            chat_id: chat,
-                            draft,
-                            state: "pending".into(),
-                            error: None,
-                        })
-                        .await
-                        .map_err(QueueError::from_source)
-                        .map_err(EnqueueError::from)
-                };
+                let result = self
+                    .enqueuer
+                    .enqueue(&QueuedMessage {
+                        id: Uuid::new_v4(),
+                        chat_id: chat,
+                        draft,
+                        state: "pending".into(),
+                        error: None,
+                    })
+                    .await;
                 let saved = result.is_ok();
                 let _ = reply.send(result);
                 if saved {
@@ -414,6 +427,11 @@ impl Coordinator {
                     .map_err(QueueError::from_source)?;
                 self.publish(chat).await?;
                 self.pump(chat).await?;
+            }
+            Command::Edit(chat, id, reply) => {
+                let result = self.writes.edit_queued(chat,id).await.map_err(QueueError::from_source).and_then(|d| d.ok_or_else(|| QueueError::Policy("The entry is sending, or the composer already has a draft. Save or clear that draft first.".into())));
+                let _ = reply.send(result);
+                self.publish(chat).await?;
             }
             Command::Remove(chat, id) => {
                 self.writes
@@ -513,7 +531,13 @@ impl Coordinator {
                             .transition(run.entry, "dispatching", "failed", result_error.as_deref())
                             .await
                             .map_err(QueueError::from_source)?;
-                        self.writes.pause_queue(chat, Some("The previous response failed. Review it, then Resume to retry.")).await.map_err(QueueError::from_source)?;
+                        let reason = result_error.as_deref().unwrap_or(
+                            "The previous response failed. Review it, then Resume to retry.",
+                        );
+                        self.writes
+                            .pause_queue(chat, Some(reason))
+                            .await
+                            .map_err(QueueError::from_source)?;
                     }
                     if result.is_err() && run.has_steered {
                         self.writes.pause_queue(chat, Some("The previous response failed. Review the conversation before resuming.")).await.map_err(QueueError::from_source)?;
@@ -564,6 +588,18 @@ impl Coordinator {
                 else {
                     return Ok(());
                 };
+                if let Err(error) = self
+                    .service
+                    .validate_queued_skills(chat, &entry.draft)
+                    .await
+                {
+                    self.writes
+                        .pause_queue(chat, Some(&error.to_string()))
+                        .await
+                        .map_err(QueueError::from_source)?;
+                    self.publish(chat).await?;
+                    return Ok(());
+                }
                 if !self
                     .writes
                     .transition(id, "pending", "steering", None)
@@ -575,6 +611,7 @@ impl Coordinator {
                 let (tx, rx) = oneshot::channel();
                 let input = SteerInput {
                     id,
+                    skills: entry.draft.skills.clone(),
                     prompt: entry.draft.text.clone(),
                     attachments: entry.draft.attachments.clone(),
                 };
@@ -630,9 +667,10 @@ impl Coordinator {
                             .map_err(QueueError::from_source)?;
                     }
                     SteerOutcome::Rejected(error) => {
-                        if let Some(run) = self.running.get_mut(&chat) {
-                            run.steering_available = false;
-                        }
+                        self.writes
+                            .pause_queue(chat, Some(&error))
+                            .await
+                            .map_err(QueueError::from_source)?;
                         self.writes
                             .transition(id, "steering", "pending", Some(&error))
                             .await

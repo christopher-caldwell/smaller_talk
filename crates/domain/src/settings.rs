@@ -27,6 +27,7 @@ impl Default for ProviderPreferences {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AppSettings {
+    pub instructions: crate::CustomInstructions,
     pub providers: BTreeMap<Provider, ProviderPreferences>,
     pub default_execution: Option<ExecutionSettings>,
     pub rewrite_model: Option<ExecutionSettings>,
@@ -34,7 +35,9 @@ pub struct AppSettings {
 }
 impl AppSettings {
     pub fn validate(&self) -> Result<(), AppSettingsValidationError> {
-        if self.automatic_shortening && self.rewrite_model.is_none() {
+        if !self.instructions.is_valid() {
+            Err(AppSettingsValidationError::InvalidInstructions)
+        } else if self.automatic_shortening && self.rewrite_model.is_none() {
             Err(AppSettingsValidationError::RewriteModelRequired)
         } else {
             Ok(())
@@ -52,6 +55,7 @@ impl AppSettings {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AppSettingsValidationError {
+    InvalidInstructions,
     RewriteModelRequired,
 }
 

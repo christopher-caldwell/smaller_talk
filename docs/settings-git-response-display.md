@@ -10,6 +10,8 @@ Quit the old build, run `just db-migrate`, then start the new build with `just r
 
 Open Settings from the sidebar gear or Cmd+,. Back to chat and Escape return to the existing chat without changing its draft or reading position.
 
+The Instructions tab adds global preferences, with project-specific preferences available from each project's menu. See [Custom instructions](custom-instructions.md) for migration, precedence, session behavior, and verification.
+
 Providers & Models and Response Display have separate tabs that stay visible while scrolling. New-chat defaults use compact selectors above the model list; each model row has a visibility switch. The rewrite-model selector and automatic-shortening switch live only in Response Display.
 
 Providers & Models contains:
@@ -47,7 +49,11 @@ Response Display chooses a rewrite model and offers Automatically shorten long a
 
 Normal output continues streaming. Manual shortening and automatic shortening above 300 prose words produce a separately stored variant. Fenced code is excluded from the threshold. Shortened is explicitly labeled and Original remains available. Automatic switching is deferred when text is selected, the user has scrolled away, the chat is in the background, or a later answer is current. A ready action allows switching afterward. Copy follows the displayed answer; search and conversation continuation use the original.
 
-The prototype currently supports Claude Code versions advertising safe mode, explicit empty tools, disabled skills/MCP, no session persistence, and the required configuration controls. Each invocation uses an isolated temporary folder and replacement instructions, and verifies the emitted tool/MCP catalogs are empty. Recognized local managed policy files disable rewriting because the app cannot override their hooks. Codex remains fully supported for chat, but is unavailable as a rewrite backend until a complete text-only isolation mode is verified.
+The prototype supports both Codex and Claude Code as rewrite backends. Choose an available model under Settings → Response Display → Rewrite model; the same choice serves manual and automatic shortening. Codex rewriting defaults to low reasoning when no rewrite effort is supplied.
+
+Codex uses a fresh `codex exec` process with an ephemeral session, an isolated temporary folder, replacement instructions, ignored user configuration and execpolicy rules, and a read-only sandbox. Shell execution, hooks, MCP/apps/plugins, browser/computer access, skills, memory, and multi-agent capabilities are disabled or excluded. It does not resume the chat's native session or receive its project folder, history, or attachments. CLI authentication remains in place. The installed CLI must advertise the required isolation flags; strict configuration rejects unsupported controls. Unexpected tool events, incomplete turns, failed processes, and oversized output reject the rewrite. Cancellation kills the child and removes its scratch folder.
+
+Claude Code still requires safe mode, explicit empty tools, disabled skills/MCP, no session persistence, and the required configuration controls. Each invocation uses an isolated temporary folder and replacement instructions, and verifies the emitted tool/MCP catalogs are empty. Recognized local managed Claude policy files disable Claude rewriting because the app cannot override their hooks; they do not disable Codex rewriting.
 
 Rewrites receive only the final answer and rewrite instructions. Code, quotes, links, identifiers, paths, and numeric values are protected with markers and checked before restoration. Invalid, empty, longer, reordered, or technically altered results retain the original. These checks do not prove semantic equivalence; the feature remains an opt-in prototype.
 
@@ -73,11 +79,18 @@ Tests cover settings restart/isolation, disabled-provider queue preservation, re
 The optional authenticated rewrite corpus uses synthetic text only:
 
 ```sh
+env -u OPENAI_API_KEY SMALLER_TALK_LIVE_REWRITE=1 SMALLER_TALK_REWRITE_MODEL=gpt-6-luna \
+  SQLX_OFFLINE=true cargo test -p smaller-talk-desktop --test live_shortening \
+  synthetic_fidelity_corpus_with_real_isolated_codex --locked -- --ignored --nocapture
+
 SMALLER_TALK_LIVE_REWRITE=1 SQLX_OFFLINE=true cargo test -p smaller-talk-desktop \
-  --test live_shortening --locked -- --ignored --nocapture
+  --test live_shortening synthetic_fidelity_corpus_with_real_isolated_claude \
+  --locked -- --ignored --nocapture
 ```
 
-Set `SMALLER_TALK_REWRITE_MODEL` to override the test's `haiku` alias. This test consumes Claude quota. The six-case run on October 19, 2026 passed and was manually reviewed: function behavior, multiple review findings, uncertainty, completion/test evidence, a blocker, and measurements with links/code all retained their material facts and caveats. Outputs shrank from 458–510 bytes to 156–218 bytes. This is a small corpus, not a guarantee for all answers or models.
+Set `SMALLER_TALK_REWRITE_MODEL` to override the provider's test default (`gpt-6-luna` or `haiku`). The Codex corpus explicitly selects low reasoning. These tests consume the selected provider's quota. The six-case Claude run on October 19, 2026 passed and was manually reviewed: function behavior, multiple review findings, uncertainty, completion/test evidence, a blocker, and measurements with links/code all retained their material facts and caveats. Outputs shrank from 458–510 bytes to 156–218 bytes.
+
+On October 21, 2026, the Codex corpus passed using CLI 0.163.0, ChatGPT subscription authentication, and `gpt-6-luna` at low reasoning. It covers the six cases above plus Unicode, quoted hostile instructions, and an answer exceeding the automatic-shortening threshold. Checks verify shorter variants, unchanged original messages and existing native bindings, saved-result reuse, and scratch cleanup. A local request inspection with the same isolation controls confirmed an empty tool list and excluded the normal skill/project instructions. Deterministic subprocess tests also cover cancellation, older CLIs, tool events, invalid/incomplete output, process failure, and output limits. These checks are a small corpus and do not guarantee semantic equivalence for every answer or model.
 
 Native verification used a separate disposable application/database and deterministic CLI fixtures. It exercised Cmd+, settings search including spaces, returning to chat, picker Enter selection, provider toggles, approval summaries/raw details, activity alignment, manual/automatic shortening and original switching, deferred switching with an active text selection, Git diffs, compact overlays, and minimum-width/wide-window reflow. It did not alter the ordinary application database.
 

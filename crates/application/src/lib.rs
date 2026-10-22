@@ -1,3 +1,5 @@
+mod persistence;
+pub use persistence::*;
 use std::{error::Error, fmt, path::PathBuf, sync::Arc};
 
 use async_trait::async_trait;
@@ -13,6 +15,8 @@ pub use queue::*;
 pub use workspace::*;
 mod settings;
 pub use settings::*;
+mod instructions;
+pub use instructions::*;
 mod repository;
 pub use repository::*;
 
@@ -91,7 +95,7 @@ pub trait ChatWrites: Send + Sync {
 }
 
 #[async_trait]
-pub trait ChatSetupStore: Send + Sync {
+pub trait ChatSetupWrites: Send + Sync {
     async fn create_chat_with_preferences(
         &self,
         chat: NewChat,
@@ -125,6 +129,9 @@ pub trait MessageWrites: Send + Sync {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionRequest {
+    pub retry_inputs: Vec<SteerInput>,
+    pub skills: Vec<SkillMention>,
+    pub instructions: InstructionSnapshot,
     pub chat_id: Uuid,
     pub binding: Option<ExecutionBinding>,
     pub workspace: PathBuf,
@@ -155,6 +162,7 @@ impl ExecutionRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionEvent {
+    SkillsChanged,
     BindingEstablished(ExecutionBinding),
     InputAccepted(SteerInput),
     SteeringAvailable(bool),
@@ -244,6 +252,9 @@ pub trait ExecutionAdapter: Send + Sync {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationEvent {
+    SkillsChanged {
+        chat_id: Uuid,
+    },
     SteeringAvailable {
         chat_id: Uuid,
         available: bool,
@@ -337,7 +348,7 @@ pub enum RenameChatError {
 pub struct ChatService {
     queries: Arc<dyn ChatQueries>,
     writes: Arc<dyn ChatWrites>,
-    setup: Option<Arc<dyn ChatSetupStore>>,
+    setup_writes: Option<Arc<dyn ChatSetupWrites>>,
 }
 
 pub struct ConversationService {
@@ -348,14 +359,17 @@ pub struct ConversationService {
     executor: Arc<dyn ExecutionAdapter>,
     workspace: PathBuf,
     workspace_data: Option<(Arc<dyn WorkspaceQueries>, Arc<dyn WorkspaceWrites>)>,
-    steered_input_store: Option<Arc<dyn SteeredInputStore>>,
+    steered_input_writes: Option<Arc<dyn SteeredInputWrites>>,
     settings_store: Option<Arc<dyn SettingsQueries>>,
     display_store: Option<Arc<dyn DisplayWrites>>,
+    instructions: Option<(Arc<InstructionService>, Arc<dyn TurnStartWrites>)>,
+    skills: Option<(Arc<SkillService>, Arc<dyn SkillQueries>)>,
     active: Arc<std::sync::Mutex<std::collections::HashSet<Uuid>>>,
 }
 
 #[derive(Clone, Debug)]
 pub struct SendTurnInput {
+    pub skills: Vec<SkillMention>,
     pub chat_id: Uuid,
     pub prompt: String,
     pub attachments: Vec<Attachment>,
@@ -383,6 +397,63 @@ impl Drop for ActiveTurnGuard {
 }
 
 impl ConversationService {
+    pub fn with_skills(
+        mut self,
+        service: Arc<SkillService>,
+        queries: Arc<dyn SkillQueries>,
+    ) -> Self {
+        self.skills = Some((service, queries));
+        self
+    }
+    pub async fn validate_skills(
+        &self,
+        provider: Provider,
+        workspace: &std::path::Path,
+        text: &str,
+        mentions: &[SkillMention],
+    ) -> Result<(), ExecutionError> {
+        if mentions.is_empty() {
+            return Ok(());
+        }
+        let (service, _) = self
+            .skills
+            .as_ref()
+            .ok_or_else(|| ExecutionError::new("Skill validation is unavailable"))?;
+        service
+            .validate(provider, workspace, text, mentions, true)
+            .await
+            .map_err(|e| ExecutionError::with_source(e.to_string(), e))?;
+        Ok(())
+    }
+    pub async fn validate_queued_skills(
+        &self,
+        chat: Uuid,
+        draft: &Draft,
+    ) -> Result<(), ExecutionError> {
+        if draft.skills.is_empty() {
+            return Ok(());
+        }
+        let (queries, _) = self
+            .workspace_data
+            .as_ref()
+            .ok_or_else(|| ExecutionError::new("Skill workspace validation is unavailable"))?;
+        let preferences = queries
+            .preferences(chat)
+            .await
+            .map_err(|e| ExecutionError::with_source("Could not load the skill workspace", e))?;
+        let projects = queries
+            .list_projects()
+            .await
+            .map_err(|e| ExecutionError::with_source("Could not load skill projects", e))?;
+        let workspace = effective_workspace(&self.workspace, &preferences, &projects)?;
+        self.validate_skills(
+            preferences.execution.provider,
+            &workspace,
+            &draft.text,
+            &draft.skills,
+        )
+        .await
+    }
     pub fn new(
         chats: Arc<dyn ChatQueries>,
         chat_writes: Arc<dyn ChatWrites>,
@@ -398,10 +469,12 @@ impl ConversationService {
             message_writes,
             executor,
             workspace,
+            skills: None,
             workspace_data: None,
-            steered_input_store: None,
+            steered_input_writes: None,
             settings_store: None,
             display_store: None,
+            instructions: None,
             active: Arc::default(),
         }
     }
@@ -415,13 +488,21 @@ impl ConversationService {
         self
     }
 
-    pub fn with_steered_input_store(mut self, store: Arc<dyn SteeredInputStore>) -> Self {
-        self.steered_input_store = Some(store);
+    pub fn with_steered_input_writes(mut self, writes: Arc<dyn SteeredInputWrites>) -> Self {
+        self.steered_input_writes = Some(writes);
         self
     }
 
     pub fn with_display(mut self, store: Arc<dyn DisplayWrites>) -> Self {
         self.display_store = Some(store);
+        self
+    }
+    pub fn with_instructions(
+        mut self,
+        service: Arc<InstructionService>,
+        starts: Arc<dyn TurnStartWrites>,
+    ) -> Self {
+        self.instructions = Some((service, starts));
         self
     }
     pub async fn check_provider_enabled(&self, chat_id: Uuid) -> Result<(), ExecutionError> {
@@ -470,6 +551,7 @@ impl ConversationService {
         let (_, responses) = mpsc::unbounded_channel();
         self.send_turn(
             SendTurnInput {
+                skills: Vec::new(),
                 chat_id: input.chat_id,
                 prompt: input.prompt,
                 attachments: vec![],
@@ -541,34 +623,15 @@ impl ConversationService {
                 .preferences(chat_id)
                 .await
                 .map_err(SendMessageError::Storage)?;
-            if let Some(project_id) = &preferences.project_id {
-                let projects = queries
+            workspace = effective_workspace(
+                &self.workspace,
+                &preferences,
+                &queries
                     .list_projects()
                     .await
-                    .map_err(SendMessageError::Storage)?;
-                let project = projects
-                    .iter()
-                    .find(|p| p.id.to_string() == *project_id)
-                    .ok_or_else(|| {
-                        SendMessageError::Execution(ExecutionError::new(
-                            "The assigned project no longer exists",
-                        ))
-                    })?;
-                if let Some(folder) = &project.folder {
-                    workspace = folder.clone();
-                }
-            }
-            workspace = workspace.canonicalize().map_err(|e| {
-                SendMessageError::Execution(ExecutionError::with_source(
-                    format!("The working folder is unavailable: {}", workspace.display()),
-                    e,
-                ))
-            })?;
-            if !workspace.is_dir() {
-                return Err(SendMessageError::Execution(ExecutionError::new(
-                    "The working folder is not a directory",
-                )));
-            }
+                    .map_err(SendMessageError::Storage)?,
+            )
+            .map_err(SendMessageError::Execution)?;
             if let Some(store) = &self.settings_store {
                 let settings = store
                     .app_settings()
@@ -619,8 +682,42 @@ impl ConversationService {
         {
             input.retry_of = Some(id);
         }
+        let instructions = if let Some((service, _)) = &self.instructions {
+            match input.retry_of {
+                Some(message) => service.for_retry(chat_id, message).await.map_err(|e| {
+                    SendMessageError::Execution(ExecutionError::with_source(
+                        "Could not recover custom instructions",
+                        e,
+                    ))
+                })?,
+                None => service
+                    .resolve(
+                        preferences
+                            .project_id
+                            .as_deref()
+                            .map(Uuid::parse_str)
+                            .transpose()
+                            .map_err(|e| {
+                                SendMessageError::Execution(ExecutionError::with_source(
+                                    "Invalid project identity",
+                                    e,
+                                ))
+                            })?,
+                    )
+                    .await
+                    .map_err(|e| {
+                        SendMessageError::Execution(ExecutionError::with_source(
+                            "Could not resolve custom instructions",
+                            e,
+                        ))
+                    })?,
+            }
+        } else {
+            InstructionSnapshot::default()
+        };
         let binding = chat.binding.filter(|binding| {
             input.retry_of.is_none()
+                && binding.instructions_fingerprint == instructions.fingerprint
                 && !preferences.new_session
                 && binding.adapter_key == preferences.execution.provider.key()
                 && preferences
@@ -635,6 +732,67 @@ impl ConversationService {
                 .map_err(SendMessageError::Storage)?,
             _ => Vec::new(),
         };
+        let mut retry_inputs = Vec::new();
+        if let Some((_, queries)) = &self.skills {
+            if let Some(original) = input.retry_of {
+                let stored = queries
+                    .message_skills(chat_id, original)
+                    .await
+                    .map_err(SendMessageError::Storage)?;
+                if stored != input.skills {
+                    return Err(SendMessageError::Task(
+                        "The failed draft's skill selection has changed. Send it as a new message."
+                            .into(),
+                    ));
+                }
+            }
+            for id in &accepted_retry_inputs {
+                if let Some(message) = history.iter().find(|m| m.id == *id) {
+                    let skills = queries
+                        .message_skills(chat_id, *id)
+                        .await
+                        .map_err(SendMessageError::Storage)?;
+                    let files = if let Some((workspace, _)) = &self.workspace_data {
+                        workspace
+                            .message_attachments(chat_id)
+                            .await
+                            .map_err(SendMessageError::Storage)?
+                            .into_iter()
+                            .filter_map(|(m, a)| (m == *id).then_some(a))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    self.validate_skills(
+                        preferences.execution.provider,
+                        &workspace,
+                        &message.body,
+                        &skills,
+                    )
+                    .await
+                    .map_err(SendMessageError::Execution)?;
+                    retry_inputs.push(SteerInput {
+                        id: *id,
+                        prompt: message.body.clone(),
+                        attachments: files,
+                        skills,
+                    });
+                }
+            }
+        }
+        if !input.skills.is_empty() && self.instructions.is_none() {
+            return Err(SendMessageError::Task(
+                "Atomic skill persistence is unavailable".into(),
+            ));
+        }
+        self.validate_skills(
+            preferences.execution.provider,
+            &workspace,
+            &input.prompt,
+            &input.skills,
+        )
+        .await
+        .map_err(SendMessageError::Execution)?;
         let mut attachments = input.attachments.clone();
         let prior_context = if binding.is_none() && !history.is_empty() {
             let mut context = String::from(
@@ -646,7 +804,7 @@ impl ConversationService {
                 }
                 context.push_str(&format!("\n{:?}:\n{}\n", message.role, message.body));
             }
-            if !accepted_retry_inputs.is_empty() {
+            if !accepted_retry_inputs.is_empty() && retry_inputs.is_empty() {
                 context.push_str(&format!(
                     "\nConfirmed user steering accepted for interrupted turn {}. Apply these instructions after the original user request, in chronological order:\n",
                     input.retry_of.expect("accepted inputs only exist for a retry")
@@ -708,25 +866,16 @@ impl ConversationService {
                         "The failed draft has changed. Send it as a new message.".into(),
                     )
                 })?,
-            None => self
-                .message_writes
-                .append_message(NewMessage {
-                    id: stable_id.unwrap_or_else(Uuid::new_v4),
-                    chat_id,
-                    role: MessageRole::User,
-                    body: input.prompt.clone(),
-                    created_at: Utc::now(),
-                })
-                .await
-                .map_err(SendMessageError::Storage)?,
+            None => instructions::new_message_snapshot(NewMessage {
+                id: stable_id.unwrap_or_else(Uuid::new_v4),
+                chat_id,
+                role: MessageRole::User,
+                body: input.prompt.clone(),
+                created_at: Utc::now(),
+            }),
         };
-        if let Some((_, writes)) = &self.workspace_data {
-            writes
-                .save_message_attachments(user_message.id, &input.attachments)
-                .await
-                .map_err(SendMessageError::Storage)?;
-        }
         let mut turn = TurnRecord {
+            instructions: instructions.clone(),
             id: Uuid::new_v4(),
             chat_id,
             user_message_id: user_message.id,
@@ -735,17 +884,52 @@ impl ConversationService {
             status: "running".into(),
             error: None,
         };
-        if let Some((_, writes)) = &self.workspace_data {
-            writes
-                .save_turn(&turn)
+        let user_message = if let Some((_, starts)) = &self.instructions {
+            starts
+                .record_turn_start(RecordTurnStart {
+                    user: user_message,
+                    insert_user: input.retry_of.is_none(),
+                    attachments: input.attachments.clone(),
+                    skills: input.skills.clone(),
+                    turn: turn.clone(),
+                })
                 .await
-                .map_err(SendMessageError::Storage)?;
-        }
+                .map_err(SendMessageError::Storage)?
+        } else {
+            let user = if input.retry_of.is_none() {
+                self.message_writes
+                    .append_message(NewMessage {
+                        id: user_message.id,
+                        chat_id,
+                        role: user_message.role,
+                        body: user_message.body,
+                        created_at: user_message.created_at,
+                    })
+                    .await
+                    .map_err(SendMessageError::Storage)?
+            } else {
+                user_message
+            };
+            if let Some((_, writes)) = &self.workspace_data {
+                writes
+                    .save_message_attachments(user.id, &input.attachments)
+                    .await
+                    .map_err(SendMessageError::Storage)?;
+                writes
+                    .save_turn(&turn)
+                    .await
+                    .map_err(SendMessageError::Storage)?;
+            }
+            user
+        };
         let user_created_at = user_message.created_at;
         let _ = output.send(ConversationEvent::UserMessage(user_message));
         let (events, mut stream) = mpsc::unbounded_channel();
         let executor = self.executor.clone();
         let request = ExecutionRequest {
+            skills: input.skills,
+            retry_inputs,
+            instructions: instructions.clone(),
             chat_id,
             binding,
             workspace: workspace.clone(),
@@ -769,7 +953,8 @@ impl ConversationService {
         let mut had_output = false;
         while let Some(event) = stream.recv().await {
             match event {
-                ExecutionEvent::BindingEstablished(binding) => {
+                ExecutionEvent::BindingEstablished(mut binding) => {
+                    binding.instructions_fingerprint = instructions.fingerprint.clone();
                     let saved = self
                         .chat_writes
                         .save_execution_binding(chat_id, binding)
@@ -804,6 +989,12 @@ impl ConversationService {
                     let _ =
                         output.send(ConversationEvent::SteeringAvailable { chat_id, available });
                 }
+                ExecutionEvent::SkillsChanged => {
+                    if let Some((skills, _)) = &self.skills {
+                        skills.invalidate(preferences.execution.provider);
+                    }
+                    let _ = output.send(ConversationEvent::SkillsChanged { chat_id });
+                }
                 ExecutionEvent::InputAccepted(input) => {
                     final_text = None;
                     // Finish the preceding assistant segment before inserting the new user input.
@@ -822,9 +1013,15 @@ impl ConversationService {
                         created_at: Utc::now()
                             .max(assistant_created_at + chrono::Duration::milliseconds(1)),
                     };
-                    let persisted = if let Some(store) = &self.steered_input_store {
-                        store
-                            .persist_steered_input(assistant, user, &input.attachments, turn.id)
+                    let persisted = if let Some(writes) = &self.steered_input_writes {
+                        writes
+                            .persist_steered_input(
+                                assistant,
+                                user,
+                                &input.attachments,
+                                &input.skills,
+                                turn.id,
+                            )
                             .await
                     } else {
                         async {
@@ -1038,12 +1235,12 @@ impl ChatService {
         Self {
             queries,
             writes,
-            setup: None,
+            setup_writes: None,
         }
     }
 
-    pub fn with_setup_store(mut self, setup: Arc<dyn ChatSetupStore>) -> Self {
-        self.setup = Some(setup);
+    pub fn with_setup_writes(mut self, writes: Arc<dyn ChatSetupWrites>) -> Self {
+        self.setup_writes = Some(writes);
         self
     }
 
@@ -1080,12 +1277,12 @@ impl ChatService {
             execution,
             ..Default::default()
         });
-        let Some(setup) = &self.setup else {
+        let Some(writes) = &self.setup_writes else {
             return Err(CreateChatError::Storage(PersistenceError::new(
                 std::io::Error::other("atomic chat setup is unavailable"),
             )));
         };
-        setup
+        writes
             .create_chat_with_preferences(chat, preferences)
             .await
             .map_err(CreateChatError::Storage)
@@ -1095,7 +1292,10 @@ impl ChatService {
         if input.draft.text.trim().is_empty() && input.draft.attachments.is_empty() {
             return Err(StartChatError::EmptyMessage);
         }
-        let setup = self.setup.as_ref().ok_or(StartChatError::Unavailable)?;
+        let writes = self
+            .setup_writes
+            .as_ref()
+            .ok_or(StartChatError::Unavailable)?;
         let title: String = if input.draft.text.trim().is_empty() {
             format!("Attachment: {}", input.draft.attachments[0].name)
         } else {
@@ -1117,7 +1317,7 @@ impl ChatService {
             created_at,
             binding: None,
         };
-        setup
+        writes
             .start_chat(
                 chat,
                 input.preferences,
@@ -1205,3 +1405,6 @@ mod tests {
 
 mod rewriting;
 pub use rewriting::*;
+
+mod skills;
+pub use skills::*;

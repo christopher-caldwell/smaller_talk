@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT instructions FROM turns t\nWHERE t.chat_id = ? AND (t.user_message_id = ? OR EXISTS (\n    SELECT 1 FROM turn_inputs i WHERE i.turn_id = t.id AND i.message_id = ?\n)) ORDER BY t.rowid ASC LIMIT 1;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "instructions",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      true
+    ]
+  },
+  "hash": "7e480ba8c4d59a3c75e8ea702f7fb39a92a7a4448e433b3702e5944acf3c3793"
+}

@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Adapted from GPUI 0.2.2 examples/input.rs; see ../LICENSE-GPUI-APACHE.
 // A local prompt field using GPUI native input/IME hooks; no editor subsystem.
+use smaller_talk_domain::{
+    SkillDescriptor, SkillMention, SkillReference, edit_skill_mentions, skill_tokens,
+};
 use std::ops::Range;
 
 use gpui::{
@@ -54,12 +57,15 @@ impl EventEmitter<Navigate> for Composer {}
 
 #[derive(Clone)]
 struct EditSnapshot {
+    skills: Vec<SkillMention>,
     content: SharedString,
     range: Range<usize>,
     reversed: bool,
 }
 
 pub struct Composer {
+    editable: bool,
+    skills: Vec<SkillMention>,
     focus_handle: FocusHandle,
     content: SharedString,
     placeholder: SharedString,
@@ -74,6 +80,7 @@ pub struct Composer {
     is_selecting: bool,
     picker_navigation: bool,
     single_line: bool,
+    enter_inserts_newline: bool,
     max_rows: usize,
     font_size: f32,
     content_height: Pixels,
@@ -89,8 +96,18 @@ impl Composer {
         Self::with_content("", true, cx)
     }
 
+    pub fn new_editor(cx: &mut Context<Self>) -> Self {
+        let mut editor = Self::new(cx);
+        editor.enter_inserts_newline = true;
+        editor.max_rows = 10;
+        editor.font_size = 14.;
+        editor
+    }
+
     fn with_content(content: &str, single_line: bool, cx: &mut Context<Self>) -> Self {
         Self {
+            editable: true,
+            skills: Vec::new(),
             focus_handle: cx.focus_handle(),
             content: content.to_owned().into(),
             placeholder: "Type a message…".into(),
@@ -102,6 +119,7 @@ impl Composer {
             is_selecting: false,
             picker_navigation: false,
             single_line,
+            enter_inserts_newline: false,
             max_rows: 7,
             font_size: 16.,
             content_height: px(24.),
@@ -114,6 +132,7 @@ impl Composer {
 
     pub fn set_content(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
         self.reveal_cursor = true;
+        self.skills.clear();
         self.content = content.into();
         self.selected_range = self.content.len()..self.content.len();
         self.selection_reversed = false;
@@ -129,6 +148,7 @@ impl Composer {
         attachments: Vec<smaller_talk_domain::Attachment>,
     ) -> smaller_talk_domain::Draft {
         smaller_talk_domain::Draft {
+            skills: self.skills.clone(),
             text: self.content.to_string(),
             attachments,
             selection_start: self.selected_range.start,
@@ -139,6 +159,12 @@ impl Composer {
         self.reveal_cursor = true;
         self.scroll = point(px(0.), px(0.));
         self.content = draft.text.clone().into();
+        self.skills = draft
+            .skills
+            .iter()
+            .filter(|m| m.matches(&draft.text))
+            .cloned()
+            .collect();
         let boundary = |mut n: usize| {
             n = n.min(self.content.len());
             while !self.content.is_char_boundary(n) {
@@ -168,12 +194,162 @@ impl Composer {
         self.font_size = font_size;
     }
 
+    pub fn set_editable(&mut self, editable: bool, cx: &mut Context<Self>) {
+        self.editable = editable;
+        cx.notify();
+    }
+    pub fn skills(&self) -> &[SkillMention] {
+        &self.skills
+    }
+    pub fn composing(&self) -> bool {
+        self.marked_range.is_some()
+    }
+    pub fn skill_query(&self) -> Option<(Range<usize>, String)> {
+        if self.composing() || !self.selected_range.is_empty() {
+            return None;
+        }
+        let cursor = self.selected_range.end;
+        let start = self.content[..cursor]
+            .rfind(char::is_whitespace)
+            .map_or(0, |i| i + 1);
+        let token = &self.content[start..cursor];
+        let query = token.strip_prefix('$')?;
+        if !query.is_empty() && !query.bytes().any(|c| c.is_ascii_lowercase()) {
+            return None;
+        }
+        if !query
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"_:-".contains(&c))
+            || self.skills.iter().any(|m| m.range == (start..cursor))
+        {
+            return None;
+        }
+        let probe = format!("{}x ", &self.content[..cursor]);
+        if !skill_tokens(&probe).iter().any(|(r, _)| r.start == start) {
+            return None;
+        }
+        Some((start..cursor, query.into()))
+    }
+    pub fn select_skill(
+        &mut self,
+        range: Range<usize>,
+        reference: SkillReference,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.editable {
+            return;
+        }
+        if self.content.get(range.clone()).is_none() {
+            return;
+        }
+        self.remember_edit();
+        let token = format!("${}", reference.name);
+        let prefix = if self.content[..range.start]
+            .chars()
+            .next_back()
+            .is_some_and(|c| !c.is_whitespace())
+        {
+            " "
+        } else {
+            ""
+        };
+        let suffix = if self.content[range.end..]
+            .chars()
+            .next()
+            .is_some_and(|c| !c.is_whitespace())
+        {
+            " "
+        } else {
+            ""
+        };
+        let replacement = format!("{prefix}{token}{suffix}");
+        let mention_start = range.start + prefix.len();
+        edit_skill_mentions(&mut self.skills, range.clone(), &replacement);
+        self.content =
+            (self.content[..range.start].to_owned() + &replacement + &self.content[range.end..])
+                .into();
+        self.skills.push(SkillMention {
+            range: mention_start..mention_start + token.len(),
+            reference,
+        });
+        self.skills.sort_by_key(|m| m.range.start);
+        self.selected_range = mention_start + token.len()..mention_start + token.len();
+        self.reveal_cursor = true;
+        cx.emit(Changed);
+        cx.notify();
+    }
+    pub fn resolve_known_skills(
+        &mut self,
+        entries: &[SkillDescriptor],
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if !self.editable || self.composing() {
+            return false;
+        }
+        let mut changed = false;
+        let links = smaller_talk_application::resolve_skill_links(&self.content, entries);
+        for (range, reference) in links.into_iter().rev() {
+            let token = format!("${}", reference.name);
+            edit_skill_mentions(&mut self.skills, range.clone(), &token);
+            self.content =
+                (self.content[..range.start].to_owned() + &token + &self.content[range.end..])
+                    .into();
+            self.skills.push(SkillMention {
+                range: range.start..range.start + token.len(),
+                reference,
+            });
+            let adjust = |cursor: usize| {
+                if cursor >= range.end {
+                    cursor - range.len() + token.len()
+                } else if cursor > range.start {
+                    range.start + token.len()
+                } else {
+                    cursor
+                }
+            };
+            self.selected_range =
+                adjust(self.selected_range.start)..adjust(self.selected_range.end);
+            changed = true;
+        }
+        for (range, name) in skill_tokens(&self.content) {
+            if self.skills.iter().any(|m| m.range == range) {
+                continue;
+            }
+            if let smaller_talk_application::SkillNameResolution::Selected(reference) =
+                smaller_talk_application::resolve_skill_name(entries, &name)
+            {
+                self.skills.push(SkillMention { range, reference });
+                changed = true;
+            }
+        }
+        if changed {
+            self.skills.sort_by_key(|m| m.range.start);
+            cx.notify();
+        }
+        changed
+    }
+    pub fn remove_skill(&mut self, range: Range<usize>, cx: &mut Context<Self>) {
+        if !self.editable {
+            return;
+        }
+        self.remember_edit();
+        edit_skill_mentions(&mut self.skills, range.clone(), "");
+        self.content = (self.content[..range.start].to_owned() + &self.content[range.end..]).into();
+        self.selected_range = range.start..range.start;
+        cx.emit(Changed);
+        cx.notify();
+    }
+    pub fn selection(&self) -> Range<usize> {
+        self.selected_range.clone()
+    }
+
     pub fn content(&self) -> String {
         self.content.to_string()
     }
 
     fn snapshot(&self) -> EditSnapshot {
         EditSnapshot {
+            skills: self.skills.clone(),
             content: self.content.clone(),
             range: self.selected_range.clone(),
             reversed: self.selection_reversed,
@@ -193,6 +369,7 @@ impl Composer {
     fn restore(&mut self, edit: EditSnapshot, cx: &mut Context<Self>) {
         self.reveal_cursor = true;
         self.content = edit.content;
+        self.skills = edit.skills;
         self.selected_range = edit.range;
         self.selection_reversed = edit.reversed;
         self.marked_range = None;
@@ -201,6 +378,9 @@ impl Composer {
     }
 
     fn undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.editable {
+            return;
+        }
         if let Some(edit) = self.undo.pop() {
             self.redo.push(self.snapshot());
             self.restore(edit, cx);
@@ -208,15 +388,22 @@ impl Composer {
     }
 
     fn redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.editable {
+            return;
+        }
         if let Some(edit) = self.redo.pop() {
             self.undo.push(self.snapshot());
             self.restore(edit, cx);
         }
     }
 
-    fn submit(&mut self, _: &Submit, _: &mut Window, cx: &mut Context<Self>) {
+    fn submit(&mut self, _: &Submit, window: &mut Window, cx: &mut Context<Self>) {
         if self.marked_range.is_none() {
-            cx.emit(Submitted);
+            if self.enter_inserts_newline {
+                self.replace_text_in_range(None, "\n", window, cx);
+            } else {
+                cx.emit(Submitted);
+            }
         }
     }
 
@@ -522,6 +709,7 @@ impl Composer {
     pub fn reset(&mut self, cx: &mut Context<Self>) {
         self.reveal_cursor = true;
         self.content = "".into();
+        self.skills.clear();
         self.selected_range = 0..0;
         self.selection_reversed = false;
         self.marked_range = None;
@@ -582,6 +770,9 @@ impl EntityInputHandler for Composer {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.editable {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -599,9 +790,13 @@ impl EntityInputHandler for Composer {
         if self.marked_range.is_none() {
             self.remember_edit();
         }
+        edit_skill_mentions(&mut self.skills, range.clone(), new_text);
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
                 .into();
+        let content = self.content.clone();
+        self.skills
+            .retain(|m| m.matches(&content) && m.is_prose(&content));
         self.selected_range = range.start + new_text.len()..range.start + new_text.len();
         self.marked_range.take();
         cx.emit(Changed);
@@ -616,6 +811,9 @@ impl EntityInputHandler for Composer {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.editable {
+            return;
+        }
         let range = range_utf16
             .as_ref()
             .map(|range_utf16| self.range_from_utf16(range_utf16))
@@ -625,9 +823,13 @@ impl EntityInputHandler for Composer {
         if self.marked_range.is_none() {
             self.remember_edit();
         }
+        edit_skill_mentions(&mut self.skills, range.clone(), new_text);
         self.content =
             (self.content[0..range.start].to_owned() + new_text + &self.content[range.end..])
                 .into();
+        let content = self.content.clone();
+        self.skills
+            .retain(|m| m.matches(&content) && m.is_prose(&content));
         if !new_text.is_empty() {
             self.marked_range = Some(range.start..range.start + new_text.len());
         } else {
@@ -813,12 +1015,37 @@ impl Element for TextElement {
                 underline: None,
                 strikethrough: None,
             };
+            let mut boundaries = vec![0, text.len()];
+            for mention in &input.skills {
+                if mention.range.start < start + text.len() && mention.range.end > start {
+                    boundaries.push(mention.range.start.saturating_sub(start).min(text.len()));
+                    boundaries.push(mention.range.end.saturating_sub(start).min(text.len()));
+                }
+            }
+            boundaries.sort_unstable();
+            boundaries.dedup();
+            let runs: Vec<_> = boundaries
+                .windows(2)
+                .map(|r| {
+                    let mut run = run.clone();
+                    run.len = r[1] - r[0];
+                    if input
+                        .skills
+                        .iter()
+                        .any(|m| m.range.contains(&(start + r[0])))
+                    {
+                        run.color = rgb(super::ACCENT).into();
+                        run.background_color = Some(rgba(0x6798cf15).into());
+                    }
+                    run
+                })
+                .collect();
             let line = window
                 .text_system()
                 .shape_text(
                     text.to_owned().into(),
                     font_size,
-                    &[run],
+                    &runs,
                     (!input.single_line).then_some(bounds.size.width),
                     None,
                 )

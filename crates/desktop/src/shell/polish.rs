@@ -3,6 +3,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
 pub(super) enum PickerAction {
+    Skill(SkillReference),
     Model(Provider, String),
     Effort(Option<String>),
     Retry(Provider),
@@ -66,6 +67,9 @@ impl ChatsView {
     }
 
     pub(super) fn picker_choices(&self) -> Vec<PickerChoice> {
+        if matches!(self.popup, Some(Popup::Skills)) {
+            return self.skill_choices();
+        }
         if let Some(Popup::Settings(picker)) = self.popup {
             return self.settings_picker_choices(picker);
         }
@@ -139,7 +143,7 @@ impl ChatsView {
         cx: &mut Context<Self>,
     ) {
         self.popup_return_focus = window.focused(cx);
-        if matches!(popup, Popup::Models) {
+        if matches!(popup, Popup::Models | Popup::Skills) {
             self.model_query.clear();
             self.model_search.update(cx, |e, cx| {
                 e.set_picker_navigation(true);
@@ -155,7 +159,7 @@ impl ChatsView {
             .position(|c| c.selected)
             .unwrap_or(0);
         self.popup_scroll.scroll_to_item(self.popup_index);
-        if matches!(popup, Popup::Models) {
+        if matches!(popup, Popup::Models | Popup::Skills) {
             self.model_search.focus_handle(cx).focus(window);
         } else {
             self.popup_focus.focus(window);
@@ -164,8 +168,24 @@ impl ChatsView {
     }
 
     pub(super) fn dismiss_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let return_to_composer = matches!(self.popup, Some(Popup::Models)) && !self.settings_open;
+        let return_to_composer = matches!(
+            self.popup,
+            Some(
+                Popup::Models
+                    | Popup::Effort
+                    | Popup::Skills
+                    | Popup::Attachments
+                    | Popup::SkillDetails
+            )
+        ) && !self.settings_open;
         self.popup = None;
+        if let Some(id) = self.active
+            && let Some(state) = self.states.get(&id)
+        {
+            state
+                .composer
+                .update(cx, |e, _| e.set_picker_navigation(false));
+        }
         if return_to_composer {
             self.popup_return_focus = None;
             if let Some(id) = self.active
@@ -189,6 +209,10 @@ impl ChatsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if let PickerAction::Skill(reference) = &action {
+            self.select_skill(reference.clone(), window, cx);
+            return;
+        }
         self.dismiss_popup(window, cx);
         if matches!(
             action,
@@ -202,6 +226,7 @@ impl ChatsView {
         };
         let mut prefs = self.states[&id].preferences.clone();
         match action {
+            PickerAction::Skill(_) => unreachable!(),
             PickerAction::Retry(provider) => {
                 self.discover(provider);
                 self.open_picker(Popup::Models, window, cx);
@@ -233,6 +258,25 @@ impl ChatsView {
         cx: &mut Context<Self>,
     ) {
         let key = event.keystroke.key.as_str();
+        if matches!(self.popup, Some(Popup::Skills))
+            && self
+                .active
+                .and_then(|id| self.states.get(&id))
+                .is_some_and(|s| s.composer.read(cx).composing())
+        {
+            return;
+        }
+
+        if self.settings_open
+            && self.settings_section == settings::SettingsSection::Instructions
+            && event.keystroke.modifiers.platform
+            && key == "s"
+        {
+            self.save_instructions(cx);
+            window.prevent_default();
+            cx.stop_propagation();
+            return;
+        }
         if self.settings_open && self.popup.is_none() && key == "escape" {
             self.close_settings(window, cx);
             window.prevent_default();
@@ -254,9 +298,9 @@ impl ChatsView {
         }
         if matches!(
             self.popup,
-            Some(Popup::Models | Popup::Effort | Popup::Settings(_))
+            Some(Popup::Models | Popup::Effort | Popup::Skills | Popup::Settings(_))
         ) {
-            let searching = matches!(self.popup, Some(Popup::Models));
+            let searching = matches!(self.popup, Some(Popup::Models | Popup::Skills));
             if searching && !matches!(key, "up" | "down" | "enter" | "tab") {
                 return;
             }

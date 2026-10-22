@@ -72,6 +72,8 @@ impl Attachment {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Draft {
+    #[serde(default)]
+    pub skills: Vec<crate::SkillMention>,
     pub text: String,
     pub attachments: Vec<Attachment>,
     pub selection_start: usize,
@@ -103,8 +105,9 @@ impl NewChatDraft {
     pub fn remaining_draft(&self) -> Draft {
         let mut remaining = self.draft.clone();
         if let Some(submitted) = &self.submitted {
-            if remaining.text == submitted.text {
+            if remaining.text == submitted.text && remaining.skills == submitted.skills {
                 remaining.text.clear();
+                remaining.skills.clear();
                 remaining.selection_start = 0;
                 remaining.selection_end = 0;
             }
@@ -193,6 +196,7 @@ pub struct InteractionResponse {
 
 #[derive(Clone, Debug)]
 pub struct TurnRecord {
+    pub instructions: crate::InstructionSnapshot,
     pub id: Uuid,
     pub chat_id: Uuid,
     pub user_message_id: Uuid,
@@ -224,4 +228,17 @@ pub struct MessageQueue {
     pub steer_available: bool,
     pub entries: Vec<QueuedMessage>,
     pub paused: Option<String>,
+}
+
+pub const MAX_QUEUED_MESSAGES: u64 = 100;
+
+/// Authoritative queue occupancy used by the enqueue policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueueCapacity {
+    pub queued: u64,
+}
+impl QueueCapacity {
+    pub fn can_enqueue(self) -> bool {
+        self.queued < MAX_QUEUED_MESSAGES
+    }
 }

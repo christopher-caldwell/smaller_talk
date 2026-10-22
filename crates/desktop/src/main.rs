@@ -14,7 +14,7 @@ use gpui::{
 };
 use smaller_talk_application::*;
 use smaller_talk_database::{
-    SqliteChatStore, create_empty_database, migrate_existing, open_existing,
+    SqliteChatStore, SqliteUnitOfWork, create_empty_database, migrate_existing, open_existing,
 };
 use smaller_talk_infrastructure::{AgentRouter, ClaudeAdapter, CodexAdapter, LocalAttachments};
 use std::sync::Arc;
@@ -91,7 +91,7 @@ fn main() -> anyhow::Result<()> {
         })?,
     ));
     let chats =
-        Arc::new(ChatService::new(store.clone(), store.clone()).with_setup_store(store.clone()));
+        Arc::new(ChatService::new(store.clone(), store.clone()).with_setup_writes(store.clone()));
     let workspace = Arc::new(WorkspaceService::new(store.clone(), store.clone()));
     let initial_chats = runtime
         .block_on(chats.list_chats())
@@ -104,6 +104,11 @@ fn main() -> anyhow::Result<()> {
         .context("Could not load the workspace; run `just db-migrate`.")?;
     let projects = runtime.block_on(workspace.list_projects())?;
     let settings = Arc::new(SettingsService::new(store.clone(), store.clone()));
+    let instructions = Arc::new(InstructionService::new(
+        store.clone(),
+        store.clone(),
+        store.clone(),
+    ));
     let app_settings = runtime
         .block_on(settings.load())
         .context("Could not load settings; run `just db-migrate`.")?;
@@ -119,6 +124,11 @@ fn main() -> anyhow::Result<()> {
             prefs.enabled,
         );
     }
+    router.configure_skill_locations(smaller_talk_infrastructure::SkillLocations {
+        home: std::env::var_os("HOME").map(std::path::PathBuf::from),
+        claude_config: std::env::var_os("CLAUDE_CONFIG_DIR").map(std::path::PathBuf::from),
+    });
+    let skills = Arc::new(SkillService::new(router.clone()));
     let conversation = Arc::new(
         ConversationService::new(
             store.clone(),
@@ -129,8 +139,10 @@ fn main() -> anyhow::Result<()> {
             std::env::current_dir()?,
         )
         .with_workspace(store.clone(), store.clone())
-        .with_steered_input_store(store.clone())
+        .with_steered_input_writes(store.clone())
         .with_settings(store.clone())
+        .with_instructions(instructions.clone(), store.clone())
+        .with_skills(skills.clone(), store.clone())
         .with_display(store.clone()),
     );
     runtime.block_on(store.recover_queues())?;
@@ -139,6 +151,10 @@ fn main() -> anyhow::Result<()> {
         QueueCoordinator::start(
             store.clone(),
             store.clone(),
+            Arc::new(EnqueueService::<SqliteUnitOfWork>::new(
+                store.clone(),
+                store.clone(),
+            )),
             conversation.clone(),
             queue_output,
         )
@@ -165,9 +181,12 @@ fn main() -> anyhow::Result<()> {
         store.clone(),
     ));
     let services = shell::Services {
+        skills,
+        skill_queries: store.clone(),
         display: store.clone(),
         rewriter,
         settings,
+        instructions,
         providers: router,
         repositories: Arc::new(smaller_talk_infrastructure::GitRepositoryReader::new(
             "git".into(),

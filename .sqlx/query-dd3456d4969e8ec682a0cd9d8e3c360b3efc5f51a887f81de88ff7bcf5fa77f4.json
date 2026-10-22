@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "DELETE FROM message_queue\nWHERE chat_id = ?1 AND id = ?2 AND state IN ('pending', 'failed')\nAND NOT EXISTS (\n    SELECT 1 FROM drafts WHERE chat_id = ?1\n    AND (length(json_extract(payload, '$.text')) > 0\n        OR json_array_length(payload, '$.attachments') > 0\n        OR COALESCE(json_array_length(payload, '$.skills'), 0) > 0)\n)\nRETURNING payload;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "dd3456d4969e8ec682a0cd9d8e3c360b3efc5f51a887f81de88ff7bcf5fa77f4"
+}

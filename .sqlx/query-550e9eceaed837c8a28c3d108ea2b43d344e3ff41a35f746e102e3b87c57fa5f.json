@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.payload FROM message_skills s JOIN messages m ON m.id = s.message_id\nWHERE m.chat_id = ? AND m.id = ?;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "payload",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "550e9eceaed837c8a28c3d108ea2b43d344e3ff41a35f746e102e3b87c57fa5f"
+}

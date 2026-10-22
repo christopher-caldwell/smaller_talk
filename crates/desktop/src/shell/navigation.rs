@@ -138,41 +138,54 @@ impl ChatsView {
             for hit in &self.search_results {
                 let id = hit.chat_id;
                 let message = hit.message_id;
+                let selected = self.active == Some(id);
                 list = list.child(
-                    compact_button_with_hover(element_id("search-hit", id), "", NAV_HOVER)
-                        .w_full()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .gap_1()
-                        .child(
-                            div().w_full().text_size(px(13.)).truncate().child(
-                                self.chats
-                                    .iter()
-                                    .find(|c| c.id == hit.chat_id)
-                                    .map(|c| self.display_title(c))
-                                    .unwrap_or_else(|| hit.title.clone()),
-                            ),
-                        )
-                        .when_some(hit.project.clone(), |row, project| {
-                            row.child(
-                                div()
-                                    .text_size(px(11.))
-                                    .text_color(rgb(ACCENT))
-                                    .truncate()
-                                    .child(project),
-                            )
-                        })
-                        .child(
+                    compact_button_with_hover(
+                        element_id("search-hit", id),
+                        "",
+                        if selected { NAV_SELECTED } else { NAV_HOVER },
+                    )
+                    .when(selected, |button| {
+                        button.bg(rgb(NAV_SELECTED)).text_color(rgb(SELECTED_INK))
+                    })
+                    .focus(move |style| {
+                        style.border_color(rgb(FOCUS)).bg(rgb(if selected {
+                            NAV_SELECTED
+                        } else {
+                            PANEL_HOVER
+                        }))
+                    })
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap_1()
+                    .child(
+                        div().w_full().text_size(px(13.)).truncate().child(
+                            self.chats
+                                .iter()
+                                .find(|c| c.id == hit.chat_id)
+                                .map(|c| self.display_title(c))
+                                .unwrap_or_else(|| hit.title.clone()),
+                        ),
+                    )
+                    .when_some(hit.project.clone(), |row, project| {
+                        row.child(
                             div()
                                 .text_size(px(11.))
-                                .text_color(rgb(MUTED))
-                                .line_clamp(2)
-                                .child(hit.excerpt.clone()),
+                                .text_color(rgb(if selected { SELECTED_INK } else { ACCENT }))
+                                .truncate()
+                                .child(project),
                         )
-                        .on_click(
-                            cx.listener(move |this, _, _, cx| this.open_chat(id, message, cx)),
-                        ),
+                    })
+                    .child(
+                        div()
+                            .text_size(px(11.))
+                            .text_color(rgb(if selected { SELECTED_INK } else { MUTED }))
+                            .line_clamp(2)
+                            .child(hit.excerpt.clone()),
+                    )
+                    .on_click(cx.listener(move |this, _, _, cx| this.open_chat(id, message, cx))),
                 );
             }
         } else {

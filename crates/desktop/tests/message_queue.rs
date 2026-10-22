@@ -68,28 +68,46 @@ struct Setup {
     _temp: tempfile::TempDir,
 }
 async fn setup() -> Setup {
+    setup_with_skills(None).await
+}
+async fn setup_with_skills(catalog: Option<Arc<dyn SkillCatalog>>) -> Setup {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("chats.sqlite3");
     create_empty_database(&path).await.unwrap();
     migrate_existing(&path).await.unwrap();
     let db = Arc::new(SqliteChatStore::new(open_existing(&path).await.unwrap()));
     let (tx, runs) = mpsc::unbounded_channel();
-    let service = Arc::new(
-        ConversationService::new(
-            db.clone(),
-            db.clone(),
-            db.clone(),
-            db.clone(),
-            Arc::new(Agent(tx)),
-            temp.path().into(),
-        )
-        .with_workspace(db.clone(), db.clone())
-        .with_steered_input_store(db.clone())
-        .with_settings(db.clone())
-        .with_display(db.clone()),
-    );
+    let mut service = ConversationService::new(
+        db.clone(),
+        db.clone(),
+        db.clone(),
+        db.clone(),
+        Arc::new(Agent(tx)),
+        temp.path().into(),
+    )
+    .with_workspace(db.clone(), db.clone())
+    .with_steered_input_writes(db.clone())
+    .with_settings(db.clone())
+    .with_instructions(
+        Arc::new(InstructionService::new(db.clone(), db.clone(), db.clone())),
+        db.clone(),
+    )
+    .with_display(db.clone());
+    if let Some(catalog) = catalog {
+        service = service.with_skills(Arc::new(SkillService::new(catalog)), db.clone());
+    }
+    let service = Arc::new(service);
     let (output, events) = mpsc::unbounded_channel();
-    let queue = QueueCoordinator::start(db.clone(), db.clone(), service, output);
+    let queue = QueueCoordinator::start(
+        db.clone(),
+        db.clone(),
+        Arc::new(EnqueueService::<SqliteUnitOfWork>::new(
+            db.clone(),
+            db.clone(),
+        )),
+        service,
+        output,
+    );
     Setup {
         chats: ChatService::new(db.clone(), db.clone()),
         db,
@@ -159,7 +177,10 @@ async fn retry_after_restart_finds_original_input_before_accepted_steering() {
         state: "pending".into(),
         error: None,
     };
-    s.db.enqueue(&initial).await.unwrap();
+    EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone())
+        .enqueue(&initial)
+        .await
+        .unwrap();
     s.db.transition(initial.id, "pending", "dispatching", None)
         .await
         .unwrap();
@@ -178,6 +199,7 @@ async fn retry_after_restart_finds_original_input_before_accepted_steering() {
     }
     let turn_id = Uuid::new_v4();
     s.db.save_turn(&TurnRecord {
+        instructions: Default::default(),
         id: turn_id,
         chat_id: chat,
         user_message_id: initial.id,
@@ -230,6 +252,7 @@ async fn retry_after_restart_finds_original_input_before_accepted_steering() {
 }
 fn draft(text: &str) -> Draft {
     Draft {
+        skills: Vec::new(),
         text: text.into(),
         ..Default::default()
     }
@@ -257,6 +280,85 @@ fn finish(run: Run, result: Result<(), String>) {
         .unwrap();
     drop(run.events);
     run.finish.send(result).unwrap();
+}
+
+#[tokio::test]
+async fn queued_turns_use_new_instructions_while_steering_keeps_the_active_snapshot() {
+    let mut s = setup().await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    let mut settings = AppSettings {
+        instructions: CustomInstructions {
+            enabled: true,
+            text: "Initial rules".into(),
+        },
+        ..Default::default()
+    };
+    s.db.save_app_settings(&settings).await.unwrap();
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: draft("initial"),
+        })
+        .await
+        .unwrap();
+    let mut run = next_run(&mut s).await;
+    let original_snapshot = run.request.instructions.clone();
+    assert!(original_snapshot.text.contains("Initial rules"));
+    run.events
+        .send(ExecutionEvent::SteeringAvailable(true))
+        .unwrap();
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: draft("follow up"),
+        })
+        .await
+        .unwrap();
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: draft("steered correction"),
+        })
+        .await
+        .unwrap();
+    event(&mut s, |e| matches!(e, QueueEvent::Snapshot(_, q) if q.steer_available && q.entries.iter().any(|e| e.draft.text == "steered correction"))).await;
+    settings.instructions.text = "New rules".into();
+    s.db.save_app_settings(&settings).await.unwrap();
+    let steering =
+        s.db.queue(chat)
+            .await
+            .unwrap()
+            .entries
+            .into_iter()
+            .find(|e| e.draft.text == "steered correction")
+            .unwrap()
+            .id;
+    s.queue.steer(SteerQueueInput {
+        chat_id: chat,
+        entry_id: steering,
+    });
+    let command = run.controls.recv().await.unwrap();
+    run.events
+        .send(ExecutionEvent::InputAccepted(command.input))
+        .unwrap();
+    command.result.send(SteerOutcome::Accepted).unwrap();
+    event(
+        &mut s,
+        |e| matches!(e, QueueEvent::Snapshot(_, q) if !q.entries.iter().any(|e| e.id == steering)),
+    )
+    .await;
+    assert_eq!(
+        s.db.message_instructions(chat, steering)
+            .await
+            .unwrap()
+            .unwrap(),
+        original_snapshot
+    );
+    finish(run, Ok(()));
+    let follow = next_run(&mut s).await;
+    assert_eq!(follow.request.prompt, "follow up");
+    assert!(follow.request.instructions.text.contains("New rules"));
+    finish(follow, Ok(()));
 }
 
 #[tokio::test]
@@ -409,7 +511,10 @@ async fn durable_transfer_preserves_newer_drafts_and_attachment_ownership() {
         state: "pending".into(),
         error: None,
     };
-    s.db.enqueue(&entry).await.unwrap();
+    EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone())
+        .enqueue(&entry)
+        .await
+        .unwrap();
     assert_eq!(s.db.draft(chat).await.unwrap(), Draft::default());
     assert!(s.db.attachment_references().await.unwrap().contains(&file));
     s.db.save_draft(chat, &draft("newer draft")).await.unwrap();
@@ -417,7 +522,10 @@ async fn durable_transfer_preserves_newer_drafts_and_attachment_ownership() {
         id: Uuid::new_v4(),
         ..entry
     };
-    s.db.enqueue(&second).await.unwrap();
+    EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone())
+        .enqueue(&second)
+        .await
+        .unwrap();
     assert_eq!(s.db.draft(chat).await.unwrap().text, "newer draft");
     s.db.transition(second.id, "pending", "steering", None)
         .await
@@ -549,7 +657,10 @@ async fn uncertain_delivery_requires_review_and_never_auto_replays() {
         state: "pending".into(),
         error: None,
     };
-    s.db.enqueue(&uncertain).await.unwrap();
+    EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone())
+        .enqueue(&uncertain)
+        .await
+        .unwrap();
     s.db.transition(uncertain.id, "pending", "dispatching", None)
         .await
         .unwrap();
@@ -592,9 +703,17 @@ async fn settings_are_resolved_at_dispatch_and_failed_writes_keep_the_draft() {
         state: "pending".into(),
         error: None,
     };
-    s.db.enqueue(&queued).await.unwrap();
+    EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone())
+        .enqueue(&queued)
+        .await
+        .unwrap();
     s.db.save_draft(chat, &queued.draft).await.unwrap();
-    assert!(s.db.enqueue(&queued).await.is_err());
+    assert!(
+        EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone())
+            .enqueue(&queued)
+            .await
+            .is_err()
+    );
     assert_eq!(s.db.draft(chat).await.unwrap().text, "held");
     let preferences = ChatPreferences {
         execution: ExecutionSettings {
@@ -891,4 +1010,426 @@ async fn plans_and_unmatched_final_boundaries_never_become_rewrite_sources() {
             text
         );
     }
+}
+
+#[tokio::test]
+async fn full_queue_is_a_policy_error_and_preserves_the_saved_draft() {
+    let mut s = setup().await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    let service = EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone());
+    for index in 0..MAX_QUEUED_MESSAGES {
+        service
+            .enqueue(&QueuedMessage {
+                id: Uuid::new_v4(),
+                chat_id: chat,
+                draft: draft(&format!("queued {index}")),
+                state: "pending".into(),
+                error: None,
+            })
+            .await
+            .unwrap();
+    }
+    let unsent = draft("keep this draft");
+    s.db.save_draft(chat, &unsent).await.unwrap();
+    let result = service
+        .enqueue(&QueuedMessage {
+            id: Uuid::new_v4(),
+            chat_id: chat,
+            draft: unsent.clone(),
+            state: "pending".into(),
+            error: None,
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(EnqueueError::Full {
+            limit: MAX_QUEUED_MESSAGES
+        })
+    ));
+    assert_eq!(
+        s.db.queue(chat).await.unwrap().entries.len(),
+        MAX_QUEUED_MESSAGES as usize
+    );
+    assert_eq!(s.db.draft(chat).await.unwrap(), unsent);
+    let result = s
+        .queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: unsent.clone(),
+        })
+        .await;
+    assert!(matches!(result, Err(EnqueueError::Full { .. })));
+    assert_eq!(s.db.draft(chat).await.unwrap(), unsent);
+    assert!(s.runs.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn concurrent_enqueue_services_cannot_overfill_the_last_slot() {
+    let s = setup().await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    let service = Arc::new(EnqueueService::<SqliteUnitOfWork>::new(
+        s.db.clone(),
+        s.db.clone(),
+    ));
+    for index in 0..MAX_QUEUED_MESSAGES - 1 {
+        service
+            .enqueue(&QueuedMessage {
+                id: Uuid::new_v4(),
+                chat_id: chat,
+                draft: draft(&format!("queued {index}")),
+                state: "pending".into(),
+                error: None,
+            })
+            .await
+            .unwrap();
+    }
+    // A separate pool/service bypasses the coordinator's in-memory serialization.
+    let competing_db = Arc::new(SqliteChatStore::new(
+        open_existing(&s._temp.path().join("chats.sqlite3"))
+            .await
+            .unwrap(),
+    ));
+    let competitor = Arc::new(EnqueueService::<SqliteUnitOfWork>::new(
+        competing_db.clone(),
+        competing_db,
+    ));
+    let barrier = Arc::new(tokio::sync::Barrier::new(8));
+    let mut tasks = Vec::new();
+    for index in 0..8 {
+        let enqueue = if index % 2 == 0 {
+            service.clone()
+        } else {
+            competitor.clone()
+        };
+        let barrier = barrier.clone();
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            enqueue
+                .enqueue(&QueuedMessage {
+                    id: Uuid::new_v4(),
+                    chat_id: chat,
+                    draft: draft(&format!("competitor {index}")),
+                    state: "pending".into(),
+                    error: None,
+                })
+                .await
+        }));
+    }
+    let mut accepted = 0;
+    let mut full = 0;
+    for task in tasks {
+        match tokio::time::timeout(Duration::from_secs(10), task)
+            .await
+            .unwrap()
+            .unwrap()
+        {
+            Ok(()) => accepted += 1,
+            Err(EnqueueError::Full { .. }) => full += 1,
+            Err(error) => panic!("unexpected enqueue failure: {error}"),
+        }
+    }
+    assert_eq!((accepted, full), (1, 7));
+    assert_eq!(
+        s.db.queue(chat).await.unwrap().entries.len(),
+        MAX_QUEUED_MESSAGES as usize
+    );
+}
+
+#[tokio::test]
+async fn failed_draft_transfer_rolls_back_the_insert_on_a_single_connection_pool() {
+    let s = setup().await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    let unsent = draft("keep after rollback");
+    s.db.save_draft(chat, &unsent).await.unwrap();
+    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect_with(
+            sqlx::sqlite::SqliteConnectOptions::new()
+                .filename(s._temp.path().join("chats.sqlite3"))
+                .foreign_keys(true),
+        )
+        .await
+        .unwrap();
+    sqlx::query("CREATE TRIGGER reject_draft_transfer BEFORE DELETE ON drafts BEGIN SELECT RAISE(ABORT, 'injected draft-transfer failure'); END")
+        .execute(&pool).await.unwrap();
+    let db = Arc::new(SqliteChatStore::new(pool));
+    let service = EnqueueService::<SqliteUnitOfWork>::new(db.clone(), db.clone());
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        service.enqueue(&QueuedMessage {
+            id: Uuid::new_v4(),
+            chat_id: chat,
+            draft: unsent.clone(),
+            state: "pending".into(),
+            error: None,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(EnqueueError::Storage(_))));
+    assert!(db.queue(chat).await.unwrap().entries.is_empty());
+    assert_eq!(db.draft(chat).await.unwrap(), unsent);
+    // Rollback releases the only connection, so a following enqueue can commit.
+    sqlx::query("DROP TRIGGER reject_draft_transfer")
+        .execute(db.pool())
+        .await
+        .unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        service.enqueue(&QueuedMessage {
+            id: Uuid::new_v4(),
+            chat_id: chat,
+            draft: unsent,
+            state: "pending".into(),
+            error: None,
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(db.queue(chat).await.unwrap().entries.len(), 1);
+    assert_eq!(db.draft(chat).await.unwrap(), Draft::default());
+}
+
+struct TestSkills(std::sync::atomic::AtomicBool);
+#[async_trait]
+impl SkillCatalog for TestSkills {
+    fn revision(&self, _: Provider) -> u64 {
+        0
+    }
+    async fn discover(
+        &self,
+        provider: Provider,
+        workspace: &std::path::Path,
+    ) -> Result<Vec<SkillDescriptor>, ExecutionError> {
+        Ok(["review", "correct"]
+            .into_iter()
+            .map(|name| SkillDescriptor {
+                reference: SkillReference {
+                    provider,
+                    name: name.into(),
+                    path: workspace.join(name).join("SKILL.md"),
+                    workspace: workspace.into(),
+                },
+                description: name.into(),
+                source: "Project".into(),
+                command: name.into(),
+                unavailable: (!self.0.load(std::sync::atomic::Ordering::SeqCst))
+                    .then(|| "Skill is disabled".into()),
+            })
+            .collect())
+    }
+    async fn inspect(&self, _: &SkillReference) -> Result<String, ExecutionError> {
+        unreachable!()
+    }
+}
+fn selected_draft(root: &std::path::Path, name: &str) -> Draft {
+    let workspace = root.canonicalize().unwrap();
+    Draft {
+        text: format!("${name} instructions"),
+        skills: vec![SkillMention {
+            range: 0..name.len() + 1,
+            reference: SkillReference {
+                provider: Provider::Codex,
+                name: name.into(),
+                path: workspace.join(name).join("SKILL.md"),
+                workspace,
+            },
+        }],
+        ..Default::default()
+    }
+}
+#[tokio::test]
+async fn skill_identity_survives_accepted_steering_and_failed_turn_retry() {
+    let catalog = Arc::new(TestSkills(std::sync::atomic::AtomicBool::new(true)));
+    let mut s = setup_with_skills(Some(catalog)).await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    let original = selected_draft(s._temp.path(), "review");
+    let correction = selected_draft(s._temp.path(), "correct");
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: original.clone(),
+        })
+        .await
+        .unwrap();
+    let mut run = next_run(&mut s).await;
+    assert_eq!(run.request.skills, original.skills);
+    run.events
+        .send(ExecutionEvent::SteeringAvailable(true))
+        .unwrap();
+    run.events
+        .send(ExecutionEvent::TextDelta("Before".into()))
+        .unwrap();
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: correction.clone(),
+        })
+        .await
+        .unwrap();
+    event(
+        &mut s,
+        |e| matches!(e,QueueEvent::Snapshot(_,q) if q.steer_available && q.entries.len()==1),
+    )
+    .await;
+    let entry =
+        s.db.queue(chat)
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.draft.text == correction.text)
+            .unwrap()
+            .id;
+    s.queue.steer(SteerQueueInput {
+        chat_id: chat,
+        entry_id: entry,
+    });
+    let command = tokio::time::timeout(Duration::from_secs(5), run.controls.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(command.input.skills, correction.skills);
+    run.events
+        .send(ExecutionEvent::InputAccepted(command.input))
+        .unwrap();
+    command.result.send(SteerOutcome::Accepted).unwrap();
+    event(
+        &mut s,
+        |e| matches!(e,QueueEvent::Conversation(ConversationEvent::UserMessage(m)) if m.id==entry),
+    )
+    .await;
+    run.finish.send(Err("interrupted".into())).unwrap();
+    drop(run.events);
+    event(&mut s, |e| matches!(e, QueueEvent::Finished(_, Err(_)))).await;
+    let history = s.db.list_messages(chat).await.unwrap();
+    let original_id = history.iter().find(|m| m.body == original.text).unwrap().id;
+    assert_eq!(
+        s.db.message_skills(chat, original_id).await.unwrap(),
+        original.skills
+    );
+    assert_eq!(
+        s.db.message_skills(chat, entry).await.unwrap(),
+        correction.skills
+    );
+    // Re-enqueue the durable original ID to exercise the normal restart retry path.
+    let enqueuer = EnqueueService::<SqliteUnitOfWork>::new(s.db.clone(), s.db.clone());
+    enqueuer
+        .enqueue(&QueuedMessage {
+            id: original_id,
+            chat_id: chat,
+            draft: original.clone(),
+            state: "pending".into(),
+            error: None,
+        })
+        .await
+        .unwrap();
+    s.queue.resume(chat);
+    let retried = next_run(&mut s).await;
+    assert_eq!(retried.request.skills, original.skills);
+    assert_eq!(retried.request.retry_inputs.len(), 1);
+    assert_eq!(retried.request.retry_inputs[0].skills, correction.skills);
+    assert_eq!(retried.request.retry_inputs[0].id, entry);
+    retried
+        .events
+        .send(ExecutionEvent::TextDelta("Recovered".into()))
+        .unwrap();
+    retried.finish.send(Ok(())).unwrap();
+    drop(retried.events);
+    event(&mut s, |e| matches!(e, QueueEvent::Finished(_, Ok(())))).await;
+}
+#[tokio::test]
+async fn unavailable_selection_pauses_before_delivery_and_can_be_edited_without_losing_identity() {
+    let catalog = Arc::new(TestSkills(std::sync::atomic::AtomicBool::new(false)));
+    let mut s = setup_with_skills(Some(catalog.clone())).await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    let draft = selected_draft(s._temp.path(), "review");
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: draft.clone(),
+        })
+        .await
+        .unwrap();
+    event(&mut s, |e| matches!(e, QueueEvent::Finished(_, Err(_)))).await;
+    let queue = s.db.queue(chat).await.unwrap();
+    assert!(
+        queue
+            .paused
+            .as_deref()
+            .unwrap()
+            .contains("Skill is disabled")
+    );
+    assert!(s.db.list_messages(chat).await.unwrap().is_empty());
+    assert!(s.runs.try_recv().is_err());
+    let edited = s
+        .queue
+        .edit(EditQueueInput {
+            chat_id: chat,
+            entry_id: queue.entries[0].id,
+        })
+        .await
+        .unwrap();
+    assert_eq!(edited, draft);
+    assert_eq!(s.db.draft(chat).await.unwrap(), draft);
+    assert!(s.db.queue(chat).await.unwrap().entries.is_empty());
+    catalog.0.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tokio::test]
+async fn skill_disabled_after_enqueue_pauses_steering_without_sending_it() {
+    let catalog = Arc::new(TestSkills(std::sync::atomic::AtomicBool::new(true)));
+    let mut s = setup_with_skills(Some(catalog.clone())).await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: selected_draft(s._temp.path(), "review"),
+        })
+        .await
+        .unwrap();
+    let run = next_run(&mut s).await;
+    run.events
+        .send(ExecutionEvent::SteeringAvailable(true))
+        .unwrap();
+    run.events
+        .send(ExecutionEvent::TextDelta("Original answer".into()))
+        .unwrap();
+    let correction = selected_draft(s._temp.path(), "correct");
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: correction.clone(),
+        })
+        .await
+        .unwrap();
+    event(
+        &mut s,
+        |e| matches!(e,QueueEvent::Snapshot(_,q) if q.steer_available && q.entries.len()==1),
+    )
+    .await;
+    let entry =
+        s.db.queue(chat)
+            .await
+            .unwrap()
+            .entries
+            .iter()
+            .find(|e| e.draft.text == correction.text)
+            .unwrap()
+            .id;
+    catalog.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    s.queue.steer(SteerQueueInput {
+        chat_id: chat,
+        entry_id: entry,
+    });
+    event(&mut s,|e| matches!(e,QueueEvent::Snapshot(_,q) if q.paused.as_deref().is_some_and(|p| p.contains("disabled")))).await;
+    let queued = s.db.queue(chat).await.unwrap();
+    let queued = queued.entries.iter().find(|e| e.id == entry).unwrap();
+    assert_eq!(queued.draft, correction);
+    assert_eq!(queued.state, "pending");
+    assert_eq!(s.db.list_messages(chat).await.unwrap().len(), 1);
+    run.finish.send(Ok(())).unwrap();
+    drop(run.events);
+    event(&mut s, |e| matches!(e, QueueEvent::Finished(_, Ok(())))).await;
 }

@@ -29,6 +29,8 @@ pub enum LoadSettingsError {
 
 #[derive(Debug, thiserror::Error)]
 pub enum SaveSettingsError {
+    #[error("Instructions must contain at most 16 KiB of text and no null characters")]
+    InvalidInstructions,
     #[error("Settings storage failed: {0}")]
     Storage(#[from] PersistenceError),
     #[error("Choose a rewrite model before enabling automatic shortening")]
@@ -48,6 +50,9 @@ impl SettingsService {
     }
     pub async fn save(&self, settings: &AppSettings) -> Result<(), SaveSettingsError> {
         settings.validate().map_err(|error| match error {
+            AppSettingsValidationError::InvalidInstructions => {
+                SaveSettingsError::InvalidInstructions
+            }
             AppSettingsValidationError::RewriteModelRequired => {
                 SaveSettingsError::RewriteModelRequired
             }

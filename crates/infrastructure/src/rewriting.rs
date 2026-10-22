@@ -5,6 +5,8 @@ use smaller_talk_domain::Provider;
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use tokio::{io::AsyncWriteExt, process::Command, time::timeout};
 
+mod codex;
+
 /// Standalone text work never shares an execution session or its project directory.
 pub struct CliTextGenerator {
     router: Arc<AgentRouter>,
@@ -27,12 +29,10 @@ impl CliTextGenerator {
 #[async_trait]
 impl TextGenerator for CliTextGenerator {
     async fn support(&self, provider: Provider) -> Result<(), ExecutionError> {
-        if provider == Provider::Codex {
-            return Err(ExecutionError::new(
-                "Codex shortening is not available in this version. Choose a Claude rewrite model.",
-            ));
-        }
         let executable = self.router.executable_for(provider)?;
+        if provider == Provider::Codex {
+            return codex::support(&executable).await;
+        }
         if self.managed_policy_paths.iter().any(|p| p.exists()) {
             return Err(ExecutionError::new(
                 "Shortening is unavailable with managed Claude policy files because their hooks cannot be disabled by the app.",
@@ -83,7 +83,11 @@ impl TextGenerator for CliTextGenerator {
         let model = input
             .settings
             .model
+            .as_deref()
             .ok_or_else(|| ExecutionError::new("Choose a rewrite model in Settings"))?;
+        if input.settings.provider == Provider::Codex {
+            return codex::generate(&executable, directory.path(), &input).await;
+        }
         let mut command = Command::new(executable);
         command
             .args([

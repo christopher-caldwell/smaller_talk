@@ -17,6 +17,7 @@ use tokio::{
 #[derive(Clone)]
 pub struct ClaudeAdapter {
     executable: PathBuf,
+    skill_locations: crate::SkillLocations,
 }
 impl ClaudeAdapter {
     pub(crate) fn executable(&self) -> &std::path::Path {
@@ -25,7 +26,80 @@ impl ClaudeAdapter {
     pub fn new(executable: impl Into<PathBuf>) -> Self {
         Self {
             executable: executable.into(),
+            skill_locations: crate::SkillLocations::default(),
         }
+    }
+
+    pub(crate) fn with_skill_locations(mut self, locations: crate::SkillLocations) -> Self {
+        self.skill_locations = locations;
+        self
+    }
+    async fn content(
+        &self,
+        prompt: &str,
+        prior: Option<&str>,
+        attachments: &[Attachment],
+        skills: &[SkillMention],
+        workspace: &std::path::Path,
+        commands: &[String],
+    ) -> Result<Vec<Value>, ExecutionError> {
+        if !skills.is_empty() {
+            let entries = crate::skills::claude_skills(&self.skill_locations, workspace)?;
+            crate::skills::validate_selected(
+                &entries,
+                Provider::Claude,
+                workspace,
+                prompt,
+                skills,
+            )?;
+            if !commands.iter().any(|c| c == &skills[0].reference.name) {
+                return Err(ExecutionError::new(
+                    "Claude did not advertise the selected native skill command. Refresh Skills or remove the selection.",
+                ));
+            }
+        }
+        let mut content = Vec::new();
+        if let Some(prior) = prior {
+            content.push(json!({"type":"text", "text":prior}));
+        }
+        for image in attachments.iter().filter(|a| a.is_image()) {
+            let bytes = tokio::fs::read(&image.path)
+                .await
+                .map_err(|e| ExecutionError::with_source("Could not read image", e))?;
+            if bytes.len() > 10 * 1024 * 1024 {
+                return Err(ExecutionError::new("Image exceeds 10 MiB"));
+            }
+            content.push(json!({"type":"image", "source":{"type":"base64", "media_type":image.mime_type,"data":STANDARD.encode(bytes)}}));
+        }
+        let mut files = String::new();
+        for file in attachments {
+            files.push_str(&format!(
+                "\n\n[Attached file {:?}, saved at {}]",
+                file.name,
+                file.path.display()
+            ));
+        }
+        if let Some(mention) = skills.first() {
+            let leading = &prompt[..mention.range.start];
+            if !leading.trim().is_empty() {
+                content.push(json!({"type":"text", "text":leading}));
+            }
+            if !files.is_empty() {
+                content.push(json!({"type":"text", "text":files}));
+            }
+            content.push(json!({"type":"text", "text":format!("/{}{}", mention.reference.name, &prompt[mention.range.end..])}));
+        } else {
+            // Keep the existing no-skill request shape, including history and file references.
+            let text = match prior {
+                Some(prior) => format!("{prior}\n\nCurrent user message:\n{prompt}{files}"),
+                None => format!("{prompt}{files}"),
+            };
+            if prior.is_some() {
+                content.remove(0);
+            }
+            content.insert(0, json!({"type":"text", "text":text}));
+        }
+        Ok(content)
     }
 
     async fn start(
@@ -50,6 +124,10 @@ impl ClaudeAdapter {
         .kill_on_drop(true);
         if let Some(request) = request {
             cmd.current_dir(&request.workspace);
+            if !request.instructions.text.is_empty() {
+                cmd.arg("--append-system-prompt")
+                    .arg(&request.instructions.text);
+            }
             cmd.args([
                 "--permission-mode",
                 if request.settings.plan_mode {
@@ -136,20 +214,26 @@ impl ClaudeAdapter {
         mut controls: mpsc::UnboundedReceiver<SteerCommand>,
     ) -> Result<(), ExecutionError> {
         let (mut child, mut stdin, mut stdout) = self.start(Some(&request)).await?;
-        Self::initialize(&mut stdin, &mut stdout).await?;
-        let mut content = vec![json!({ "type": "text", "text": request.full_prompt() })];
-        for image in request.attachments.iter().filter(|a| a.is_image()) {
-            let bytes = tokio::fs::read(&image.path).await.map_err(|e| {
-                ExecutionError::with_source(format!("Could not read image {}", image.name), e)
-            })?;
-            if bytes.len() > 10 * 1024 * 1024 {
-                return Err(ExecutionError::new(format!(
-                    "Image {} exceeds the 10 MiB limit",
-                    image.name
-                )));
-            }
-            content.push(json!({ "type": "image", "source": { "type": "base64", "media_type": image.mime_type, "data": STANDARD.encode(bytes) } }));
-        }
+        let initialized = Self::initialize(&mut stdin, &mut stdout).await?;
+        let commands: Vec<String> = initialized["commands"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|c| c["name"].as_str().map(str::to_owned))
+            .collect();
+        let content = self
+            .content(
+                &request.prompt,
+                request.prior_context.as_deref(),
+                &request.attachments,
+                &request.skills,
+                &request.workspace,
+                &commands,
+            )
+            .await?;
+        let mut replay_inputs: std::collections::VecDeque<_> =
+            request.retry_inputs.iter().cloned().collect();
+        let mut replay_id: Option<String> = None;
         let initial_id = uuid::Uuid::new_v4().to_string();
         write(&mut stdin, &json!({ "uuid": initial_id, "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": request.binding.as_ref().map(|b| &b.native_session_id) })).await?;
         let _ = events.send(ExecutionEvent::Activity(Activity::Working));
@@ -176,11 +260,10 @@ impl ClaudeAdapter {
                     let Some(command) = command else { controls_open = false; continue; };
                     if !replay_verified { let _ = command.result.send(SteerOutcome::Rejected("This Claude version has not verified input acknowledgements. The message remains queued.".into())); continue; }
                     if let Err(error) = crate::steering::validate(&command.input).await { let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue; }
-                    let mut content = vec![json!({"type":"text", "text":command.input.text_with_files()})];
-                    for file in command.input.attachments.iter().filter(|f| f.is_image()) {
-                        let bytes = tokio::fs::read(&file.path).await.map_err(|e| ExecutionError::with_source("Could not read steered image", e))?;
-                        content.push(json!({"type":"image", "source":{"type":"base64", "media_type":file.mime_type, "data": STANDARD.encode(bytes)}}));
-                    }
+                    let content = match self.content(&command.input.prompt, None, &command.input.attachments, &command.input.skills, &request.workspace, &commands).await {
+                        Ok(content) => content,
+                        Err(error) => { let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue; }
+                    };
                     write(&mut stdin, &json!({"type":"user", "uuid":command.input.id.to_string(), "message":{"role":"user", "content":content}, "parent_tool_use_id":null})).await?;
                     outstanding_results += 1;
                     pending_steer = Some(command);
@@ -189,6 +272,14 @@ impl ClaudeAdapter {
             };
             if value["type"] == "user" {
                 if value["uuid"].as_str() == Some(initial_id.as_str()) {
+                    replay_verified = replay_inputs.is_empty() && replay_id.is_none();
+                    let _ = events.send(ExecutionEvent::SteeringAvailable(replay_verified));
+                }
+                if replay_inputs.is_empty()
+                    && replay_id
+                        .as_deref()
+                        .is_some_and(|id| value["uuid"].as_str() == Some(id))
+                {
                     replay_verified = true;
                     let _ = events.send(ExecutionEvent::SteeringAvailable(true));
                 }
@@ -202,6 +293,7 @@ impl ClaudeAdapter {
             }
             if !bound && let Some(session) = value["session_id"].as_str() {
                 let _ = events.send(ExecutionEvent::BindingEstablished(ExecutionBinding {
+                    instructions_fingerprint: None,
                     adapter_key: "claude".into(),
                     native_session_id: session.into(),
                 }));
@@ -271,6 +363,26 @@ impl ClaudeAdapter {
                     }
                     outstanding_results = outstanding_results.saturating_sub(1);
                     if outstanding_results == 0 {
+                        if let Some(replay) = replay_inputs.pop_front() {
+                            replay_verified = false;
+                            replay_id = Some(replay.id.to_string());
+                            let _ = events.send(ExecutionEvent::SteeringAvailable(false));
+                            let _ = events.send(ExecutionEvent::TextSnapshot(String::new()));
+                            let content = self
+                                .content(
+                                    &replay.prompt,
+                                    None,
+                                    &replay.attachments,
+                                    &replay.skills,
+                                    &request.workspace,
+                                    &commands,
+                                )
+                                .await?;
+                            write(&mut stdin, &json!({"uuid":replay.id.to_string(),"type":"user","message":{"role":"user","content":content},"parent_tool_use_id":null})).await?;
+                            outstanding_results = 1;
+                            continue;
+                        }
+
                         if !request.settings.plan_mode
                             && let Some(text) =
                                 value["result"].as_str().filter(|s| !s.trim().is_empty())

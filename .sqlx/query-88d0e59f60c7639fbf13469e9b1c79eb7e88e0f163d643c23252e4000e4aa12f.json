@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "INSERT INTO turns (id, chat_id, user_message_id, settings, workspace, status, error, instructions) VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET status = excluded.status, error = excluded.error;\n",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 8
+    },
+    "nullable": []
+  },
+  "hash": "88d0e59f60c7639fbf13469e9b1c79eb7e88e0f163d643c23252e4000e4aa12f"
+}

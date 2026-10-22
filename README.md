@@ -1,6 +1,6 @@
 # Smaller Talk
 
-For the current chat workspace, upgrade instructions, and verification, see [Chat workspace](docs/chat-workspace.md) and [Settings, Git review, and response display](docs/settings-git-response-display.md). The phase reports below describe the earlier proof of concept.
+For the current chat workspace, upgrade instructions, and verification, see [Chat workspace](docs/chat-workspace.md) and [Settings, Git review, and response display](docs/settings-git-response-display.md). For skill discovery, native invocation, and recovery behavior, see [Skills](docs/skills-design-options.md). The phase reports below describe the earlier proof of concept.
 
 Smaller Talk is a macOS GPUI/Rust proof of concept for local, app-owned Codex conversations. It keeps chat identity and messages in SQLite and uses the local Codex app-server for execution. This report records the phase implementation, review corrections, verification evidence, and limits before the phase Review checkpoint.
 

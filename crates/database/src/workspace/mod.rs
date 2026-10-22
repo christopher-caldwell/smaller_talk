@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use async_trait::async_trait;
 use futures_util::TryStreamExt;
 use smaller_talk_application::{
-    PersistenceError, SteeredInputStore, WorkspaceQueries, WorkspaceWrites,
+    PersistenceError, SteeredInputWrites, WorkspaceQueries, WorkspaceWrites,
 };
 use smaller_talk_domain::*;
 use uuid::Uuid;
@@ -45,7 +45,7 @@ fn stored_message(row: WorkspaceMessageRow) -> Result<Message, PersistenceError>
     })
 }
 
-async fn insert_transactional_message(
+pub(crate) async fn insert_transactional_message(
     tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
     message: smaller_talk_application::NewMessage,
 ) -> Result<Message, PersistenceError> {
@@ -373,35 +373,18 @@ impl WorkspaceWrites for SqliteChatStore {
         Ok(())
     }
     async fn save_turn(&self, turn: &TurnRecord) -> Result<(), PersistenceError> {
-        let id = turn.id.to_string();
-        let chat = turn.chat_id.to_string();
-        let message = turn.user_message_id.to_string();
-        let settings = encode(&turn.settings)?;
-        let workspace = turn.workspace.to_string_lossy().into_owned();
-        sqlx::query_file!(
-            "src/workspace/sql/save_turn.sql",
-            id,
-            chat,
-            message,
-            settings,
-            workspace,
-            turn.status,
-            turn.error
-        )
-        .execute(self.pool())
-        .await
-        .map_err(PersistenceError::new)?;
-        Ok(())
+        save_turn_record(self.pool(), turn).await
     }
 }
 
 #[async_trait]
-impl SteeredInputStore for SqliteChatStore {
+impl SteeredInputWrites for SqliteChatStore {
     async fn persist_steered_input(
         &self,
         assistant: Option<smaller_talk_application::NewMessage>,
         user: smaller_talk_application::NewMessage,
         attachments: &[Attachment],
+        skills: &[SkillMention],
         turn: Uuid,
     ) -> Result<(Option<Message>, Message), PersistenceError> {
         let mut tx = self.pool().begin().await.map_err(PersistenceError::new)?;
@@ -425,6 +408,7 @@ impl SteeredInputStore for SqliteChatStore {
             .await
             .map_err(PersistenceError::new)?;
         }
+        crate::skills::save(&mut tx, user_message.id, skills).await?;
         let turn_id = turn.to_string();
         sqlx::query_file!("src/workspace/sql/turn_input.sql", turn_id, message_id)
             .execute(&mut *tx)
@@ -453,4 +437,31 @@ fn search_excerpt(body: &str, needle: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+pub(crate) async fn save_turn_record<'e>(
+    executor: impl sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    turn: &TurnRecord,
+) -> Result<(), PersistenceError> {
+    let id = turn.id.to_string();
+    let chat = turn.chat_id.to_string();
+    let message = turn.user_message_id.to_string();
+    let settings = encode(&turn.settings)?;
+    let instructions = encode(&turn.instructions)?;
+    let workspace = turn.workspace.to_string_lossy().into_owned();
+    sqlx::query_file!(
+        "src/workspace/sql/save_turn.sql",
+        id,
+        chat,
+        message,
+        settings,
+        workspace,
+        turn.status,
+        turn.error,
+        instructions
+    )
+    .execute(executor)
+    .await
+    .map_err(PersistenceError::new)?;
+    Ok(())
 }

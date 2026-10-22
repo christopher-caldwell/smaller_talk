@@ -1,5 +1,5 @@
 use smaller_talk_application::{
-    ChatQueries, ChatSetupStore, ChatWrites, DeleteChatOutcome, MessageQueries, MessageWrites,
+    ChatQueries, ChatSetupWrites, ChatWrites, DeleteChatOutcome, MessageQueries, MessageWrites,
     NewChat, NewMessage, PersistenceError, RenameChatOutcome,
 };
 use smaller_talk_domain::{Chat, ExecutionBinding, Message, MessageRole};
@@ -28,6 +28,7 @@ struct ChatRow {
     created_at: i64,
     adapter_key: Option<String>,
     native_session_id: Option<String>,
+    instructions_fingerprint: Option<String>,
 }
 
 struct MessageRow {
@@ -66,6 +67,7 @@ impl TryFrom<ChatRow> for Chat {
             .map_err(PersistenceError::new)?;
         let binding = match (row.adapter_key, row.native_session_id) {
             (Some(adapter_key), Some(native_session_id)) => Some(ExecutionBinding {
+                instructions_fingerprint: row.instructions_fingerprint,
                 adapter_key,
                 native_session_id,
             }),
@@ -149,6 +151,10 @@ impl ChatWrites for SqliteChatStore {
             .binding
             .as_ref()
             .map(|binding| binding.native_session_id.clone());
+        let instructions_fingerprint = chat
+            .binding
+            .as_ref()
+            .and_then(|b| b.instructions_fingerprint.clone());
         let row = sqlx::query_file_as!(
             ChatRow,
             "src/chats/sql/insert_chat.sql",
@@ -157,6 +163,7 @@ impl ChatWrites for SqliteChatStore {
             created_at,
             adapter_key,
             native_session_id,
+            instructions_fingerprint,
         )
         .fetch_one(&self.pool)
         .await
@@ -203,10 +210,12 @@ impl ChatWrites for SqliteChatStore {
         let id = id.to_string();
         let adapter_key = binding.adapter_key;
         let native_session_id = binding.native_session_id;
+        let instructions_fingerprint = binding.instructions_fingerprint;
         let updated_id = sqlx::query_file_scalar!(
             "src/chats/sql/save_execution_binding.sql",
             adapter_key,
             native_session_id,
+            instructions_fingerprint,
             id,
         )
         .fetch_optional(&self.pool)
@@ -217,7 +226,7 @@ impl ChatWrites for SqliteChatStore {
 }
 
 #[async_trait::async_trait]
-impl ChatSetupStore for SqliteChatStore {
+impl ChatSetupWrites for SqliteChatStore {
     async fn start_chat(
         &self,
         chat: NewChat,
@@ -268,6 +277,10 @@ impl ChatSetupStore for SqliteChatStore {
             .binding
             .as_ref()
             .map(|binding| binding.native_session_id.clone());
+        let instructions_fingerprint = chat
+            .binding
+            .as_ref()
+            .and_then(|b| b.instructions_fingerprint.clone());
         let row = sqlx::query_file_as!(
             ChatRow,
             "src/chats/sql/insert_chat.sql",
@@ -276,6 +289,7 @@ impl ChatSetupStore for SqliteChatStore {
             created_at,
             adapter_key,
             native_session_id,
+            instructions_fingerprint,
         )
         .fetch_one(&mut *tx)
         .await

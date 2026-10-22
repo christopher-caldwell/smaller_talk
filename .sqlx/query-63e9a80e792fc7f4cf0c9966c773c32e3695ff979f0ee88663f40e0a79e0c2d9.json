@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT COALESCE(i.enabled, 0) AS \"enabled!: i64\", COALESCE(i.text, '') AS \"text!: String\"\nFROM projects p LEFT JOIN project_instructions i ON i.project_id = p.id\nWHERE p.id = ?;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "enabled!: i64",
+        "ordinal": 0,
+        "type_info": "Null"
+      },
+      {
+        "name": "text!: String",
+        "ordinal": 1,
+        "type_info": "Null"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      null,
+      null
+    ]
+  },
+  "hash": "63e9a80e792fc7f4cf0c9966c773c32e3695ff979f0ee88663f40e0a79e0c2d9"
+}

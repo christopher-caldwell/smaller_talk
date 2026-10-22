@@ -1,0 +1,41 @@
+# Memory results history
+
+Each JSON file is one immutable run summary. `just bench` writes a record here
+automatically when a suite finishes, fails, or is interrupted. `just bench
+--manual` exports its capture after sampling stops. New records are ordinary Git
+changes to include in a commit; the benchmark does not create commits itself.
+
+Full reports, samples, databases, responses, and copied binaries stay local under
+`.dev/memory-bench/`. The earlier narrative reports in `docs/benchmarks/` are also
+ignored. This directory contains results and comparison metadata only.
+
+The history includes the existing manual run and automated validation attempts,
+including incomplete/failed attempts. Re-export an existing suite or capture with:
+
+```sh
+just memory-bench save-results .dev/memory-bench/RUN
+```
+
+Exports are idempotent. Different contents cannot replace a saved run. Filenames
+and timestamps use UTC. Missing historical metadata and unavailable measurements
+remain `null`; older runs are not assigned the current branch or commit.
+
+Each result separates:
+
+- `app_*`: Smaller Talk's own memory.
+- `group_*`: Smaller Talk plus its observed execution processes and helpers.
+- `codex_samples`: usable samples containing a recognized Codex backend.
+- `non_app_process_samples` and `other_process_names`: other observed processes,
+  including Git helpers or the local playback fixture.
+
+For repeated trials, memory values are medians of individual run summaries;
+peaks are medians of the sampled maxima, not sums of separate process maxima.
+Sample counts sum across completed trials. Failed attempts remain in `attempts`
+but do not enter successful memory aggregates. Footprint totals sum per-process
+accounting and are not deduplicated group physical memory. Polling can miss brief
+processes; zero observed backend samples does not prove no backend ever existed.
+
+Compare matching workload/fixture hashes, workspace, timing, provider settings,
+host conditions, and measurement methods. Busy-system observations are not
+regression verdicts. The manual run's broad work marker includes an idle tail;
+its phase medians are not equivalent to automated execution windows.

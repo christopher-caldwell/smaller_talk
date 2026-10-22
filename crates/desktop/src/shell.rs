@@ -1,3 +1,4 @@
+mod benchmark;
 mod composer_panel;
 mod drafts;
 mod instructions;
@@ -183,6 +184,7 @@ enum UiEvent {
 }
 
 pub struct ChatsView {
+    benchmark: Option<benchmark::State>,
     skill_ui: skills::SkillUi,
     instructions: instructions::InstructionUi,
     pub services: Services,
@@ -458,6 +460,7 @@ impl ChatsView {
         })
         .detach();
         let mut view = Self {
+            benchmark: None,
             instructions: instructions::InstructionUi::new(cx),
             services,
             chats,
@@ -872,6 +875,7 @@ impl ChatsView {
     }
 
     fn apply_event(&mut self, event: UiEvent, cx: &mut Context<Self>) {
+        self.benchmark_event(&event);
         match event {
             UiEvent::QueueEdited(id, result) => {
                 if let Some(state) = self.states.get_mut(&id) {
@@ -1976,6 +1980,7 @@ impl ChatsView {
 
 impl Render for ChatsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.benchmark_frame(window, cx);
         if self.model_cancelled {
             self.model_cancelled = false;
             if self.settings_open {

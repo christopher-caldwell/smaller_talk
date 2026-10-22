@@ -1,0 +1,142 @@
+{
+  "schema_version": 1,
+  "run_id": "2e0ace323c29286c",
+  "started_at": "2026-10-22T16:51:17.386416+00:00",
+  "benchmark_protocol": 1,
+  "label": "final-assessment-smoke: playback/candidate",
+  "context": "busy",
+  "outcome": "completed",
+  "expected_attempts": 1,
+  "source": {
+    "revision": "69c863cd25b29b66479c14b3689da227410ea562",
+    "branch": null,
+    "dirty": true
+  },
+  "host": {
+    "macos": "26.3.1",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "playback",
+      "build": "candidate",
+      "binary_sha256": "014d3d249fd83011b0d16ed08eae967c5fa95a86476711d71b164b0f105cae01",
+      "attempts": {
+        "completed": 1
+      },
+      "verification": [
+        "verified_automated"
+      ],
+      "model": "benchmark-playback",
+      "effort": "low",
+      "provider_version": null,
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "history_sha256": "fa60cf7e6205b52577c511131ba6f9c7c93a3a897cd89a9b8905140fa49da9f5",
+        "history_messages": 200,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3,
+        "retention_cycles": 0,
+        "chunk_chars": 80,
+        "chunk_interval_s": 0.08
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "launch",
+          "runs": 1,
+          "samples": 1,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 8.547,
+          "app_rss_peak_mib": 8.547,
+          "group_rss_peak_mib": 8.547,
+          "app_footprint_median_mib": 2.454,
+          "app_footprint_peak_mib": 2.454,
+          "group_footprint_peak_mib": 2.454
+        },
+        {
+          "phase": "settle",
+          "runs": 1,
+          "samples": 4,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 94.047,
+          "app_rss_peak_mib": 96.078,
+          "group_rss_peak_mib": 96.078,
+          "app_footprint_median_mib": 82.751,
+          "app_footprint_peak_mib": 91.095,
+          "group_footprint_peak_mib": 91.095
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 91.531,
+          "app_rss_peak_mib": 91.531,
+          "group_rss_peak_mib": 91.531,
+          "app_footprint_median_mib": 78.407,
+          "app_footprint_peak_mib": 78.407,
+          "group_footprint_peak_mib": 78.407
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 5,
+          "codex_samples": 0,
+          "non_app_process_samples": 4,
+          "other_process_names": [
+            "Python"
+          ],
+          "app_rss_median_mib": 97.734,
+          "app_rss_peak_mib": 107.125,
+          "group_rss_peak_mib": 117.578,
+          "app_footprint_median_mib": 89.188,
+          "app_footprint_peak_mib": 98.407,
+          "group_footprint_peak_mib": 106.579
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 102.0,
+          "app_rss_peak_mib": 102.125,
+          "group_rss_peak_mib": 102.125,
+          "app_footprint_median_mib": 92.063,
+          "app_footprint_peak_mib": 98.407,
+          "group_footprint_peak_mib": 98.407
+        },
+        {
+          "phase": "closed-baseline",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 102.344,
+          "app_rss_peak_mib": 102.344,
+          "group_rss_peak_mib": 102.344,
+          "app_footprint_median_mib": 94.438,
+          "app_footprint_peak_mib": 98.438,
+          "group_footprint_peak_mib": 98.438
+        }
+      ]
+    }
+  ]
+}

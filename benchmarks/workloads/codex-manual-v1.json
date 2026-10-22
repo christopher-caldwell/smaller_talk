@@ -1,0 +1,42 @@
+{
+  "schema_version": 1,
+  "name": "codex-manual-v1",
+  "purpose": "Record comparable Codex work in Smaller Talk and the Codex desktop app, including execution backends.",
+  "execution": "manual; markers do not submit prompts or verify completion",
+  "required_operator_record": {
+    "model": "RECORD THE SAME EXACT MODEL IN BOTH APPS",
+    "reasoning_effort": "RECORD THE SAME EFFORT IN BOTH APPS",
+    "provider_version": "RECORD THE CLI OR BUNDLED APP-SERVER VERSION FOR EACH APP",
+    "workspace": "USE THE SAME SYNTHETIC EMPTY WORKSPACE",
+    "window": "RECORD LOGICAL SIZE, DISPLAY SCALE, AND VISIBLE PANELS",
+    "configuration": "RECORD INSTRUCTIONS, SKILLS, TOOLS, REWRITING, AND OTHER ACTIVE WORK"
+  },
+  "starting_state": "Fresh conversation in each app; no attachments or prior messages. A fresh conversation does not reset app caches.",
+  "prompt": "Do not use tools, run commands, browse, inspect files, or make changes to the workspace. Respond entirely from the Rust code included in this prompt.\n\nAnalyze this function:\n\n```rust\npub fn merge_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {\n    ranges.sort_unstable();\n    let mut merged: Vec<(u32, u32)> = Vec::new();\n    for (start, end) in ranges {\n        if let Some((_, last_end)) = merged.last_mut() {\n            if start <= *last_end {\n                *last_end = (*last_end).max(end);\n                continue;\n            }\n        }\n        merged.push((start, end));\n    }\n    merged\n}\n```\n\nWrite a detailed but focused technical explanation in Markdown. Use exactly 35 numbered paragraphs, each with one or two sentences, covering behavior, complexity, assumptions, examples, edge cases, and possible tests. Finish with one fenced Rust code block containing three illustrative tests. Do not include any output from tools or references to files in the workspace.\n",
+  "phases": [
+    {
+      "command": "idle",
+      "action": "Keep the prepared conversation visible for 30 seconds."
+    },
+    {
+      "command": "work",
+      "action": "Submit the original v3 prompt using Codex. Keep the conversation visible until completion. Record any failure or mismatch."
+    },
+    {
+      "command": "post",
+      "action": "After the final response is visible and Working ends, leave the app idle for 30 seconds."
+    },
+    {
+      "command": "stop",
+      "action": "Finish measurement; record numbered paragraph count, output bytes, visible completion, and backend scope."
+    }
+  ],
+  "limits": [
+    "Real model output and chunk timing are nondeterministic; identical prompts do not establish equal output or work.",
+    "Fill configuration placeholders in a copied manifest before a controlled comparison; keep the same copy for both captures.",
+    "Busy-system captures validate the framework and carry no performance verdict.",
+    "This workload does not replace deterministic fixture tests, history rendering tests, or retention tests."
+  ],
+  "source_prompt": "benchmarks/reference/v3/smaller_talk_workload_prompt.txt",
+  "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27"
+}

@@ -1,3 +1,4 @@
+mod benchmark;
 mod composer;
 mod interactions;
 mod markdown;
@@ -57,12 +58,25 @@ fn open_window(cx: &mut App) {
 }
 
 fn main() -> anyhow::Result<()> {
+    let mut arguments = std::env::args().skip(1);
+    let command = arguments.next();
+    let benchmark = if command.as_deref() == Some("benchmark") {
+        let directory = arguments
+            .next()
+            .context("benchmark requires its run directory")?;
+        if arguments.next().is_some() {
+            bail!("unexpected benchmark argument");
+        }
+        Some(benchmark::Session::start(std::path::Path::new(&directory))?)
+    } else {
+        None
+    };
     let path = startup::database_path()?;
     let runtime = Builder::new_multi_thread()
         .enable_all()
         .build()
         .context("could not start the async runtime")?;
-    match std::env::args().nth(1).as_deref() {
+    match command.as_deref() {
         Some("db-create") => {
             runtime.block_on(create_empty_database(&path))?;
             println!("Created {}", path.display());
@@ -79,6 +93,7 @@ fn main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
+        Some("benchmark") => {}
         Some(other) => bail!("unknown command {other:?}; use --help"),
         None => {}
     }
@@ -249,6 +264,9 @@ fn main() -> anyhow::Result<()> {
                 cx,
             )
         });
+        if let Some(benchmark) = benchmark {
+            view.update(cx, |view, cx| view.attach_benchmark(benchmark, cx));
+        }
         cx.set_global(Root(view));
         let root = cx.global::<Root>().0.clone();
         cx.on_app_quit(move |cx| {

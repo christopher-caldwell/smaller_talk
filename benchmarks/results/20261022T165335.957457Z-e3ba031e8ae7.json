@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "run_id": "7cd5ff0899ce6f58",
+  "started_at": "2026-10-22T16:53:35.957457+00:00",
+  "benchmark_protocol": 1,
+  "label": null,
+  "context": "busy",
+  "outcome": "failed",
+  "expected_attempts": 1,
+  "source": {
+    "revision": "69c863cd25b29b66479c14b3689da227410ea562",
+    "branch": null,
+    "dirty": true
+  },
+  "host": {
+    "macos": null,
+    "machine": null,
+    "cpu_count": null,
+    "memory_bytes": null
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "playback",
+      "build": "candidate",
+      "binary_sha256": "1c79b8bd53caec9439117375fd1374f637d5397ac0a6c3276f3eb2c62e0e8df3",
+      "attempts": {
+        "harness_invalid": 1
+      },
+      "verification": [],
+      "model": null,
+      "effort": null,
+      "provider_version": null,
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": null,
+        "history_sha256": null,
+        "history_messages": null,
+        "workspace_revision": null,
+        "settle_s": null,
+        "retention_cycles": null,
+        "chunk_chars": 80,
+        "chunk_interval_s": 0.08
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": []
+    }
+  ]
+}

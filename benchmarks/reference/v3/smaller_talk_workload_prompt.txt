@@ -1,0 +1,22 @@
+Do not use tools, run commands, browse, inspect files, or make changes to the workspace. Respond entirely from the Rust code included in this prompt.
+
+Analyze this function:
+
+```rust
+pub fn merge_ranges(mut ranges: Vec<(u32, u32)>) -> Vec<(u32, u32)> {
+    ranges.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (start, end) in ranges {
+        if let Some((_, last_end)) = merged.last_mut() {
+            if start <= *last_end {
+                *last_end = (*last_end).max(end);
+                continue;
+            }
+        }
+        merged.push((start, end));
+    }
+    merged
+}
+```
+
+Write a detailed but focused technical explanation in Markdown. Use exactly 35 numbered paragraphs, each with one or two sentences, covering behavior, complexity, assumptions, examples, edge cases, and possible tests. Finish with one fenced Rust code block containing three illustrative tests. Do not include any output from tools or references to files in the workspace.

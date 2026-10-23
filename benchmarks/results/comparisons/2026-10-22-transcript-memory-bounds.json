@@ -1,0 +1,450 @@
+{
+  "schema": "transcript-memory-bounds/v1",
+  "created_at": "2026-10-22T20:22:16.789271+00:00",
+  "context": "busy",
+  "target_app": "Smaller Talk",
+  "primary_measurement": "libproc ri_phys_footprint of the native app; MiB; per-phase median, then median across independent trials",
+  "core_revision": {
+    "value": "173d55d197ec7003ef5a116f02ab5a07a3935eed"
+  },
+  "implementation": {
+    "gpui": "published 0.2.2 vendored; oversized arena, layout and frame storage reclaimed after usage drops; inline decoration capacity 32 to 4 with unrestricted heap growth",
+    "gpui_original_files_verified": 183,
+    "gpui_changed_source_files": [
+      "src/arena.rs",
+      "src/taffy.rs",
+      "src/window.rs",
+      "src/text_system.rs",
+      "src/text_system/line.rs"
+    ],
+    "allocator": "macOS Rust allocations use mimalloc 0.1.52 / libmimalloc-sys 0.1.49, native mimalloc 2.3.2, secure mode, no C malloc override",
+    "cleanup": "inactive transcripts >=256 KiB request UI-thread mi_collect(true) after 250 ms to allow frame and entity cleanup",
+    "async_runtime_workers": 2,
+    "history_measure_all": "preserved"
+  },
+  "checks": {
+    "workspace_passed": 134,
+    "authenticated_tests_ignored": 6,
+    "format": "passed",
+    "clippy_warnings_denied": "passed",
+    "upstream_arena_regression_before_patch": "failed: 32 retained chunks versus required 1",
+    "upstream_arena_regression_after_patch": "passed; destructors, invalid old handles, allocation after clear and repeated large-frame reuse checked"
+  },
+  "final_paired": {
+    "results_file": "benchmarks/results/20261022T195955.126522Z-079d7e230c8a.json",
+    "complete_pairs": 3,
+    "minimum_settle_s": 3,
+    "randomization_seed": 1729,
+    "binary_sha256": {
+      "baseline": "69320b966033f7ebc82fe8ea5e7a71dc46ead53c54ee406467d7545f6128d619",
+      "candidate": "2038428872e50a925980a1ea02d26bf18f145801b351b3c710e646d9a9c76414"
+    },
+    "app_footprint_mib": {
+      "baseline": {
+        "closed-baseline": {
+          "n": 3,
+          "median": 95.329,
+          "min": 93.188,
+          "max": 97.032
+        },
+        "retained-1": {
+          "n": 3,
+          "median": 274.814,
+          "min": 271.876,
+          "max": 276.22
+        },
+        "retained-2": {
+          "n": 3,
+          "median": 190.314,
+          "min": 189.626,
+          "max": 212.564
+        },
+        "retained-3": {
+          "n": 3,
+          "median": 196.704,
+          "min": 195.876,
+          "max": 214.595
+        }
+      },
+      "candidate": {
+        "closed-baseline": {
+          "n": 3,
+          "median": 106.72,
+          "min": 102.751,
+          "max": 107.329
+        },
+        "retained-1": {
+          "n": 3,
+          "median": 110.251,
+          "min": 109.829,
+          "max": 110.97
+        },
+        "retained-2": {
+          "n": 3,
+          "median": 114.189,
+          "min": 111.783,
+          "max": 114.454
+        },
+        "retained-3": {
+          "n": 3,
+          "median": 113.611,
+          "min": 112.267,
+          "max": 114.798
+        }
+      }
+    }
+  },
+  "cleanup_duration_ms": {
+    "n": 9,
+    "median": 1.13,
+    "min": 0.91,
+    "max": 1.799
+  },
+  "observed_runtime_worker_counts": [
+    2,
+    2,
+    2
+  ],
+  "native_controls": {
+    "before": {
+      "results_file": "benchmarks/results/20261022T182626.164571Z-bc7a46e3b4db.json",
+      "binary_sha256": "69320b966033f7ebc82fe8ea5e7a71dc46ead53c54ee406467d7545f6128d619",
+      "ordinary_no_argument_launch": true,
+      "driver_active": false,
+      "closed_baseline_minimum_s": 30,
+      "retained_minimum_s": 30,
+      "extra_idle_s": 60,
+      "phase_results": {
+        "closed-baseline": {
+          "app_footprint_mib": {
+            "n": 71,
+            "median": 91.282,
+            "min": 91.282,
+            "max": 91.329
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        },
+        "history-1": {
+          "app_footprint_mib": {
+            "n": 16,
+            "median": 221.478,
+            "min": 91.282,
+            "max": 328.017
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        },
+        "retained-1": {
+          "app_footprint_mib": {
+            "n": 30,
+            "median": 194.329,
+            "min": 194.329,
+            "max": 194.392
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        },
+        "long-idle": {
+          "app_footprint_mib": {
+            "n": 60,
+            "median": 194.329,
+            "min": 194.329,
+            "max": 194.329
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        }
+      },
+      "final_10_long_idle_samples_mib": {
+        "n": 10,
+        "median": 194.329,
+        "min": 194.329,
+        "max": 194.329
+      },
+      "os_reported_lifetime_peak_display": "375.4M",
+      "cleanup": {
+        "app_exit_code": 0,
+        "remaining_owned_processes": []
+      },
+      "ui_validation": null
+    },
+    "after": {
+      "results_file": "benchmarks/results/20261022T201122.403975Z-5dc6cbc0671f.json",
+      "binary_sha256": "2038428872e50a925980a1ea02d26bf18f145801b351b3c710e646d9a9c76414",
+      "ordinary_no_argument_launch": true,
+      "driver_active": false,
+      "closed_baseline_minimum_s": 30,
+      "retained_minimum_s": 30,
+      "extra_idle_s": 60,
+      "phase_results": {
+        "closed-baseline": {
+          "app_footprint_mib": {
+            "n": 61,
+            "median": 100.439,
+            "min": 100.439,
+            "max": 101.735
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        },
+        "history-1": {
+          "app_footprint_mib": {
+            "n": 36,
+            "median": 138.587,
+            "min": 100.439,
+            "max": 275.329
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        },
+        "retained-1": {
+          "app_footprint_mib": {
+            "n": 30,
+            "median": 108.251,
+            "min": 108.251,
+            "max": 108.345
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        },
+        "retained-1-long-idle": {
+          "app_footprint_mib": {
+            "n": 60,
+            "median": 108.251,
+            "min": 108.251,
+            "max": 108.251
+          },
+          "codex_samples": {
+            "samples": 0,
+            "metrics_kib": {
+              "native_rss_kib": null,
+              "descendants_rss_kib": null,
+              "codex_backend_rss_kib": null,
+              "total_rss_kib": null
+            }
+          }
+        }
+      },
+      "final_10_long_idle_samples_mib": {
+        "n": 10,
+        "median": 108.251,
+        "min": 108.251,
+        "max": 108.251
+      },
+      "os_reported_lifetime_peak_display": "279.6M",
+      "cleanup": {
+        "app_exit_code": null,
+        "monitor": "post-capture wait timed out during additional native UI validation",
+        "native_quit": "requested through app UI; root and both observed helper PIDs verified absent afterwards",
+        "remaining_owned_processes": []
+      },
+      "ui_validation": {
+        "streaming": "partial output and completed formatted code observed",
+        "native_scroll": "one large wheel event reached first user example 0; Latest returned final Rust tests",
+        "clipboard": "full response copied and pasted into draft; highlighted function line selected, copied and pasted intact; draft cleared",
+        "concurrency": "two native UI conversations overlapped with two provider helpers; both exact responses persisted; both tabs showed completion and the foreground final response was observed",
+        "validation_timing": "memory capture completed before vmmap, clipboard and concurrent-conversation checks",
+        "cleanup": {
+          "app_exit_code": null,
+          "monitor": "post-capture wait timed out during additional native UI validation",
+          "native_quit": "requested through app UI; root and both observed helper PIDs verified absent afterwards",
+          "remaining_owned_processes": []
+        }
+      }
+    }
+  },
+  "live_codex": {
+    "results_file": "benchmarks/results/20261022T200707.249786Z-2fa55059da6f.json",
+    "outcome": "completed",
+    "observed_cli_processes": 1,
+    "app_work_footprint_median_mib": 97.048,
+    "execution_group_work_sampled_peak_mib": 463.477,
+    "cleanup": {
+      "app_exit_code": 0,
+      "forced_app_shutdown": false,
+      "terminated_residual_children": [],
+      "remaining_owned_processes": []
+    }
+  },
+  "eight_cycle_soak": {
+    "results_file": "benchmarks/results/20261022T200707.249786Z-2fa55059da6f.json",
+    "retained_footprint_median_mib": {
+      "retained-1.app_footprint_median_mib": 110.329,
+      "retained-2.app_footprint_median_mib": 111.048,
+      "retained-3.app_footprint_median_mib": 112.158,
+      "retained-4.app_footprint_median_mib": 118.361,
+      "retained-5.app_footprint_median_mib": 115.361,
+      "retained-6.app_footprint_median_mib": 116.22,
+      "retained-7.app_footprint_median_mib": 118.47,
+      "retained-8.app_footprint_median_mib": 119.189
+    },
+    "cleanup": {
+      "app_exit_code": 0,
+      "forced_app_shutdown": false,
+      "terminated_residual_children": [],
+      "remaining_owned_processes": []
+    }
+  },
+  "concurrent_conversations": {
+    "workload": "two overlapping conversations through native UI after scored capture stopped",
+    "provider": "local Codex protocol playback; separate live CLI validation exists",
+    "chunk_interval_s": 0.35,
+    "elapsed_observer_s": 40.211109166033566,
+    "overlap": {
+      "at": "2026-10-22T20:18:04.524320+00:00",
+      "simultaneous_running_turns": 2,
+      "simultaneous_playback_helpers": 2,
+      "helper_identities": [
+        {
+          "pid": 51346,
+          "started": "Thu Oct 22 20:17:52 2026"
+        },
+        {
+          "pid": 51515,
+          "started": "Thu Oct 22 20:18:04 2026"
+        }
+      ]
+    },
+    "completed_turns": 2,
+    "response_exact_matches": true,
+    "completion": [
+      {
+        "chat_id": "2e399a73-60ea-4ffd-8253-0afb8246d867",
+        "completed_turns": 1,
+        "pending_queue_entries": 0,
+        "settings": {
+          "provider": "codex",
+          "model": "benchmark-playback",
+          "effort": "low",
+          "plan_mode": false
+        },
+        "response_bytes": 4419,
+        "response_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "fixture_exact_match": true,
+        "final_answers": 1
+      },
+      {
+        "chat_id": "f213e827-30e9-4508-8f82-792b01268dbd",
+        "completed_turns": 1,
+        "pending_queue_entries": 0,
+        "settings": {
+          "provider": "codex",
+          "model": "benchmark-playback",
+          "effort": "low",
+          "plan_mode": false
+        },
+        "response_bytes": 4419,
+        "response_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "fixture_exact_match": true,
+        "final_answers": 1
+      }
+    ]
+  },
+  "intermediate_results": [
+    {
+      "results_file": "benchmarks/results/20261022T191242.954316Z-1804fc52cc18.json",
+      "implementation": "capacity trimming plus Apple reclamation call; no reliable footprint reduction; removed API after diagnostic returned zero bytes"
+    },
+    {
+      "results_file": "benchmarks/results/20261022T192238.214727Z-c6ab9daa24ed.json",
+      "implementation": "first compact-line preview; dirty build provenance retained"
+    },
+    {
+      "results_file": "benchmarks/results/20261022T192622.374407Z-dcc8848771ee.json",
+      "implementation": "compact buffers with system allocator, native control",
+      "retained_first_30_s_median_mib": 186.923,
+      "final_10_samples_after_90_s_idle_median_mib": 101.564,
+      "interpretation": "lower late endpoint, but slower physical-memory reclamation than the final allocator build"
+    },
+    {
+      "results_file": "benchmarks/results/20261022T193402.582378Z-d1563a7fb352.json",
+      "implementation": "compact buffers with system allocator"
+    },
+    {
+      "results_file": "benchmarks/results/20261022T194302.652140Z-e688e7bc9dc0.json",
+      "implementation": "mimalloc without explicit collection"
+    },
+    {
+      "results_file": "benchmarks/results/20261022T195106.637986Z-a1e1e346075f.json",
+      "implementation": "mimalloc with collection and ten default I/O workers"
+    }
+  ],
+  "limitations": [
+    "Busy host; measurements are observational, not release gates.",
+    "Three independent randomized pairs; no confidence interval.",
+    "History opening still has a transient memory peak.",
+    "Short settling and long-idle results are reported separately; final ten idle samples are an endpoint check, not the whole phase median.",
+    "Only macOS arm64 was exercised.",
+    "Native post-capture quit monitoring timed out during extra UI checks; native quit and absence of the root and helpers were verified afterwards, but the exit status is unavailable.",
+    "Default malloc heap inspection does not account for all mimalloc allocations; footprint remains the comparable metric.",
+    "Concurrent playback validates overlapping app work; live Codex evidence is recorded separately."
+  ],
+  "process_cleanup_audit": {
+    "captures_audited": 80,
+    "observed_process_identities": 447,
+    "remaining_observed_processes": [],
+    "extra_native_pids_verified_absent": [
+      93606,
+      48768,
+      51346,
+      51515
+    ]
+  },
+  "tradeoffs": [
+    "The closed-after-small-playback baseline median increased from 95.329 to 106.720 MiB with the allocator change; repeated large-history retention fell from 196.704 to 113.611 MiB.",
+    "History loading retains a transient peak: the matched normal-use control reported a lifetime peak of 279.6 MiB, versus 375.4 MiB before."
+  ],
+  "baseline_core_revision": "c5537fa052c21fb1556057639d9a8363f86752f8"
+}

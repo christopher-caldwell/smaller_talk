@@ -5,3 +5,7 @@ target/
 *.sqlite3-wal
 
 .dev/
+__pycache__/
+
+# Full benchmark reports stay local; compact results live in benchmarks/results/.
+docs/benchmarks/

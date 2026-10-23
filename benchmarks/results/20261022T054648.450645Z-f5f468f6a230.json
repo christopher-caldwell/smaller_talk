@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "run_id": "80339a03eecbe2bc",
+  "started_at": "2026-10-22T05:46:48.450645+00:00",
+  "benchmark_protocol": null,
+  "label": "Smaller Talk release with real Codex, busy host",
+  "context": "busy",
+  "outcome": "measurement_only",
+  "expected_attempts": 1,
+  "source": {
+    "revision": "69c863cd25b29b66479c14b3689da227410ea562",
+    "branch": null,
+    "dirty": null
+  },
+  "host": {
+    "macos": "26.3.1",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "manual",
+      "build": "candidate",
+      "binary_sha256": "221bd7862ea8bdeeef564dc7347a43430fb512949e3dec839d6aa7f11cfe9395",
+      "attempts": {
+        "measurement_only": 1
+      },
+      "verification": [
+        "not_verified_manual_capture"
+      ],
+      "model": "gpt-6-luna",
+      "effort": "low",
+      "provider_version": "codex-cli 0.163.0",
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": null,
+        "history_sha256": null,
+        "history_messages": null,
+        "workspace_revision": null,
+        "settle_s": null,
+        "retention_cycles": null,
+        "chunk_chars": null,
+        "chunk_interval_s": null
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "launch",
+          "runs": 1,
+          "samples": 21,
+          "codex_samples": 2,
+          "non_app_process_samples": 3,
+          "other_process_names": [
+            "<defunct>",
+            "claude",
+            "codex",
+            "gh",
+            "git"
+          ],
+          "app_rss_median_mib": 93.609,
+          "app_rss_peak_mib": 102.656,
+          "group_rss_peak_mib": 277.594,
+          "app_footprint_median_mib": null,
+          "app_footprint_peak_mib": null,
+          "group_footprint_peak_mib": null
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 49,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 101.875,
+          "app_rss_peak_mib": 102.281,
+          "group_rss_peak_mib": 102.281,
+          "app_footprint_median_mib": null,
+          "app_footprint_peak_mib": null,
+          "group_footprint_peak_mib": null
+        },
+        {
+          "phase": "idle-diagnostic",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 94.094,
+          "app_rss_peak_mib": 94.094,
+          "group_rss_peak_mib": 94.094,
+          "app_footprint_median_mib": null,
+          "app_footprint_peak_mib": null,
+          "group_footprint_peak_mib": null
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 364,
+          "codex_samples": 13,
+          "non_app_process_samples": 13,
+          "other_process_names": [
+            "codex",
+            "node",
+            "node_repl",
+            "python",
+            "python3.12",
+            "railway",
+            "uv"
+          ],
+          "app_rss_median_mib": 85.641,
+          "app_rss_peak_mib": 112.078,
+          "group_rss_peak_mib": 697.297,
+          "app_footprint_median_mib": null,
+          "app_footprint_peak_mib": null,
+          "group_footprint_peak_mib": null
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 49,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 74.359,
+          "app_rss_peak_mib": 74.359,
+          "group_rss_peak_mib": 74.359,
+          "app_footprint_median_mib": null,
+          "app_footprint_peak_mib": null,
+          "group_footprint_peak_mib": null
+        },
+        {
+          "phase": "post-diagnostic",
+          "runs": 1,
+          "samples": 0,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": null,
+          "app_rss_peak_mib": null,
+          "group_rss_peak_mib": null,
+          "app_footprint_median_mib": null,
+          "app_footprint_peak_mib": null,
+          "group_footprint_peak_mib": null
+        }
+      ]
+    }
+  ]
+}

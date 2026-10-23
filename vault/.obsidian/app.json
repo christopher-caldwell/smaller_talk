@@ -1,0 +1,7 @@
+{
+  "alwaysUpdateLinks": true,
+  "newFileLocation": "folder",
+  "newFileFolderPath": "Tasks",
+  "attachmentFolderPath": "Attachments",
+  "promptDelete": true
+}

@@ -1,6 +1,12 @@
 # Smaller Talk
 
+The project-local [Obsidian backlog](<vault/Smaller Talk.md>) contains Jira-style candidate tickets, a Kanban Base, and triage views. Open `vault/` as an Obsidian vault; see the [backlog guide](<vault/Backlog Guide.md>) for setup and workflow.
+
 For the current chat workspace, upgrade instructions, and verification, see [Chat workspace](docs/chat-workspace.md) and [Settings, Git review, and response display](docs/settings-git-response-display.md). For skill discovery, native invocation, and recovery behavior, see [Skills](docs/skills-design-options.md). The phase reports below describe the earlier proof of concept.
+
+For automated memory benchmarks, run `just bench`. It builds a release, runs three fixed playback/history trials and one real Codex job, includes the CLI and owned helpers, verifies completion, and closes its disposable windows. Use `--offline` for playback only or `--manual` for the original phase commands. See [Memory benchmark framework](docs/memory-benchmark.md); validate the framework with `just memory-bench-test`.
+
+Compact [results history](benchmarks/results/README.md) is saved automatically for Git. Full reports and raw captures remain local.
 
 Smaller Talk is a macOS GPUI/Rust proof of concept for local, app-owned Codex conversations. It keeps chat identity and messages in SQLite and uses the local Codex app-server for execution. This report records the phase implementation, review corrections, verification evidence, and limits before the phase Review checkpoint.
 

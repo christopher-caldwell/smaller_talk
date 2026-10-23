@@ -1,3 +1,4 @@
+mod benchmark;
 mod composer;
 mod interactions;
 mod markdown;
@@ -20,6 +21,21 @@ use smaller_talk_infrastructure::{AgentRouter, ClaudeAdapter, CodexAdapter, Loca
 use std::sync::Arc;
 use theme::*;
 use tokio::runtime::Builder;
+
+// Separate Rust's transient transcript allocations from long-lived AppKit
+// allocations, and return freed pages without waiting for system pressure.
+#[cfg(target_os = "macos")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(target_os = "macos")]
+fn reclaim_transcript_memory() -> std::time::Duration {
+    let started = std::time::Instant::now();
+    // SAFETY: mimalloc permits collection of the current thread's heap at any
+    // time. It returns only unused pages and preserves all live allocations.
+    unsafe { libmimalloc_sys::mi_collect(true) };
+    started.elapsed()
+}
 
 actions!(
     smaller_talk,
@@ -57,12 +73,34 @@ fn open_window(cx: &mut App) {
 }
 
 fn main() -> anyhow::Result<()> {
+    let mut arguments = std::env::args().skip(1);
+    let command = arguments.next();
+    let benchmark = if command.as_deref() == Some("benchmark") {
+        let directory = arguments
+            .next()
+            .context("benchmark requires its run directory")?;
+        if arguments.next().is_some() {
+            bail!("unexpected benchmark argument");
+        }
+        Some(benchmark::Session::start(std::path::Path::new(&directory))?)
+    } else {
+        None
+    };
     let path = startup::database_path()?;
     let runtime = Builder::new_multi_thread()
+        // These tasks drive async I/O; blocking file work has its own pool.
+        // Avoid an idle executor and allocator cache for every host CPU.
+        .worker_threads(2)
         .enable_all()
         .build()
         .context("could not start the async runtime")?;
-    match std::env::args().nth(1).as_deref() {
+    if let Some(benchmark) = &benchmark {
+        benchmark.log.emit(
+            "runtime_config",
+            serde_json::json!({"tokio_workers":runtime.metrics().num_workers()}),
+        );
+    }
+    match command.as_deref() {
         Some("db-create") => {
             runtime.block_on(create_empty_database(&path))?;
             println!("Created {}", path.display());
@@ -79,6 +117,7 @@ fn main() -> anyhow::Result<()> {
             );
             return Ok(());
         }
+        Some("benchmark") => {}
         Some(other) => bail!("unknown command {other:?}; use --help"),
         None => {}
     }
@@ -249,6 +288,9 @@ fn main() -> anyhow::Result<()> {
                 cx,
             )
         });
+        if let Some(benchmark) = benchmark {
+            view.update(cx, |view, cx| view.attach_benchmark(benchmark, cx));
+        }
         cx.set_global(Root(view));
         let root = cx.global::<Root>().0.clone();
         cx.on_app_quit(move |cx| {

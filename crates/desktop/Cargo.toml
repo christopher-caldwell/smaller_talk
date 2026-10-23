@@ -21,9 +21,15 @@ tokio = { workspace = true, features = ["time"] }
 uuid.workspace = true
 syntect = { version = "5.3.0", default-features = false, features = ["default-fancy"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+mimalloc = { version = "=0.1.52", features = ["v2", "secure"] }
+libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended"] }
+
 [dev-dependencies]
 async-trait.workspace = true
+log = "0.4"
 sqlx.workspace = true
 tempfile = "3"
+taffy = { version = "=0.9.0", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
 tokio = { workspace = true, features = ["time", "test-util"] }
 uuid = { workspace = true, features = ["v4"] }

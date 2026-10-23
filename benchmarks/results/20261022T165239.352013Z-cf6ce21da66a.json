@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "run_id": "894af77065c075ea",
+  "started_at": "2026-10-22T16:52:39.352013+00:00",
+  "benchmark_protocol": 1,
+  "label": null,
+  "context": "busy",
+  "outcome": "harness_invalid",
+  "expected_attempts": 1,
+  "source": {
+    "revision": "69c863cd25b29b66479c14b3689da227410ea562",
+    "branch": null,
+    "dirty": true
+  },
+  "host": {
+    "macos": null,
+    "machine": null,
+    "cpu_count": null,
+    "memory_bytes": null
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": []
+}

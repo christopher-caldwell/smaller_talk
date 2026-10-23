@@ -55,3 +55,17 @@ db-setup: db-create db-migrate
 # Remove Cargo build artifacts.
 clean:
     cargo clean
+
+# Collect desktop + execution-backend memory; use `just memory-bench --help`.
+[positional-arguments]
+memory-bench *args:
+    PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_memory.py "$@"
+
+# Run automated Smaller Talk scenarios, including the real Codex CLI and helpers.
+[positional-arguments]
+bench *args:
+    PYTHONDONTWRITEBYTECODE=1 python3 scripts/benchmark_memory.py bench "$@"
+
+# Verify collector integrity with small local probes, without provider calls.
+memory-bench-test:
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=scripts python3 -m unittest discover -s scripts -p 'test_*.py' -v

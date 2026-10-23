@@ -1,0 +1,332 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-22",
+  "purpose": "Further reduce Smaller Talk app memory while preserving core functionality",
+  "branch": "perf/trim-idle-transcript-memory",
+  "implementation_revision": "7a8123621eb6955b8b260be7ca10a2925cec4b02",
+  "implementation": "macOS Metal maximum drawable count 3 to 2; same window dimensions and pixel format; existing transcript, worker and allocator behavior preserved",
+  "primary_metric": "app ri_phys_footprint in MiB, via libproc at 1 second intervals",
+  "paired": {
+    "results_file": "benchmarks/results/20261022T232402.393091Z-329ae5aca78e.json",
+    "pairs": 3,
+    "cycles_per_launch": 3,
+    "minimum_settle_s": 3,
+    "randomization_seed": 1729,
+    "binary_sha256": {
+      "candidate": "41038acba08fc69865dad8dc61fb06c42aa5e559cd608e9a4c955ef3f252cd81",
+      "baseline": "2038428872e50a925980a1ea02d26bf18f145801b351b3c710e646d9a9c76414"
+    },
+    "app_footprint_mib": {
+      "baseline": {
+        "idle": {
+          "median": 87.048,
+          "min": 86.673,
+          "max": 87.142,
+          "n": 3
+        },
+        "closed-baseline": {
+          "median": 102.532,
+          "min": 102.329,
+          "max": 102.736,
+          "n": 3
+        },
+        "retained-1": {
+          "median": 109.407,
+          "min": 109.173,
+          "max": 113.939,
+          "n": 3
+        },
+        "retained-2": {
+          "median": 111.97,
+          "min": 110.626,
+          "max": 113.72,
+          "n": 3
+        },
+        "retained-3": {
+          "median": 113.079,
+          "min": 111.704,
+          "max": 114.079,
+          "n": 3
+        }
+      },
+      "candidate": {
+        "idle": {
+          "median": 68.22,
+          "min": 68.204,
+          "max": 68.392,
+          "n": 3
+        },
+        "closed-baseline": {
+          "median": 84.564,
+          "min": 84.486,
+          "max": 88.095,
+          "n": 3
+        },
+        "retained-1": {
+          "median": 92.392,
+          "min": 91.142,
+          "max": 95.845,
+          "n": 3
+        },
+        "retained-2": {
+          "median": 93.783,
+          "min": 92.986,
+          "max": 95.923,
+          "n": 3
+        },
+        "retained-3": {
+          "median": 95.986,
+          "min": 94.658,
+          "max": 96.189,
+          "n": 3
+        }
+      }
+    },
+    "candidate_ui_thread_collection_ms": {
+      "median": 1.159,
+      "min": 0.786,
+      "max": 1.35,
+      "n": 9
+    }
+  },
+  "native_without_driver": {
+    "results_file": "benchmarks/results/20261022T233044.085287Z-4669dd7fe6ee.json",
+    "before_results_file": "benchmarks/results/20261022T201122.403975Z-5dc6cbc0671f.json",
+    "same_candidate_binary_sha256": "41038acba08fc69865dad8dc61fb06c42aa5e559cd608e9a4c955ef3f252cd81",
+    "before_app_footprint_mib": {
+      "idle": {
+        "min": 87.595,
+        "median": 87.595,
+        "sampled_max": 87.595,
+        "samples": 3,
+        "duration_s": 3.003,
+        "codex_samples": 0
+      },
+      "closed-baseline": {
+        "min": 100.439,
+        "median": 100.439,
+        "sampled_max": 101.735,
+        "samples": 61,
+        "duration_s": 61.525,
+        "codex_samples": 0
+      },
+      "retained-1": {
+        "min": 108.251,
+        "median": 108.251,
+        "sampled_max": 108.345,
+        "samples": 30,
+        "duration_s": 30.003,
+        "codex_samples": 0
+      },
+      "retained-1-long-idle": {
+        "min": 108.251,
+        "median": 108.251,
+        "sampled_max": 108.251,
+        "samples": 60,
+        "duration_s": 60.079,
+        "codex_samples": 0
+      }
+    },
+    "candidate_app_footprint_mib": {
+      "idle": {
+        "min": 68.892,
+        "median": 68.907,
+        "sampled_max": 69.345,
+        "samples": 29,
+        "duration_s": 30.006,
+        "codex_samples": 0
+      },
+      "closed-baseline": {
+        "min": 81.704,
+        "median": 81.72,
+        "sampled_max": 82.767,
+        "samples": 30,
+        "duration_s": 30.005,
+        "codex_samples": 0
+      },
+      "retained-1": {
+        "min": 89.157,
+        "median": 89.157,
+        "sampled_max": 89.173,
+        "samples": 30,
+        "duration_s": 30.005,
+        "codex_samples": 0
+      },
+      "retained-1-long-idle": {
+        "min": 89.157,
+        "median": 89.157,
+        "sampled_max": 89.189,
+        "samples": 71,
+        "duration_s": 71.17,
+        "codex_samples": 0
+      }
+    },
+    "lifetime_peak_mib": 261.1,
+    "closed_iosurface_vmmap_line": "IOSurface                         27.4M    27.3M      16K    27.3M       0K    27.3M       0K        6",
+    "cleanup": {
+      "app_exit_code": 0,
+      "remaining_owned_processes": []
+    },
+    "ui_checks": {
+      "normal_launch_no_benchmark_driver": true,
+      "streaming_partial_response_observed": true,
+      "completed_response_and_syntax_highlighting_observed": true,
+      "prompt_and_response_exact_fixture_match": true,
+      "native_large_wheel_scroll_reached_example_0": true,
+      "latest_returned_to_final_rust_tests": true,
+      "after_capture": {
+        "highlighted_function_line_selected_copied_and_pasted_intact": true,
+        "whole_response_copy_control_pasted_response_with_final_code_fence": true,
+        "draft_cleared_without_sending": true,
+        "small_conversation_shrink_and_restore_rendered": true,
+        "large_history_shrink_and_restore_rendered": true,
+        "large_history_first_message_and_latest_after_resize_verified": true,
+        "physical_screenshot_sizes": [
+          [
+            2240,
+            1616
+          ],
+          [
+            1820,
+            1316
+          ],
+          [
+            2240,
+            1616
+          ]
+        ],
+        "native_quit_exit_code": 0,
+        "root_pid_verified_absent": 982
+      },
+      "scope": "Native mouse, keyboard and screenshots via CUA. Operator-observed responsiveness; no formal FPS or high-refresh performance assertion."
+    },
+    "sampling_stopped_before_resize_copy_checks": true,
+    "vmmap_snapshot_after_capture_before_additional_ui_checks": true,
+    "before_lifetime_peak_mib": 279.6,
+    "before_closed_iosurface_vmmap_line": "IOSurface                         41.0M    41.0M      16K    41.0M       0K    41.0M       0K        7",
+    "minimum_retained_observation_s": 30,
+    "minimum_additional_idle_s": 60,
+    "final_ten_extra_idle_samples_mib": [
+      89.189,
+      89.189,
+      89.189,
+      89.189,
+      89.189,
+      89.189,
+      89.189,
+      89.189,
+      89.189,
+      89.189
+    ]
+  },
+  "live_codex": {
+    "results_file": "benchmarks/results/20261022T232955.571597Z-41c367f0b729.json",
+    "model": "gpt-6-luna",
+    "effort": "low",
+    "real_codex_observed": true,
+    "app_work_footprint_median_mib": 79.11,
+    "app_and_owned_helpers_sampled_peak_mib": 446.133,
+    "cleanup": {
+      "app_exit_code": 0,
+      "forced_app_shutdown": false,
+      "terminated_residual_children": [],
+      "remaining_owned_processes": []
+    }
+  },
+  "rejected_small_chat_cleanup": {
+    "results_file": "benchmarks/results/20261022T231707.391095Z-2fc0a3c9801e.json",
+    "experiment_revision": "9629847",
+    "revert_revision": "f24eb42",
+    "app_footprint_mib": {
+      "baseline": {
+        "idle": {
+          "median": 86.423,
+          "min": 86.204,
+          "max": 86.532,
+          "n": 3
+        },
+        "closed-baseline": {
+          "median": 103.064,
+          "min": 102.548,
+          "max": 103.204,
+          "n": 3
+        },
+        "retained-1": {
+          "median": 110.236,
+          "min": 110.189,
+          "max": 119.642,
+          "n": 3
+        },
+        "retained-2": {
+          "median": 112.079,
+          "min": 110.173,
+          "max": 114.361,
+          "n": 3
+        },
+        "retained-3": {
+          "median": 113.345,
+          "min": 112.829,
+          "max": 115.079,
+          "n": 3
+        }
+      },
+      "candidate": {
+        "idle": {
+          "median": 86.486,
+          "min": 86.189,
+          "max": 86.501,
+          "n": 3
+        },
+        "closed-baseline": {
+          "median": 102.767,
+          "min": 102.61,
+          "max": 103.236,
+          "n": 3
+        },
+        "retained-1": {
+          "median": 111.032,
+          "min": 110.423,
+          "max": 114.423,
+          "n": 3
+        },
+        "retained-2": {
+          "median": 113.408,
+          "min": 112.267,
+          "max": 116.814,
+          "n": 3
+        },
+        "retained-3": {
+          "median": 112.954,
+          "min": 111.72,
+          "max": 114.361,
+          "n": 3
+        }
+      }
+    },
+    "conclusion": "No compelling benefit from collecting after every nonempty inactive chat close; retained the existing 256 KiB threshold"
+  },
+  "verification": {
+    "workspace_tests_passed": 134,
+    "existing_authenticated_tests_ignored": 6,
+    "fmt": "passed",
+    "clippy_workspace_all_targets_deny_warnings": "passed",
+    "release_build": "passed"
+  },
+  "limitations": [
+    "Busy host, observational measurements, three paired launches, no confidence interval or release gate",
+    "Only macOS arm64 exercised",
+    "Two drawables provide less queued rendering headroom; high-refresh or GPU-heavy frame pacing was not formally measured",
+    "Large history opening still has a transient memory peak",
+    "Live CLI output is nondeterministic; group footprint sums per-process accounting and is not deduplicated physical memory"
+  ],
+  "sources": [
+    "https://developer.apple.com/documentation/quartzcore/cametallayer/maximumdrawablecount",
+    "https://developer.apple.com/library/archive/documentation/3DDrawing/Conceptual/MTLBestPracticesGuide/TripleBuffering.html"
+  ],
+  "baseline_implementation_revision": "173d55d197ec7003ef5a116f02ab5a07a3935eed",
+  "cleanup_audit": {
+    "captures": 15,
+    "observed_process_identities": 68,
+    "remaining": []
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "run_id": "9237cabb5089a0e5",
+  "started_at": "2026-10-22T16:56:22.963040+00:00",
+  "benchmark_protocol": 1,
+  "label": "active-interruption-validation: playback/candidate",
+  "context": "busy",
+  "outcome": "incomplete",
+  "expected_attempts": 1,
+  "source": {
+    "revision": "69c863cd25b29b66479c14b3689da227410ea562",
+    "branch": null,
+    "dirty": true
+  },
+  "host": {
+    "macos": "26.3.1",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "playback",
+      "build": "candidate",
+      "binary_sha256": "014d3d249fd83011b0d16ed08eae967c5fa95a86476711d71b164b0f105cae01",
+      "attempts": {
+        "incomplete": 1
+      },
+      "verification": [
+        "not_verified_manual_capture"
+      ],
+      "model": "benchmark-playback",
+      "effort": "low",
+      "provider_version": null,
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "history_sha256": "fa60cf7e6205b52577c511131ba6f9c7c93a3a897cd89a9b8905140fa49da9f5",
+        "history_messages": 200,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3,
+        "retention_cycles": 0,
+        "chunk_chars": 80,
+        "chunk_interval_s": 0.08
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": []
+    }
+  ]
+}

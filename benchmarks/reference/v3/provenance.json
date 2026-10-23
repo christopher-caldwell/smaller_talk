@@ -1,0 +1,9 @@
+{
+  "source_archive": "smaller_talk_resource_benchmark_v3.zip",
+  "archive_sha256": "bbff14bc9ac0a1e1940cce79a6905ede8e00aa2f87e684f424b093a7194c6b39",
+  "files_sha256": {
+    "smaller_talk_benchmark.py": "af12682386af24f86fe201de90695a516e516acf986c3263f87a7bdb575711e8",
+    "smaller_talk_benchmark_protocol.md": "e3df0381adee983f8114fd2f65eead9ea4e28242737a2ca63917d87bd2927d75",
+    "smaller_talk_workload_prompt.txt": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27"
+  }
+}

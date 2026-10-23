@@ -1,0 +1,114 @@
+filters:
+  and:
+    - file.ext == "md"
+    - file.inFolder("Tasks")
+properties:
+  file.name:
+    displayName: Summary
+  note.id:
+    displayName: Ticket
+  note.issue_type:
+    displayName: Type
+  note.area:
+    displayName: Area
+  note.candidate:
+    displayName: Candidate
+  note.status:
+    displayName: Status
+  note.priority:
+    displayName: Priority
+  note.rank:
+    displayName: Rank
+  note.size:
+    displayName: Size
+  note.owner:
+    displayName: Owner
+  note.target:
+    displayName: Target
+views:
+  - type: kanban-view
+    name: By Status
+    order:
+      - note.id
+      - note.issue_type
+      - note.area
+      - note.candidate
+      - note.priority
+      - note.rank
+      - note.size
+    groupByProperty: note.status
+    quickAddFolder: Tasks
+    columnOrders:
+      note.status:
+        - Backlog
+        - To Do
+        - Doing
+        - Blocked
+        - Review
+        - Done
+    cardOrders:
+      note.status: {}
+    columnColors:
+      note.status:
+        Backlog: gray
+        To Do: blue
+        Doing: orange
+        Blocked: red
+        Review: purple
+        Done: green
+  - type: table
+    name: Triage
+    filters:
+      and:
+        - status != "Done"
+    order:
+      - note.id
+      - file.name
+      - note.priority
+      - note.rank
+      - note.size
+      - note.issue_type
+      - note.area
+      - note.candidate
+      - note.owner
+      - note.status
+    sort:
+      - property: note.id
+        direction: ASC
+  - type: table
+    name: Ranked
+    filters:
+      and:
+        - '!rank.isEmpty()'
+        - status != "Done"
+    order:
+      - note.rank
+      - note.id
+      - file.name
+      - note.priority
+      - note.size
+      - note.status
+      - note.owner
+      - note.target
+    sort:
+      - property: note.rank
+        direction: ASC
+      - property: note.id
+        direction: ASC
+  - type: table
+    name: All Tickets
+    order:
+      - note.id
+      - file.name
+      - note.issue_type
+      - note.area
+      - note.candidate
+      - note.status
+      - note.priority
+      - note.rank
+      - note.size
+      - note.owner
+      - note.target
+    sort:
+      - property: note.id
+        direction: ASC

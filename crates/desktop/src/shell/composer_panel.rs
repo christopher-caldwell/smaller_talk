@@ -423,7 +423,7 @@ impl ChatsView {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.services.queue.resume(chat);
                                 if let Some(state) = this.states.get(&chat) {
-                                    state.composer.focus_handle(cx).focus(window);
+                                    state.composer.focus_handle(cx).focus(window, cx);
                                 }
                                 cx.notify();
                             })),
@@ -474,7 +474,7 @@ impl ChatsView {
             } else if uncertain {
                 line = line.child(compact_button(element_id("retry-queued", id), "Retry").px_2().py_1()
                     .tooltip(hint("Delivery is uncertain. Check the conversation first; Retry makes this entry eligible after Resume."))
-                    .on_click(cx.listener(move |this, _, window, cx| { this.services.queue.retry(RetryQueueInput { chat_id: chat, entry_id: id }); if let Some(state) = this.states.get(&chat) { state.composer.focus_handle(cx).focus(window); } cx.notify(); })));
+                    .on_click(cx.listener(move |this, _, window, cx| { this.services.queue.retry(RetryQueueInput { chat_id: chat, entry_id: id }); if let Some(state) = this.states.get(&chat) { state.composer.focus_handle(cx).focus(window, cx); } cx.notify(); })));
             } else {
                 line = line.child(
                     compact_button(element_id("steer-queued", id), "↪ Steer")
@@ -499,7 +499,7 @@ impl ChatsView {
                                     entry_id: id,
                                 });
                                 if let Some(state) = this.states.get(&chat) {
-                                    state.composer.focus_handle(cx).focus(window);
+                                    state.composer.focus_handle(cx).focus(window, cx);
                                 }
                                 cx.notify();
                             }))
@@ -535,7 +535,7 @@ impl ChatsView {
                                 entry_id: id,
                             });
                             if let Some(state) = this.states.get(&chat) {
-                                state.composer.focus_handle(cx).focus(window);
+                                state.composer.focus_handle(cx).focus(window, cx);
                             }
                             cx.notify();
                         }))

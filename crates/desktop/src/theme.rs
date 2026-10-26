@@ -187,7 +187,7 @@ pub fn horizontal_scroller(
                 "left" => offset.x += px(40.),
                 "right" => offset.x -= px(40.),
                 "home" => offset.x = px(0.),
-                "end" => offset.x = -handle.max_offset().width,
+                "end" => offset.x = -handle.max_offset().x,
                 _ => return,
             }
             handle.set_offset(offset);

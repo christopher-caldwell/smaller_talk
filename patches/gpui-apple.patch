@@ -1,0 +1,11 @@
+--- a/src/metal_renderer.rs
++++ b/src/metal_renderer.rs
+@@ -180,7 +180,7 @@
+         // Support direct-to-display rendering if the window is not transparent
+         // https://developer.apple.com/documentation/metal/managing-your-game-window-for-metal-in-macos
+         layer.set_opaque(!transparent);
+-        layer.set_maximum_drawable_count(3);
++        layer.set_maximum_drawable_count(2);
+         // Allow texture reading for visual tests and UI automation screenshots
+         // (captures without ScreenCaptureKit). Only debug builds pay the
+         // presentation cost, even when `test-support` is compiled in.

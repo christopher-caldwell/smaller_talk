@@ -1,0 +1,133 @@
+--- a/src/arena.rs
++++ b/src/arena.rs
+@@ -148,6 +148,8 @@
+     }
+ 
+     fn force_clear(&mut self) {
++        let used_chunks = self.current_chunk_index + 1;
++        let retained_elements = self.elements.len().saturating_mul(2).max(256);
+         self.valid.set(false);
+         self.valid = Rc::new(Cell::new(true));
+         self.elements.clear();
+@@ -155,6 +157,16 @@
+             self.chunks[chunk_index].reset();
+         }
+         self.current_chunk_index = 0;
++
++        // Release a transcript's high-water allocation only after dropping all
++        // elements and invalidating handles. Scoped clears remain deferred.
++        if self.chunks.len() > used_chunks.saturating_mul(4).max(4) {
++            self.chunks.truncate(used_chunks);
++            self.chunks.shrink_to_fit();
++        }
++        if self.elements.capacity() > retained_elements.saturating_mul(2) {
++            self.elements.shrink_to(retained_elements);
++        }
+     }
+ 
+     #[inline(always)]
+--- a/src/taffy.rs
++++ b/src/taffy.rs
+@@ -30,6 +30,7 @@
+ }
+ pub struct TaffyLayoutEngine {
+     taffy: TaffyTree<NodeContext>,
++    peak_node_count: usize,
+     absolute_layout_bounds: FxHashMap<LayoutId, Bounds<Pixels>>,
+     /// Unrounded absolute border-box top-left per-node coordinate in device pixels.
+     absolute_outer_origins: FxHashMap<LayoutId, Point<f32>>,
+@@ -45,6 +46,7 @@
+         taffy.disable_rounding();
+         TaffyLayoutEngine {
+             taffy,
++            peak_node_count: 0,
+             absolute_layout_bounds: FxHashMap::default(),
+             absolute_outer_origins: FxHashMap::default(),
+             computed_layouts: FxHashSet::default(),
+@@ -53,10 +55,31 @@
+     }
+ 
+     pub fn clear(&mut self) {
+-        self.taffy.clear();
++        let node_count = self.taffy.total_node_count();
++        if self.peak_node_count > 4096 && node_count < self.peak_node_count / 4 {
++            // Layout IDs expire at this frame boundary; SlotMap cannot shrink.
++            self.taffy = TaffyTree::with_capacity(node_count.saturating_mul(2).max(256));
++            self.taffy.disable_rounding();
++            self.peak_node_count = 0;
++        } else {
++            self.taffy.clear();
++            self.peak_node_count = self.peak_node_count.max(node_count);
++        }
++        let retained_bounds = self.absolute_layout_bounds.len().saturating_mul(2).max(256);
++        let retained_origins = self.absolute_outer_origins.len().saturating_mul(2).max(256);
++        let retained_layouts = self.computed_layouts.len().saturating_mul(2).max(256);
+         self.absolute_layout_bounds.clear();
+         self.absolute_outer_origins.clear();
+         self.computed_layouts.clear();
++        if self.absolute_layout_bounds.capacity() > retained_bounds.saturating_mul(2) {
++            self.absolute_layout_bounds.shrink_to(retained_bounds);
++        }
++        if self.absolute_outer_origins.capacity() > retained_origins.saturating_mul(2) {
++            self.absolute_outer_origins.shrink_to(retained_origins);
++        }
++        if self.computed_layouts.capacity() > retained_layouts.saturating_mul(2) {
++            self.computed_layouts.shrink_to(retained_layouts);
++        }
+     }
+ 
+     pub fn request_layout(
+--- a/src/text_system.rs
++++ b/src/text_system.rs
+@@ -647,7 +647,7 @@
+             "text argument should not contain newlines"
+         );
+ 
+-        let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
++        let mut decoration_runs = SmallVec::<[DecorationRun; 4]>::new();
+         for run in runs {
+             if let Some(last_run) = decoration_runs.last_mut()
+                 && last_run.color == run.color
+@@ -695,7 +695,7 @@
+         force_width: Option<Pixels>,
+         materialize_text: impl FnOnce() -> SharedString,
+     ) -> ShapedLine {
+-        let mut decoration_runs = SmallVec::<[DecorationRun; 32]>::new();
++        let mut decoration_runs = SmallVec::<[DecorationRun; 4]>::new();
+         for run in runs {
+             if let Some(last_run) = decoration_runs.last_mut()
+                 && last_run.color == run.color
+--- a/src/text_system/line.rs
++++ b/src/text_system/line.rs
+@@ -46,7 +46,7 @@
+     pub(crate) layout: Arc<LineLayout>,
+     /// The text that was shaped for this line.
+     pub text: SharedString,
+-    pub(crate) decoration_runs: SmallVec<[DecorationRun; 32]>,
++    pub(crate) decoration_runs: SmallVec<[DecorationRun; 4]>,
+ }
+ 
+ impl ShapedLine {
+--- a/src/window.rs
++++ b/src/window.rs
+@@ -1120,8 +1120,20 @@
+     }
+ 
+     pub(crate) fn clear(&mut self) {
++        let retained_states = self
++            .accessed_element_states
++            .len()
++            .max(self.element_states.len())
++            .saturating_mul(2)
++            .max(256);
+         self.element_states.clear();
+         self.accessed_element_states.clear();
++        if self.element_states.capacity() > retained_states.saturating_mul(2) {
++            self.element_states.shrink_to(retained_states);
++        }
++        if self.accessed_element_states.capacity() > retained_states.saturating_mul(2) {
++            self.accessed_element_states.shrink_to(retained_states);
++        }
+         self.mouse_listeners.clear();
+         self.dispatch_tree.clear();
+         self.scene.clear();

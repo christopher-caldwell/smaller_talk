@@ -1,0 +1,30 @@
+[
+  {
+    "directory": "gpui",
+    "package": "gpui-pre",
+    "version": "0.3.9",
+    "sha256": "34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0",
+    "tree_sha256": "d90fd1b97b5e24dd51bf3572f4defdd4118cabb2d7b8d71a370e406191c9ce07"
+  },
+  {
+    "directory": "gpui-apple",
+    "package": "gpui-pre-apple",
+    "version": "0.3.9",
+    "sha256": "b52f58893fe1a0836464428dfad2b5eaf42c9c303a9638f4c2aced5a69072a15",
+    "tree_sha256": "5e02eada35a535eb9f433130ea72fc6a678434cb110a5063825eb7d029284289"
+  },
+  {
+    "directory": "gpui-base",
+    "package": "gpui-base",
+    "version": "0.8.0",
+    "sha256": "d5cd7de73d5b2d3d18b94a928abf343922091fa77bc472f77b7d2e7e8b1823a7",
+    "tree_sha256": "a7121e6e752bdacf70eec9249bb31c2eea78749f55dd41bfdf53d639af49d829"
+  },
+  {
+    "directory": "taffy",
+    "package": "taffy",
+    "version": "0.13.0",
+    "sha256": "c034e05f6ee85a12daa63863c2245797715075c70649947aa0da54f3f2ab1d0f",
+    "tree_sha256": "68c6153883589f18199239fcbc8256b35f5959c59f7cdf3fe1505e0a931db0b9"
+  }
+]

@@ -115,7 +115,7 @@ impl ChatsView {
                                 .tooltip(hint("Clear search (Escape)"))
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.clear_search(cx);
-                                    this.search.focus_handle(cx).focus(window);
+                                    this.search.focus_handle(cx).focus(window, cx);
                                 })),
                         )
                     }),
@@ -205,6 +205,18 @@ impl ChatsView {
                                 .child(project.name),
                         )
                         .child(
+                            icon_button_with_hover(
+                                element_id("new-project-chat", id),
+                                "plus",
+                                NAV_HOVER,
+                            )
+                            .size(px(24.))
+                            .tooltip(hint("New chat in this project"))
+                            .on_click(
+                                cx.listener(move |this, _, _, cx| this.new_chat_in_project(id, cx)),
+                            ),
+                        )
+                        .child(
                             compact_button_with_hover(
                                 element_id("project-menu", id),
                                 "···",
@@ -234,14 +246,50 @@ impl ChatsView {
                     })
                     .cloned()
                     .collect();
-                if chats.is_empty() {
+                let draft_id = self
+                    .session
+                    .new_chat
+                    .as_ref()
+                    .filter(|draft| {
+                        draft.preferences.project_id.as_deref() == Some(&id.to_string())
+                    })
+                    .and_then(|draft| Uuid::parse_str(&draft.id).ok());
+                if let Some(draft_id) = draft_id {
+                    let selected = self.active == Some(draft_id);
                     list = list.child(
-                        div()
-                            .px_2()
-                            .py_1()
-                            .text_size(px(12.))
-                            .text_color(rgb(MUTED))
-                            .child("No chats"),
+                        compact_button_with_hover(
+                            element_id("project-chat-draft", draft_id),
+                            "New chat",
+                            if selected { NAV_SELECTED } else { NAV_HOVER },
+                        )
+                        .w_full()
+                        .when(selected, |button| {
+                            button.bg(rgb(NAV_SELECTED)).text_color(rgb(SELECTED_INK))
+                        })
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.open_chat(draft_id, None, cx)),
+                        ),
+                    );
+                } else if chats.is_empty() {
+                    list = list.child(
+                        compact_button_with_hover(
+                            element_id("start-project-chat", id),
+                            "",
+                            NAV_HOVER,
+                        )
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .text_size(px(12.))
+                        .text_color(rgb(MUTED))
+                        .child(icon("compose").size(px(13.)).text_color(rgb(MUTED)))
+                        .child("Start a chat")
+                        .on_click(
+                            cx.listener(move |this, _, _, cx| this.new_chat_in_project(id, cx)),
+                        ),
                     );
                 }
                 for chat in chats {
@@ -377,7 +425,7 @@ impl ChatsView {
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.open_chat(id, None, cx);
                         if let Some(state) = this.states.get(&id) {
-                            state.composer.focus_handle(cx).focus(window);
+                            state.composer.focus_handle(cx).focus(window, cx);
                         }
                     })),
             )
@@ -476,7 +524,7 @@ impl ChatsView {
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_chat(id, None, cx);
                                 if let Some(s) = this.states.get(&id) {
-                                    s.composer.focus_handle(cx).focus(window);
+                                    s.composer.focus_handle(cx).focus(window, cx);
                                 }
                             })),
                     )

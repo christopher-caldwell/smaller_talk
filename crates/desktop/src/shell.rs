@@ -584,8 +584,15 @@ impl ChatsView {
             });
             view.path_editors.insert(provider, editor);
         }
-        view.folder_editor
-            .update(cx, |s, _| s.set_placeholder("Optional working folder"));
+        view.folder_editor.update(cx, |s, _| {
+            s.set_placeholder("Choose a folder or enter a path");
+            s.set_font_size(14.);
+        });
+        view.name_editor.update(cx, |s, _| s.set_font_size(15.));
+        cx.subscribe(&view.name_editor, |_, _, _: &composer::Changed, cx| {
+            cx.notify();
+        })
+        .detach();
         cx.subscribe(&view.name_editor, |this, _, _: &composer::Submitted, cx| {
             match this.popup {
                 Some(Popup::Rename(id)) => {
@@ -799,6 +806,7 @@ impl ChatsView {
             .as_ref()
             .filter(|draft| draft.id == id.to_string())
         {
+            self.metadata.insert(id, draft.preferences.clone());
             let state = self.states.get_mut(&id).expect("draft view exists");
             state.preferences = draft.preferences.clone();
             state.attachments = draft.draft.attachments.clone();
@@ -1320,8 +1328,7 @@ impl ChatsView {
         let position = state.list.logical_scroll_top();
         let old_len = state.messages.len();
         let draft_changed = matches!(&event, ConversationEvent::UserMessage(_));
-        let changed;
-        match event {
+        let changed = match event {
             ConversationEvent::SkillsChanged { .. }
             | ConversationEvent::SteeringAvailable { .. }
             | ConversationEvent::FinalAnswer { .. } => {
@@ -1343,46 +1350,42 @@ impl ChatsView {
                         state.composer.update(cx, |s, cx| s.reset(cx));
                     }
                 }
-                changed = upsert(&mut state.messages, message);
+                upsert(&mut state.messages, message)
             }
-            ConversationEvent::AssistantMessage(message) => {
-                changed = upsert(&mut state.messages, message);
-            }
+            ConversationEvent::AssistantMessage(message) => upsert(&mut state.messages, message),
             ConversationEvent::AssistantDelta {
                 message_id, delta, ..
             } => {
-                changed =
-                    if let Some(index) = state.messages.iter().position(|m| m.id == message_id) {
-                        state.messages[index].body.push_str(&delta);
-                        index
-                    } else {
-                        state.messages.push(Message {
-                            id: message_id,
-                            chat_id: id,
-                            role: MessageRole::Assistant,
-                            body: delta,
-                            created_at: chrono::Utc::now(),
-                        });
-                        state.messages.len() - 1
-                    };
+                if let Some(index) = state.messages.iter().position(|m| m.id == message_id) {
+                    state.messages[index].body.push_str(&delta);
+                    index
+                } else {
+                    state.messages.push(Message {
+                        id: message_id,
+                        chat_id: id,
+                        role: MessageRole::Assistant,
+                        body: delta,
+                        created_at: chrono::Utc::now(),
+                    });
+                    state.messages.len() - 1
+                }
             }
             ConversationEvent::AssistantSnapshot {
                 message_id, text, ..
             } => {
-                changed =
-                    if let Some(index) = state.messages.iter().position(|m| m.id == message_id) {
-                        state.messages[index].body = text;
-                        index
-                    } else {
-                        state.messages.push(Message {
-                            id: message_id,
-                            chat_id: id,
-                            role: MessageRole::Assistant,
-                            body: text,
-                            created_at: chrono::Utc::now(),
-                        });
-                        state.messages.len() - 1
-                    };
+                if let Some(index) = state.messages.iter().position(|m| m.id == message_id) {
+                    state.messages[index].body = text;
+                    index
+                } else {
+                    state.messages.push(Message {
+                        id: message_id,
+                        chat_id: id,
+                        role: MessageRole::Assistant,
+                        body: text,
+                        created_at: chrono::Utc::now(),
+                    });
+                    state.messages.len() - 1
+                }
             }
             ConversationEvent::Activity { activity, .. } => {
                 state.activity = Some(activity);
@@ -1424,7 +1427,7 @@ impl ChatsView {
                 self.focus_composer = true;
                 return;
             }
-        }
+        };
         let new_len = state.messages.len();
         state
             .markdown
@@ -1868,8 +1871,10 @@ impl ChatsView {
     }
 
     fn begin_project(&mut self, id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
+        self.popup_return_focus = window.focused(cx);
         let project = id.and_then(|id| self.projects.iter().find(|p| p.id == id));
         self.name_editor.update(cx, |s, cx| {
+            s.set_placeholder("e.g. Website redesign");
             s.set_content(
                 project.map(|p| p.name.clone()).unwrap_or_default(),
                 window,
@@ -1885,7 +1890,7 @@ impl ChatsView {
                 cx,
             )
         });
-        self.name_editor.focus_handle(cx).focus(window);
+        self.name_editor.focus_handle(cx).focus(window, cx);
         self.popup = Some(Popup::Project(id));
         cx.notify();
     }
@@ -1949,7 +1954,7 @@ impl ChatsView {
         if let Ok(id) = Uuid::parse_str(&self.session.open_tabs[next]) {
             self.open_chat(id, None, cx);
             if let Some(s) = self.states.get(&id) {
-                s.composer.focus_handle(cx).focus(window);
+                s.composer.focus_handle(cx).focus(window, cx);
             }
         }
     }
@@ -1965,7 +1970,7 @@ impl ChatsView {
 
     fn focus_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.session.sidebar_collapsed = false;
-        self.search.focus_handle(cx).focus(window);
+        self.search.focus_handle(cx).focus(window, cx);
         self.save_session();
         cx.notify();
     }
@@ -2106,9 +2111,9 @@ impl Render for ChatsView {
             let pending = self.states[&id].pending.is_some();
             if self.focus_composer && self.states[&id].loaded && !self.settings_open {
                 if pending && window.viewport_size().height < px(600.) {
-                    self.focus.focus(window);
+                    self.focus.focus(window, cx);
                 } else {
-                    self.states[&id].composer.focus_handle(cx).focus(window);
+                    self.states[&id].composer.focus_handle(cx).focus(window, cx);
                 }
                 self.focus_composer = false;
             }
@@ -2242,7 +2247,7 @@ impl Render for ChatsView {
             }
         } else {
             if self.focus_composer && !self.settings_open {
-                self.focus.focus(window);
+                self.focus.focus(window, cx);
                 self.focus_composer = false;
             }
             detail = detail.child(
@@ -2364,7 +2369,7 @@ impl Render for ChatsView {
                     cx.notify();
                 }
                 if matches!(this.popup, Some(Popup::Models | Popup::Skills)) || this.settings_open {
-                    this.model_search.focus_handle(cx).focus(window);
+                    this.model_search.focus_handle(cx).focus(window, cx);
                 } else {
                     this.focus_search(window, cx);
                 }

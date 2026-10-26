@@ -1,0 +1,43 @@
+--- a/src/input/base/element.rs
++++ b/src/input/base/element.rs
+@@ -762,7 +762,12 @@
+             });
+         }
+ 
+-        if let Some(deferred_scroll_offset) = state.deferred_scroll_offset {
++        // A paste can change the content size before the next layout. Its
++        // deferred target was clamped against the old size; keep the fresh
++        // caret reveal above instead of overwriting it with that stale target.
++        if let Some(deferred_scroll_offset) = state.deferred_scroll_offset
++            && state.scroll_size == scroll_size
++        {
+             scroll_offset = deferred_scroll_offset;
+         }
+         scroll_offset.x = clamp_horizontal_scroll_offset(
+--- a/src/input/base/state.rs
++++ b/src/input/base/state.rs
+@@ -1153,6 +1153,24 @@
+         (self.disabled, self.readonly) = (was_disabled, was_readonly);
+     }
+ 
++    /// Group host-owned text and token edits into one undo entry.
++    /// The component continues to own history and selection restoration.
++    pub fn transact<R>(
++        &mut self,
++        window: &mut Window,
++        cx: &mut Context<Self>,
++        edit: impl FnOnce(&mut Self, &mut Window, &mut Context<Self>) -> R,
++    ) -> R {
++        let before = self.selections.iter().copied().collect();
++        self.undo_manager.begin_transaction();
++        self.undo_manager.record_selections(before, Vec::new());
++        let result = edit(self, window, cx);
++        let after = self.selections.iter().copied().collect();
++        self.undo_manager.record_selections(Vec::new(), after);
++        self.undo_manager.commit_transaction();
++        result
++    }
++
+     /// Insert text at the current cursor position.
+     ///
+     /// And the cursor will be moved to the end of inserted text.

@@ -9,6 +9,8 @@ license.workspace = true
 anyhow = "1"
 chrono = { workspace = true, features = ["clock"] }
 gpui.workspace = true
+gpui_platform.workspace = true
+gpui-base.workspace = true
 pulldown-cmark = "0.13"
 unicode-segmentation = "1"
 url = "2"
@@ -26,10 +28,11 @@ mimalloc = { version = "=0.1.52", features = ["v2", "secure"] }
 libmimalloc-sys = { version = "=0.1.49", default-features = false, features = ["extended"] }
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 async-trait.workspace = true
 log = "0.4"
 sqlx.workspace = true
 tempfile = "3"
-taffy = { version = "=0.9.0", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
+taffy = { version = "=0.13.0", default-features = false, features = ["std", "taffy_tree", "flexbox"] }
 tokio = { workspace = true, features = ["time", "test-util"] }
 uuid = { workspace = true, features = ["v4"] }

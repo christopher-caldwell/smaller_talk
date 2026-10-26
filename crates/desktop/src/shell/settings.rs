@@ -234,13 +234,13 @@ impl ChatsView {
                 .unwrap_or_default();
             self.path_editors[&provider].update(cx, |e, cx| e.set_content(text, window, cx));
         }
-        self.focus.focus(window);
+        self.focus.focus(window, cx);
         cx.notify();
     }
     pub(super) fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings_open = false;
         if let Some(focus) = self.settings_focus.take() {
-            focus.focus(window);
+            focus.focus(window, cx);
         } else {
             self.focus_composer = true;
         }
@@ -731,7 +731,7 @@ impl ChatsView {
                                             this.model_search.update(cx, |e, cx| {
                                                 e.set_content(String::new(), window, cx)
                                             });
-                                            this.model_search.focus_handle(cx).focus(window);
+                                            this.model_search.focus_handle(cx).focus(window, cx);
                                             cx.notify();
                                         },
                                     )
@@ -837,7 +837,7 @@ impl ChatsView {
                                 cx,
                             );
                         }
-                        this.focus.focus(window);
+                        this.focus.focus(window, cx);
                         cx.notify();
                     },
                 )

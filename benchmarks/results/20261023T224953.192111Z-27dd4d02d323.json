@@ -1,0 +1,235 @@
+{
+  "schema_version": 1,
+  "run_id": "938cfe6b66cb4d18a09ce28cd3fa22d2",
+  "started_at": "2026-10-23T22:49:53.192111+00:00",
+  "benchmark_protocol": 1,
+  "label": "Smaller Talk release benchmark",
+  "context": "busy",
+  "outcome": "completed",
+  "expected_attempts": 1,
+  "source": {
+    "revision": "c8a10d6f20be0ecb78a64402d8df058c4eda18db",
+    "branch": "main",
+    "dirty": true
+  },
+  "host": {
+    "macos": "26.3.1",
+    "machine": "arm64",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "interval_s": 1.0,
+  "aggregation": "median of independent run summaries; peaks are sampled",
+  "footprint_accounting": "sum of per-process accounting, not deduplicated group physical memory",
+  "results": [
+    {
+      "scenario": "playback",
+      "build": "candidate",
+      "binary_sha256": "83c1f89cada3bd54245583e5f8ed9e96e14c2930776492bf56347434658b384c",
+      "attempts": {
+        "completed": 1
+      },
+      "verification": [
+        "verified_automated"
+      ],
+      "model": "benchmark-playback",
+      "effort": "low",
+      "provider_version": null,
+      "provider_sha256": null,
+      "workload": {
+        "prompt_sha256": "4a200020904b043d85308502826d1b4973316de24987f085e499cb5b71f7df27",
+        "response_fixture_sha256": "834c676700832d26df148da7449e6044ea138f6c029e2e86b4c3ddf82f38ad6f",
+        "history_sha256": "fa60cf7e6205b52577c511131ba6f9c7c93a3a897cd89a9b8905140fa49da9f5",
+        "history_messages": 200,
+        "workspace_revision": "39222c06056f610903b079d2a4f9d70d7211cc0e",
+        "settle_s": 3,
+        "retention_cycles": 3,
+        "chunk_chars": 80,
+        "chunk_interval_s": 0.08
+      },
+      "sample_errors": 0,
+      "malformed_records": 0,
+      "phases": [
+        {
+          "phase": "launch",
+          "runs": 1,
+          "samples": 1,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 9.25,
+          "app_rss_peak_mib": 9.25,
+          "group_rss_peak_mib": 9.25,
+          "app_footprint_median_mib": 3.094,
+          "app_footprint_peak_mib": 3.094,
+          "group_footprint_peak_mib": 3.094
+        },
+        {
+          "phase": "settle",
+          "runs": 1,
+          "samples": 4,
+          "codex_samples": 0,
+          "non_app_process_samples": 1,
+          "other_process_names": [
+            "<defunct>",
+            "claude",
+            "gh"
+          ],
+          "app_rss_median_mib": 97.992,
+          "app_rss_peak_mib": 107.688,
+          "group_rss_peak_mib": 284.156,
+          "app_footprint_median_mib": 81.579,
+          "app_footprint_peak_mib": 90.454,
+          "group_footprint_peak_mib": 90.454
+        },
+        {
+          "phase": "idle",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 92.672,
+          "app_rss_peak_mib": 92.672,
+          "group_rss_peak_mib": 92.672,
+          "app_footprint_median_mib": 84.064,
+          "app_footprint_peak_mib": 84.064,
+          "group_footprint_peak_mib": 84.064
+        },
+        {
+          "phase": "work",
+          "runs": 1,
+          "samples": 138,
+          "codex_samples": 0,
+          "non_app_process_samples": 5,
+          "other_process_names": [
+            "Python"
+          ],
+          "app_rss_median_mib": 75.297,
+          "app_rss_peak_mib": 95.484,
+          "group_rss_peak_mib": 114.562,
+          "app_footprint_median_mib": 84.829,
+          "app_footprint_peak_mib": 85.861,
+          "group_footprint_peak_mib": 94.752
+        },
+        {
+          "phase": "post",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 86.188,
+          "app_rss_peak_mib": 86.219,
+          "group_rss_peak_mib": 86.219,
+          "app_footprint_median_mib": 97.173,
+          "app_footprint_peak_mib": 103.517,
+          "group_footprint_peak_mib": 103.517
+        },
+        {
+          "phase": "closed-baseline",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 1,
+          "other_process_names": [
+            "gh"
+          ],
+          "app_rss_median_mib": 82.438,
+          "app_rss_peak_mib": 82.453,
+          "group_rss_peak_mib": 155.609,
+          "app_footprint_median_mib": 90.204,
+          "app_footprint_peak_mib": 90.204,
+          "group_footprint_peak_mib": 90.204
+        },
+        {
+          "phase": "history-1",
+          "runs": 1,
+          "samples": 10,
+          "codex_samples": 0,
+          "non_app_process_samples": 1,
+          "other_process_names": [
+            "gh",
+            "git"
+          ],
+          "app_rss_median_mib": 197.406,
+          "app_rss_peak_mib": 242.797,
+          "group_rss_peak_mib": 291.453,
+          "app_footprint_median_mib": 201.501,
+          "app_footprint_peak_mib": 226.579,
+          "group_footprint_peak_mib": 226.579
+        },
+        {
+          "phase": "retained-1",
+          "runs": 1,
+          "samples": 2,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 94.688,
+          "app_rss_peak_mib": 94.688,
+          "group_rss_peak_mib": 94.688,
+          "app_footprint_median_mib": 96.642,
+          "app_footprint_peak_mib": 98.642,
+          "group_footprint_peak_mib": 98.642
+        },
+        {
+          "phase": "history-2",
+          "runs": 1,
+          "samples": 10,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 174.586,
+          "app_rss_peak_mib": 266.531,
+          "group_rss_peak_mib": 266.531,
+          "app_footprint_median_mib": 180.181,
+          "app_footprint_peak_mib": 245.908,
+          "group_footprint_peak_mib": 245.908
+        },
+        {
+          "phase": "retained-2",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 91.469,
+          "app_rss_peak_mib": 91.469,
+          "group_rss_peak_mib": 91.469,
+          "app_footprint_median_mib": 97.126,
+          "app_footprint_peak_mib": 101.126,
+          "group_footprint_peak_mib": 101.126
+        },
+        {
+          "phase": "history-3",
+          "runs": 1,
+          "samples": 10,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 157.844,
+          "app_rss_peak_mib": 264.578,
+          "group_rss_peak_mib": 264.578,
+          "app_footprint_median_mib": 161.142,
+          "app_footprint_peak_mib": 269.704,
+          "group_footprint_peak_mib": 269.704
+        },
+        {
+          "phase": "retained-3",
+          "runs": 1,
+          "samples": 3,
+          "codex_samples": 0,
+          "non_app_process_samples": 0,
+          "other_process_names": [],
+          "app_rss_median_mib": 89.75,
+          "app_rss_peak_mib": 89.75,
+          "group_rss_peak_mib": 89.75,
+          "app_footprint_median_mib": 96.673,
+          "app_footprint_peak_mib": 100.673,
+          "group_footprint_peak_mib": 100.673
+        }
+      ]
+    }
+  ]
+}

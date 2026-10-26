@@ -92,6 +92,62 @@ async fn first_send_atomically_creates_one_named_chat_with_settings_and_queued_c
 }
 
 #[tokio::test]
+async fn project_draft_and_first_send_keep_the_project_and_working_folder_after_reopen() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("db.sqlite3");
+    let db = store(&path).await;
+    let project_folder = temp.path().join("family-photos");
+    std::fs::create_dir(&project_folder).unwrap();
+    let project = Project {
+        id: Uuid::new_v4(),
+        name: "Family Photos".into(),
+        folder: Some(project_folder.clone()),
+    };
+    db.save_project(&project).await.unwrap();
+    let mut draft = pending();
+    draft.preferences.project_id = Some(project.id.to_string());
+    let id = Uuid::parse_str(&draft.id).unwrap();
+    let session = SessionState {
+        open_tabs: vec![draft.id.clone()],
+        active_tab: Some(draft.id.clone()),
+        new_chat: Some(draft.clone()),
+        ..Default::default()
+    };
+    db.save_session(&session).await.unwrap();
+    db.pool().close().await;
+
+    let reopened = Arc::new(SqliteChatStore::new(open_existing(&path).await.unwrap()));
+    assert!(reopened.list_chats().await.unwrap().is_empty());
+    assert_eq!(reopened.session().await.unwrap(), session);
+    let service =
+        ChatService::new(reopened.clone(), reopened.clone()).with_setup_writes(reopened.clone());
+    service
+        .start_chat(StartChatInput {
+            chat_id: id,
+            preferences: draft.preferences.clone(),
+            draft: draft.draft.clone(),
+        })
+        .await
+        .unwrap();
+    reopened.pool().close().await;
+
+    let saved = SqliteChatStore::new(open_existing(&path).await.unwrap());
+    assert_eq!(saved.list_chats().await.unwrap().len(), 1);
+    let preferences = saved.preferences(id).await.unwrap();
+    assert_eq!(preferences, draft.preferences);
+    assert_eq!(saved.queue(id).await.unwrap().entries[0].draft, draft.draft);
+    assert_eq!(
+        effective_workspace(
+            temp.path(),
+            &preferences,
+            &saved.list_projects().await.unwrap()
+        )
+        .unwrap(),
+        project_folder.canonicalize().unwrap(),
+    );
+}
+
+#[tokio::test]
 async fn whitespace_first_send_creates_nothing_but_attachment_only_input_is_valid() {
     let temp = tempfile::tempdir().unwrap();
     let db = store(&temp.path().join("db.sqlite3")).await;

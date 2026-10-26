@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-exclude = ["vendor/taffy", "vendor/gpui"]
+exclude = ["vendor/taffy", "vendor/gpui", "vendor/gpui-base", "vendor/gpui-apple"]
 members = [
     "crates/domain",
     "crates/application",
@@ -12,16 +12,15 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.89"
+rust-version = "1.99"
 license = "MIT"
 
 [workspace.dependencies]
 async-trait = "0.1"
 chrono = { version = "0.4", default-features = false, features = ["std"] }
-gpui = { version = "=0.2.2", default-features = false, features = [
-    "font-kit",
-    "runtime_shaders",
-] }
+gpui = { package = "gpui-pre", version = "=0.3.9", default-features = false }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.9", default-features = false, features = ["font-kit", "runtime_shaders"] }
+gpui-base = "=0.8.0"
 sqlx = { version = "=0.8.6", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",
@@ -38,4 +37,8 @@ uuid = "1"
 # Backport the node-context drop fix without changing GPUI's layout API.
 taffy = { path = "vendor/taffy" }
 # Release oversized frame buffers after large transcripts stop using them.
-gpui = { path = "vendor/gpui" }
+gpui-pre = { path = "vendor/gpui" }
+
+gpui-base = { path = "vendor/gpui-base" }
+# Preserve the two-drawable Metal surface budget after the platform split.
+gpui-pre-apple = { path = "vendor/gpui-apple" }

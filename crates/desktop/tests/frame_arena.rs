@@ -48,3 +48,27 @@ fn equally_large_frames_keep_their_reusable_capacity() {
         assert_eq!(arena.capacity(), 32 * 1024);
     }
 }
+
+#[test]
+fn nested_draw_defers_drops_and_capacity_release_until_the_outer_scope_finishes() {
+    let mut arena = Arena::new(1024);
+    for _ in 0..32 {
+        arena.alloc(|| [0u8; 900]);
+    }
+    arena.clear();
+    let peak = arena.capacity();
+    arena.begin_scope();
+    let live = arena.alloc(|| 42u64);
+    arena.begin_scope();
+    arena.clear();
+    assert_eq!(*live, 42);
+    assert_eq!(arena.capacity(), peak);
+    arena.end_scope();
+    arena.clear();
+    assert_eq!(*live, 42);
+    assert_eq!(arena.capacity(), peak);
+    arena.end_scope();
+    arena.clear();
+    assert_eq!(arena.capacity(), 1024);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| *live)).is_err());
+}

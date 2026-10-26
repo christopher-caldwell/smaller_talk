@@ -50,6 +50,29 @@ impl ChatsView {
         }
     }
 
+    pub(super) fn new_chat_in_project(&mut self, project_id: Uuid, cx: &mut Context<Self>) {
+        if !self.projects.iter().any(|project| project.id == project_id) {
+            return;
+        }
+        if self
+            .session
+            .new_chat
+            .as_ref()
+            .is_some_and(|draft| draft.submitted.is_some())
+        {
+            self.banner =
+                Some("Wait for the current chat to start before changing projects.".into());
+            cx.notify();
+            return;
+        }
+        self.new_chat(cx);
+        if let Some(id) = self.active {
+            let mut preferences = self.metadata.get(&id).cloned().unwrap_or_default();
+            preferences.project_id = Some(project_id.to_string());
+            self.save_preferences(id, preferences, cx);
+        }
+    }
+
     pub(super) fn save_new_chat_draft(&mut self, cx: &Context<Self>) {
         if let Some(draft) = &mut self.session.new_chat
             && let Ok(id) = Uuid::parse_str(&draft.id)

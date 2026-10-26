@@ -2,6 +2,8 @@
 
 The project-local [Obsidian backlog](<vault/Smaller Talk.md>) contains Jira-style candidate tickets, a Kanban Base, and triage views. Open `vault/` as an Obsidian vault; see the [backlog guide](<vault/Backlog Guide.md>) for setup and workflow.
 
+For input editing, framework versions, and retained memory fixes, see [GPUI Kit migration](docs/gpui-kit-migration.md).
+
 For the current chat workspace, upgrade instructions, and verification, see [Chat workspace](docs/chat-workspace.md) and [Settings, Git review, and response display](docs/settings-git-response-display.md). For skill discovery, native invocation, and recovery behavior, see [Skills](docs/skills-design-options.md). The phase reports below describe the earlier proof of concept.
 
 For automated memory benchmarks, run `just bench`. It builds a release, runs three fixed playback/history trials and one real Codex job, includes the CLI and owned helpers, verifies completion, and closes its disposable windows. Use `--offline` for playback only or `--manual` for the original phase commands. See [Memory benchmark framework](docs/memory-benchmark.md); validate the framework with `just memory-bench-test`.
@@ -12,7 +14,11 @@ Smaller Talk is a macOS GPUI/Rust proof of concept for local, app-owned Codex co
 
 ## Local setup
 
-With [just](https://github.com/casey/just) installed, run `just` to list the available commands. Use `just db-setup` before first launch, then `just run` or `just dev` to restart the app on changes. The latter requires `cargo install cargo-watch --locked`. Use `just format`, `just lint`, `just check`, and `just test` for workspace checks, and `just build` for an optimized release in `target/release/`. `just lint` treats warnings as errors, including the existing Clippy findings documented below.
+Install [rustup](https://rustup.rs/) and use the Rust 1.99.1 toolchain pinned in `rust-toolchain.toml`. The `just` recipes put rustup’s shims first in `PATH` so Cargo and rustc select the same compiler.
+
+Run `just deps` (or `python3 scripts/prepare_dependencies.py`) before using Cargo directly. This requires Python 3, `curl`, and `patch`. It restores four checksum-pinned crates into the ignored `vendor/` directory and applies the fixes in [`patches/`](patches/README.md). Sources come from the local Cargo cache when available, otherwise from crates.io. The build, run, format, and check recipes prepare dependencies automatically. Existing source edits cause setup to stop without overwriting them.
+
+With [just](https://github.com/casey/just) installed, run `just` to list the available commands. Use `just db-setup` before first launch, then `just run` or `just dev` to restart the app on changes. The latter requires `cargo install cargo-watch --locked`. Use `just format`, `just lint`, `just check`, and `just test` for workspace checks, and `just build` for an optimized release in `target/release/`. `just lint` treats workspace warnings as errors.
 
 The database lives at `~/Library/Application Support/SmallerTalk/chats.sqlite3`. Setup is explicit and separate from opening the app:
 

@@ -180,7 +180,7 @@ impl Render for RichText {
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseDownEvent, window, cx| {
                     this.coordinate_with_siblings(cx);
-                    this.focus.focus(window);
+                    this.focus.focus(window, cx);
                     let byte = down_layout
                         .index_for_position(event.position)
                         .unwrap_or_else(|i| i);

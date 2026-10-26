@@ -10,8 +10,8 @@ mod transcript;
 
 use anyhow::{Context as _, bail};
 use gpui::{
-    App, AppContext, Application, Bounds, Global, KeyBinding, Menu, MenuItem, WindowBounds,
-    WindowOptions, actions, px, size,
+    App, AppContext, Bounds, Global, KeyBinding, Menu, MenuItem, WindowBounds, WindowOptions,
+    actions, px, size,
 };
 use smaller_talk_application::*;
 use smaller_talk_database::{
@@ -19,7 +19,6 @@ use smaller_talk_database::{
 };
 use smaller_talk_infrastructure::{AgentRouter, ClaudeAdapter, CodexAdapter, LocalAttachments};
 use std::sync::Arc;
-use theme::*;
 use tokio::runtime::Builder;
 
 // Separate Rust's transient transcript allocations from long-lived AppKit
@@ -63,9 +62,9 @@ fn open_window(cx: &mut App) {
             window_min_size: Some(size(px(480.), px(480.))),
             ..Default::default()
         },
-        move |window, _| {
+        move |window, cx| {
             window.set_window_title("Smaller Talk");
-            view
+            cx.new(|cx| gpui_base::Root::new(view, window, cx))
         },
     )
     .expect("could not open Smaller Talk");
@@ -239,7 +238,7 @@ fn main() -> anyhow::Result<()> {
         attachments: attachment_storage,
         runtime: runtime.handle().clone(),
     };
-    let app = Application::new().with_assets(theme::Icons);
+    let app = gpui_platform::application().with_assets(theme::Icons);
     app.on_reopen(|cx| {
         if cx.windows().is_empty() {
             open_window(cx);
@@ -248,7 +247,7 @@ fn main() -> anyhow::Result<()> {
         }
     });
     app.run(move |cx: &mut App| {
-        composer::bind_keys(cx);
+        gpui_base::init(cx);
         rich_text::bind_keys(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.bind_keys([
@@ -266,6 +265,7 @@ fn main() -> anyhow::Result<()> {
         ]);
         cx.set_menus(vec![Menu {
             name: "Smaller Talk".into(),
+            disabled: false,
             items: vec![
                 MenuItem::action("Settings…", OpenSettings),
                 MenuItem::separator(),

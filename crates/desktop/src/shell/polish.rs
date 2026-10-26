@@ -62,7 +62,7 @@ impl ChatsView {
         self.context_anchor = anchor;
         self.popup_return_focus = window.focused(cx);
         self.popup = Some(popup);
-        self.popup_focus.focus(window);
+        self.popup_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -160,9 +160,9 @@ impl ChatsView {
             .unwrap_or(0);
         self.popup_scroll.scroll_to_item(self.popup_index);
         if matches!(popup, Popup::Models | Popup::Skills) {
-            self.model_search.focus_handle(cx).focus(window);
+            self.model_search.focus_handle(cx).focus(window, cx);
         } else {
-            self.popup_focus.focus(window);
+            self.popup_focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -191,12 +191,12 @@ impl ChatsView {
             if let Some(id) = self.active
                 && let Some(state) = self.states.get(&id)
             {
-                state.composer.focus_handle(cx).focus(window);
+                state.composer.focus_handle(cx).focus(window, cx);
             } else {
-                self.focus.focus(window);
+                self.focus.focus(window, cx);
             }
         } else if let Some(focus) = self.popup_return_focus.take() {
-            focus.focus(window);
+            focus.focus(window, cx);
         } else {
             self.focus_composer = true;
         }
@@ -335,9 +335,9 @@ impl ChatsView {
         if key == "tab" || (context_menu && matches!(key, "up" | "down")) {
             for _ in 0..128 {
                 if event.keystroke.modifiers.shift || key == "up" {
-                    window.focus_prev();
+                    window.focus_prev(cx);
                 } else {
-                    window.focus_next();
+                    window.focus_next(cx);
                 }
                 if self.popup.is_none() || self.popup_focus.contains_focused(window, cx) {
                     break;

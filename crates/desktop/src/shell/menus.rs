@@ -71,7 +71,7 @@ impl ChatsView {
                                         });
                                         this.model_query.clear();
                                         this.popup_index = 0;
-                                        this.model_search.focus_handle(cx).focus(window);
+                                        this.model_search.focus_handle(cx).focus(window, cx);
                                         cx.notify();
                                     })),
                             ),
@@ -183,10 +183,12 @@ impl ChatsView {
                             .find(|c| c.id == id)
                             .map(|c| c.title.clone())
                             .unwrap_or_default();
-                        this.name_editor
-                            .update(cx, |s, cx| s.set_content(title, window, cx));
+                        this.name_editor.update(cx, |s, cx| {
+                            s.set_placeholder("Chat name");
+                            s.set_content(title, window, cx);
+                        });
                         this.popup_return_focus = window.focused(cx);
-                        this.name_editor.focus_handle(cx).focus(window);
+                        this.name_editor.focus_handle(cx).focus(window, cx);
                         this.popup = Some(Popup::Rename(id));
                         cx.notify();
                     }),
@@ -305,67 +307,157 @@ impl ChatsView {
                     );
             }
             Popup::Project(id) => {
+                let can_save = !self.name_editor.read(cx).content().trim().is_empty();
                 content = content
-                    .child(div().p_2().child(if id.is_some() {
-                        "Edit project"
-                    } else {
-                        "New project"
-                    }))
-                    .child(muted("Name"))
+                    .w(px(520.).min(window.viewport_size().width - px(32.)))
+                    .max_h(window.viewport_size().height - px(32.))
+                    .p_6()
+                    .gap_0()
+                    .child(
+                        row()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_size(px(24.))
+                                    .font_weight(gpui::FontWeight::BOLD)
+                                    .child(if id.is_some() {
+                                        "Edit project"
+                                    } else {
+                                        "Create a project"
+                                    }),
+                            )
+                            .child(
+                                icon_button("close-project", "close")
+                                    .tooltip(hint("Close (Escape)"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.dismiss_popup(window, cx)
+                                    })),
+                            ),
+                    )
                     .child(
                         div()
-                            .px_2()
-                            .py_1()
+                            .mt_2()
+                            .child(muted("Keep related chats together in one place.")),
+                    )
+                    .child(
+                        div()
+                            .mt_6()
+                            .mb_2()
+                            .text_sm()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child("Name"),
+                    )
+                    .child(
+                        div()
+                            .track_focus(&self.name_editor.focus_handle(cx))
+                            .px_3()
+                            .py_2()
                             .rounded_md()
-                            .border_1()
+                            .border_2()
                             .border_color(rgb(BORDER))
+                            .bg(rgb(BACKGROUND))
+                            .focus(|field| field.border_color(rgb(NAV_SELECTED)))
                             .child(self.name_editor.clone()),
                     )
-                    .child(div().mt_2().child(muted("Working folder (optional)")))
+                    .child(
+                        row()
+                            .mt_5()
+                            .mb_2()
+                            .text_sm()
+                            .child(
+                                div()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child("Working folder"),
+                            )
+                            .child(muted("Optional")),
+                    )
+                    .child(
+                        row()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .track_focus(&self.folder_editor.focus_handle(cx))
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .px_3()
+                                    .py_2()
+                                    .rounded_md()
+                                    .border_2()
+                                    .border_color(rgb(BORDER))
+                                    .bg(rgb(BACKGROUND))
+                                    .focus(|field| field.border_color(rgb(NAV_SELECTED)))
+                                    .child(self.folder_editor.clone()),
+                            )
+                            .child(
+                                button("choose-project-folder", "Browse…")
+                                    .flex_shrink_0()
+                                    .h(px(44.))
+                                    .border_color(rgb(BORDER))
+                                    .on_click(cx.listener(|_, _, _, cx| {
+                                        let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
+                                            files: false,
+                                            directories: true,
+                                            multiple: false,
+                                            prompt: Some("Project folder".into()),
+                                        });
+                                        cx.spawn(async move |this, cx| {
+                                            if let Ok(Ok(Some(paths))) = chosen.await
+                                                && let Some(path) = paths.first()
+                                            {
+                                                let path = path.display().to_string();
+                                                let _ = this.update(cx, |this, cx| {
+                                                    this.folder_editor.update(cx, |s, cx| {
+                                                        let draft = Draft {
+                                                            skills: Vec::new(),
+                                                            text: path,
+                                                            ..Default::default()
+                                                        };
+                                                        s.load_draft(&draft, cx);
+                                                    });
+                                                    cx.notify();
+                                                });
+                                            }
+                                        })
+                                        .detach();
+                                    })),
+                            ),
+                    )
                     .child(
                         div()
-                            .px_2()
-                            .py_1()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(BORDER))
-                            .child(self.folder_editor.clone()),
+                            .mt_2()
+                            .child(muted("Leave empty to use the app’s working folder.")),
                     )
                     .child(
-                        button("choose-project-folder", "Choose folder…").on_click(cx.listener(
-                            |_, _, _, cx| {
-                                let chosen = cx.prompt_for_paths(gpui::PathPromptOptions {
-                                    files: false,
-                                    directories: true,
-                                    multiple: false,
-                                    prompt: Some("Project folder".into()),
-                                });
-                                cx.spawn(async move |this, cx| {
-                                    if let Ok(Ok(Some(paths))) = chosen.await
-                                        && let Some(path) = paths.first()
-                                    {
-                                        let path = path.display().to_string();
-                                        let _ = this.update(cx, |this, cx| {
-                                            this.folder_editor.update(cx, |s, cx| {
-                                                let draft = Draft {
-                                                    skills: Vec::new(),
-                                                    text: path,
-                                                    ..Default::default()
-                                                };
-                                                s.load_draft(&draft, cx);
-                                            });
-                                            cx.notify();
-                                        });
-                                    }
+                        row()
+                            .mt_7()
+                            .justify_end()
+                            .child(button("cancel-project", "Cancel").on_click(
+                                cx.listener(|this, _, window, cx| this.dismiss_popup(window, cx)),
+                            ))
+                            .child(
+                                button_with_hover(
+                                    "save-project",
+                                    if id.is_some() {
+                                        "Save changes"
+                                    } else {
+                                        "Create project"
+                                    },
+                                    if can_save { ACCENT } else { PANEL_HOVER },
+                                )
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .bg(rgb(if can_save { NAV_SELECTED } else { PANEL_HOVER }))
+                                .text_color(rgb(if can_save { SELECTED_INK } else { MUTED }))
+                                .when(can_save, |button| {
+                                    button
+                                        .focus(|style| {
+                                            style.bg(rgb(NAV_SELECTED)).border_color(rgb(TEXT))
+                                        })
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.save_project(id, cx)
+                                        }))
                                 })
-                                .detach();
-                            },
-                        )),
-                    )
-                    .child(
-                        button("save-project", "Save project")
-                            .bg(rgb(PANEL_HOVER))
-                            .on_click(cx.listener(move |this, _, _, cx| this.save_project(id, cx))),
+                                .when(!can_save, |button| button.tab_stop(false).cursor_default()),
+                            ),
                     );
             }
             Popup::ProjectMenu(id) => {
@@ -388,6 +480,11 @@ impl ChatsView {
                 }
                 content =
                     content
+                        .child(
+                            menu_item("new-chat-in-project", "compose", "New chat").on_click(
+                                cx.listener(move |this, _, _, cx| this.new_chat_in_project(id, cx)),
+                            ),
+                        )
                         .child(
                             button("edit-project", "Edit project…").on_click(cx.listener(
                                 move |this, _, window, cx| this.begin_project(Some(id), window, cx),
@@ -432,7 +529,7 @@ impl ChatsView {
             popup,
             Popup::Chat(_) | Popup::Assign(_) | Popup::ProjectMenu(_)
         );
-        if !anchored && !context_menu {
+        if !anchored && !context_menu && !matches!(popup, Popup::Project(_)) {
             content = content.child(
                 button("close-popup", "Cancel")
                     .text_color(rgb(MUTED))
@@ -510,7 +607,7 @@ impl ChatsView {
                 .max(px(12.));
             let height = match popup {
                 Popup::Assign(_) => (self.projects.len() as f32 * 34. + 90.).min(350.),
-                Popup::ProjectMenu(_) => 210.,
+                Popup::ProjectMenu(_) => 245.,
                 _ => 150.,
             };
             let top = (self.context_anchor.y - px(12.))

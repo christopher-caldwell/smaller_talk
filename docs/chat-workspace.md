@@ -12,16 +12,20 @@ The app uses the installed Codex and Claude Code CLIs and their existing sign-in
 
 Model and effort pickers open above their composer controls. Use Up/Down, Home/End, and Enter to choose, or Escape to close and restore focus. Tab/Shift+Tab reaches existing buttons and inputs; Enter/Space activates buttons, with visible focus borders. Effort choices mark the current selection and show the discovered default when available. Tooltips explain provider, mode, attachment, tab, and navigation controls. Search has a clear button; Escape clears search and returns to the composer. Chats with an empty or “Untitled” saved title display a first-message preview without changing their stored title.
 
-GPUI 0.2.2 does not expose a native accessibility-tree API. These keyboard and visual improvements do not provide full VoiceOver semantics; native control roles, values, and message-tree exposure remain unresolved within this GPUI version.
+Native checks of the upgraded app still expose window-level accessibility information without the app-drawn control roles, values, or message tree. Full VoiceOver semantics remain unverified.
 
 - Selecting a sidebar chat opens or focuses its tab. Closing a tab keeps the chat and draft. Tabs, the active tab, drafts, selections, reading positions, and sidebar state survive restart.
 - New Chat, Cmd+T, or Cmd+N opens one reusable unsent draft. The conversation enters saved history only when its first message or attachment is sent; whitespace alone does not create a chat. The draft, selected settings, and attachments survive switching tabs or restarting. Closing its tab retains the draft for the next New Chat action. Cmd+W closes the current tab; Ctrl+Tab and Ctrl+Shift+Tab switch tabs. Cmd+B toggles the sidebar and Cmd+F focuses search. The sidebar folds when resizing into a compact window. Expanding it at narrow widths overlays navigation rather than shrinking the conversation; selecting a chat closes the overlay.
-- Project menus create, rename, or remove projects. Chat menus assign or unassign chats. A project can have an optional local working folder; removing it keeps its chats. Projects without folders use the launch directory.
+- Use the + beside a project, its New chat menu item, or Start a chat in an empty project to open a draft assigned to that project. The draft appears under the project immediately; its first send saves the chat with that project and working folder. These actions reuse the unsent draft and preserve its text and attachments. Project menus also rename or remove projects. Chat menus assign or unassign chats. A project can have an optional local working folder; removing it keeps its chats. Projects without folders use the launch directory.
 - Search matches literal text in titles, messages, and project names, including Unicode lowercase matching. It returns at most 50 chats with excerpts. Selecting a message result reveals that message. Matching runs in the database adapter over streamed rows, keeping complete histories out of the search UI.
 - The composer’s model menu includes both providers. Effort choices come from the selected model’s advertised capabilities. Each chat has independent settings, execution, errors, and draft context.
 - Chat/Plan selects native provider behavior. Questions and approve/deny requests appear inline. A request to leave Plan mode requires an explicit choice.
 - Drag files onto the composer or use its attachment button. PNG, JPEG, GIF, and WebP images become native visual input. Other files become saved paths the agent can inspect using its own tools. Attachment-only messages work.
 - Enter sends; Shift+Enter inserts a newline. Text wraps and the composer grows within a bounded viewport. Responses support tables, lists, task lists, emphasis, strikethrough, quotes, links, and highlighted code. Select text and use Cmd+C, or use a response/code Copy button.
+
+## Input editing
+
+GPUI Kit 0.8.0 supplies the unstyled `Textarea` for the composer and instructions editor, and `Input` for single-line fields. It owns macOS editing shortcuts, Unicode selection, clipboard, undo/redo, IME, wrapping, and scrolling. The app adapter owns submission, skill discovery and provider/workspace identity, attachments, and the existing durable draft format. Selected skills use native inline tokens; deletion and undo preserve their reference identity. See [GPUI Kit migration](gpui-kit-migration.md) for dependencies, local patches, and verification.
 
 ## Context and storage
 
@@ -41,7 +45,7 @@ just lint
 just check
 just test
 SQLX_OFFLINE=true cargo build --workspace --locked
-SQLX_OFFLINE=true rustup run 1.89.0 cargo check --workspace --all-targets --locked
+SQLX_OFFLINE=true rustup run 1.99.1 cargo check --workspace --all-targets --locked
 ```
 
 The authenticated smoke test is deliberately opt-in and uses only synthetic text and the committed blue-square image:

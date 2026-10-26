@@ -60,7 +60,14 @@ async fn chat_creation_rolls_back_when_default_preferences_cannot_be_saved() {
 }
 struct Generator {
     calls: AtomicUsize,
-    corrupt: bool,
+    behavior: RewriteBehavior,
+}
+enum RewriteBehavior {
+    Valid,
+    Invalid,
+    Repair,
+    Unchanged,
+    Unavailable,
 }
 #[async_trait]
 impl TextGenerator for Generator {
@@ -68,15 +75,32 @@ impl TextGenerator for Generator {
         Ok(())
     }
     async fn generate(&self, input: TextGenerationInput) -> Result<String, ExecutionError> {
-        self.calls.fetch_add(1, Ordering::SeqCst);
+        let call = self.calls.fetch_add(1, Ordering::SeqCst);
         assert!(input.instructions.contains("verification status"));
-        assert!(!input.text.contains("cargo test"));
-        tokio::task::yield_now().await;
-        Ok(if self.corrupt {
-            "Success, all 999 tests passed.".into()
+        let request: serde_json::Value = serde_json::from_str(&input.text).unwrap();
+        let answer = request["masked_answer"].as_str().unwrap();
+        assert!(!answer.contains("cargo test"));
+        assert_eq!(request["protected_content"][0]["content"], "`cargo test`");
+        if call == 1 {
+            assert!(
+                request["validation_feedback"]
+                    .as_str()
+                    .unwrap()
+                    .contains("⟦KEEP_0000⟧ appeared 0 times")
+            );
         } else {
-            input.text.replacen(FILLER, "", 1)
-        })
+            assert!(request["validation_feedback"].is_null());
+        }
+        tokio::task::yield_now().await;
+        match self.behavior {
+            RewriteBehavior::Unavailable => Err(ExecutionError::new("Generation failed")),
+            RewriteBehavior::Unchanged => Ok(answer.into()),
+            RewriteBehavior::Invalid => Ok("Success, all 999 tests passed.".into()),
+            RewriteBehavior::Repair if call == 0 => {
+                Ok("The result is uncertain. Run tests.".into())
+            }
+            _ => Ok(answer.replacen(FILLER, "", 1)),
+        }
     }
 }
 fn settings() -> ExecutionSettings {
@@ -118,6 +142,11 @@ async fn global_settings_survive_restart_without_changing_chat_selections() {
         .or_default()
         .hidden_models
         .insert("hidden".into());
+    preferences
+        .providers
+        .entry(Provider::Claude)
+        .or_default()
+        .default_permissions = PermissionMode::Auto;
     service.save(&preferences).await.unwrap();
     let reopened =
         SqliteChatStore::new(open_existing(&dir.path().join("db.sqlite3")).await.unwrap());
@@ -130,12 +159,64 @@ async fn global_settings_survive_restart_without_changing_chat_selections() {
     };
     assert!(service.save(&invalid).await.is_err());
 }
+
+#[tokio::test]
+async fn permission_choices_survive_restart_and_stay_with_their_provider_and_chat() {
+    let (dir, db, chat, _) = setup().await;
+    let workspace = WorkspaceService::new(db.clone(), db.clone());
+    let mut preferences = db.preferences(chat).await.unwrap();
+    preferences.execution.permissions = [
+        (Provider::Claude, PermissionMode::Auto),
+        (Provider::Codex, PermissionMode::Supervised),
+    ]
+    .into();
+    preferences.execution.provider = Provider::Claude;
+    workspace.save_preferences(chat, preferences).await.unwrap();
+    let reopened =
+        SqliteChatStore::new(open_existing(&dir.path().join("db.sqlite3")).await.unwrap());
+    let mut preferences = reopened.preferences(chat).await.unwrap();
+    assert_eq!(
+        preferences.execution.permission_mode(),
+        PermissionMode::Auto
+    );
+    preferences.execution.provider = Provider::Codex;
+    assert_eq!(
+        preferences.execution.permission_mode(),
+        PermissionMode::Supervised
+    );
+    assert_eq!(reopened.list_messages(chat).await.unwrap().len(), 1);
+    let other = ChatService::new(db.clone(), db.clone())
+        .create_empty_chat()
+        .await
+        .unwrap();
+    assert_eq!(
+        db.preferences(other.id)
+            .await
+            .unwrap()
+            .execution
+            .permission_mode(),
+        PermissionMode::ProviderDefault
+    );
+
+    // Returning to native defaults must not inherit an elevated native thread policy.
+    workspace
+        .save_preferences(chat, preferences.clone())
+        .await
+        .unwrap();
+    preferences.new_session = false;
+    preferences
+        .execution
+        .permissions
+        .insert(Provider::Codex, PermissionMode::ProviderDefault);
+    workspace.save_preferences(chat, preferences).await.unwrap();
+    assert!(db.preferences(chat).await.unwrap().new_session);
+}
 #[tokio::test]
 async fn duplicate_rewrites_use_one_job_and_never_replace_original_history() {
     let (_dir, db, chat, message) = setup().await;
     let generator = Arc::new(Generator {
         calls: AtomicUsize::new(0),
-        corrupt: false,
+        behavior: RewriteBehavior::Valid,
     });
     let service = RewriteService::new(generator.clone(), db.clone(), db.clone());
     let (a, b) = tokio::join!(
@@ -179,14 +260,11 @@ async fn duplicate_rewrites_use_one_job_and_never_replace_original_history() {
 #[tokio::test]
 async fn malformed_rewrites_are_rejected_without_saving_a_variant() {
     let (_dir, db, chat, message) = setup().await;
-    let service = RewriteService::new(
-        Arc::new(Generator {
-            calls: AtomicUsize::new(0),
-            corrupt: true,
-        }),
-        db.clone(),
-        db.clone(),
-    );
+    let generator = Arc::new(Generator {
+        calls: AtomicUsize::new(0),
+        behavior: RewriteBehavior::Invalid,
+    });
+    let service = RewriteService::new(generator.clone(), db.clone(), db.clone());
     assert!(
         service
             .shorten(ShortenInput {
@@ -197,12 +275,73 @@ async fn malformed_rewrites_are_rejected_without_saving_a_variant() {
             .await
             .is_err()
     );
+    assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
     assert!(db.variants(chat).await.unwrap().is_empty());
     assert!(
         db.list_messages(chat).await.unwrap()[0]
             .body
             .contains(FILLER)
     );
+}
+
+#[tokio::test]
+async fn malformed_rewrite_is_corrected_once_before_saving() {
+    let (_dir, db, chat, message) = setup().await;
+    let source = db.final_answers(chat).await.unwrap()[0].text.clone();
+    let generator = Arc::new(Generator {
+        calls: AtomicUsize::new(0),
+        behavior: RewriteBehavior::Repair,
+    });
+    let service = RewriteService::new(generator.clone(), db.clone(), db.clone());
+    let result = service
+        .shorten(ShortenInput {
+            chat_id: chat,
+            message_id: message,
+            settings: settings(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(result.text, source.replacen(FILLER, "", 1));
+    assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+    assert_eq!(db.variants(chat).await.unwrap(), vec![result.clone()]);
+    assert_eq!(db.final_answers(chat).await.unwrap()[0].text, source);
+    assert_eq!(db.list_messages(chat).await.unwrap()[0].body, source);
+    assert_eq!(
+        service
+            .shorten(ShortenInput {
+                chat_id: chat,
+                message_id: message,
+                settings: settings(),
+            })
+            .await
+            .unwrap(),
+        result
+    );
+    assert_eq!(generator.calls.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn unchanged_answers_and_generation_failures_do_not_trigger_correction() {
+    for behavior in [RewriteBehavior::Unchanged, RewriteBehavior::Unavailable] {
+        let (_dir, db, chat, message) = setup().await;
+        let generator = Arc::new(Generator {
+            calls: AtomicUsize::new(0),
+            behavior,
+        });
+        let service = RewriteService::new(generator.clone(), db.clone(), db.clone());
+        assert!(
+            service
+                .shorten(ShortenInput {
+                    chat_id: chat,
+                    message_id: message,
+                    settings: settings(),
+                })
+                .await
+                .is_err()
+        );
+        assert_eq!(generator.calls.load(Ordering::SeqCst), 1);
+        assert!(db.variants(chat).await.unwrap().is_empty());
+    }
 }
 
 struct WaitingGenerator {
@@ -217,7 +356,11 @@ impl TextGenerator for WaitingGenerator {
     async fn generate(&self, input: TextGenerationInput) -> Result<String, ExecutionError> {
         self.started.notify_one();
         self.release.notified().await;
-        Ok(input.text.replacen(FILLER, "", 1))
+        let request: serde_json::Value = serde_json::from_str(&input.text).unwrap();
+        Ok(request["masked_answer"]
+            .as_str()
+            .unwrap()
+            .replacen(FILLER, "", 1))
     }
 }
 #[tokio::test]

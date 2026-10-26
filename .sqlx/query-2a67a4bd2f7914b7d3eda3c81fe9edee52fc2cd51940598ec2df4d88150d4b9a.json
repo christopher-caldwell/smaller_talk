@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT EXISTS(SELECT 1 FROM chats WHERE id = ? AND archived_at IS NOT NULL) AS \"archived!: i64\";\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "archived!: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "2a67a4bd2f7914b7d3eda3c81fe9edee52fc2cd51940598ec2df4d88150d4b9a"
+}

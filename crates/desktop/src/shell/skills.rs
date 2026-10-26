@@ -47,7 +47,7 @@ impl ChatsView {
             self.skill_ui.generation += 1;
             self.skill_ui.loading = false;
             self.skill_ui.result = None;
-            if self.active == Some(id) && matches!(self.popup, Some(Popup::Skills)) {
+            if self.active() == Some(id) && matches!(self.popup, Some(Popup::Skills)) {
                 self.refresh_skills(id, true, cx);
             }
         }
@@ -69,7 +69,7 @@ impl ChatsView {
         ))
     }
     pub(super) fn skill_catalog_checked(&self) -> bool {
-        self.active
+        self.active()
             .and_then(|id| self.skill_context(id).ok())
             .as_ref()
             == self.skill_ui.context.as_ref()
@@ -77,7 +77,7 @@ impl ChatsView {
     }
     pub(super) fn skill_entries(&self) -> &[SkillDescriptor] {
         if self
-            .active
+            .active()
             .and_then(|id| self.skill_context(id).ok())
             .as_ref()
             != self.skill_ui.context.as_ref()
@@ -243,6 +243,9 @@ impl ChatsView {
         true
     }
     pub(super) fn composer_skills_changed(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if self.update_command_picker(id, cx) {
+            return;
+        }
         let Some(state) = self.states.get(&id) else {
             return;
         };
@@ -252,7 +255,7 @@ impl ChatsView {
             editor.resolve_known_skills(&entries, cx);
         });
         if let Some((range, query)) = query {
-            if self.active == Some(id) && matches!(self.popup, None | Some(Popup::Skills)) {
+            if self.active() == Some(id) && matches!(self.popup, None | Some(Popup::Skills)) {
                 self.skill_ui.range = Some(range);
                 self.skill_ui.query = query;
                 self.skill_ui.automatic = true;
@@ -284,7 +287,7 @@ impl ChatsView {
         self.draft_changed(id, cx);
     }
     pub(super) fn open_skills(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(id) = self.active else {
+        let Some(id) = self.active() else {
             return;
         };
         self.skill_ui.automatic = false;
@@ -320,7 +323,7 @@ impl ChatsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(id) = self.active else {
+        let Some(id) = self.active() else {
             return;
         };
         if self.skill_context(id).ok().as_ref().map(|c| (c.1, &c.2))
@@ -393,7 +396,7 @@ impl ChatsView {
                 .child(
                     compact_button("refresh-skills", "Refresh").on_click(cx.listener(
                         |this, _, _, cx| {
-                            if let Some(id) = this.active {
+                            if let Some(id) = this.active() {
                                 this.refresh_skills(id, true, cx);
                             }
                         },

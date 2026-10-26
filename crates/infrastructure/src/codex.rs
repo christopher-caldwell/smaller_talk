@@ -18,6 +18,34 @@ const CLIENT_NAME: &str = "smaller_talk";
 const CLIENT_TITLE: &str = "Smaller Talk";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+struct CodexPermissions {
+    approval: &'static str,
+    reviewer: &'static str,
+    sandbox: &'static str,
+    policy: &'static str,
+}
+
+fn codex_permissions(mode: PermissionMode) -> Option<CodexPermissions> {
+    let (approval, reviewer, sandbox, policy) = match mode {
+        PermissionMode::ProviderDefault => return None,
+        PermissionMode::Supervised => ("untrusted", "user", "read-only", "readOnly"),
+        PermissionMode::AcceptEdits => ("on-request", "user", "workspace-write", "workspaceWrite"),
+        PermissionMode::Auto => (
+            "on-request",
+            "auto_review",
+            "workspace-write",
+            "workspaceWrite",
+        ),
+        PermissionMode::FullAccess => ("never", "user", "danger-full-access", "dangerFullAccess"),
+    };
+    Some(CodexPermissions {
+        approval,
+        reviewer,
+        sandbox,
+        policy,
+    })
+}
+
 #[derive(Clone, Debug)]
 pub struct CodexAdapter {
     executable: PathBuf,
@@ -181,6 +209,12 @@ impl CodexAdapter {
         };
         let mut thread_params =
             json!({ "cwd": request.workspace.to_string_lossy(), "model": request.settings.model });
+        let permissions = codex_permissions(request.settings.permission_mode());
+        if let Some(permissions) = &permissions {
+            thread_params["approvalPolicy"] = json!(permissions.approval);
+            thread_params["approvalsReviewer"] = json!(permissions.reviewer);
+            thread_params["sandbox"] = json!(permissions.sandbox);
+        }
         if !request.instructions.text.is_empty() {
             thread_params["developerInstructions"] = json!(request.instructions.text);
         }
@@ -241,6 +275,11 @@ impl CodexAdapter {
             "threadId": thread_id, "cwd": request.workspace,
             "input": input, "model": request.settings.model, "effort": request.settings.effort,
         });
+        if let Some(permissions) = &permissions {
+            params["approvalPolicy"] = json!(permissions.approval);
+            params["approvalsReviewer"] = json!(permissions.reviewer);
+            params["sandboxPolicy"] = json!({"type": permissions.policy});
+        }
         // Explicitly set both modes, so returning from Plan does not inherit Plan instructions.
         // A collaboration preset requires a concrete model. The application resolves defaults.
         if let Some(model) = &request.settings.model {
@@ -519,6 +558,54 @@ impl CodexAdapter {
 
 #[async_trait]
 impl ExecutionAdapter for CodexAdapter {
+    async fn compact(
+        &self,
+        request: smaller_talk_application::CompactionRequest,
+    ) -> Result<smaller_talk_application::CompactionOutcome, ExecutionError> {
+        let (mut child, mut stdin, mut stdout) = timeout(Duration::from_secs(25), async {
+            let mut child = Command::new(&self.executable).args(["app-server", "--stdio"])
+                .current_dir(&request.workspace).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).kill_on_drop(true)
+                .spawn().map_err(|e| ExecutionError::with_source("Could not start Codex compaction", e))?;
+            let mut stdin = child.stdin.take().ok_or_else(|| ExecutionError::new("Codex stdin unavailable"))?;
+            let mut stdout = BufReader::new(child.stdout.take().ok_or_else(|| ExecutionError::new("Codex stdout unavailable"))?);
+            send_request(&mut stdin, 1, "initialize", json!({"clientInfo":{"name":CLIENT_NAME,"version":CLIENT_VERSION},"capabilities":{"experimentalApi":true}})).await?;
+            read_response(&mut stdout, &mut stdin, 1).await?;
+            send_notification(&mut stdin, "initialized", json!({})).await?;
+            let mut params = json!({"threadId":request.binding.native_session_id,"cwd":request.workspace,"excludeTurns":true,"model":request.settings.model});
+            if !request.instructions.text.is_empty() { params["developerInstructions"] = json!(request.instructions.text); }
+            send_request(&mut stdin, 2, "thread/resume", params).await?;
+            read_response(&mut stdout, &mut stdin, 2).await?;
+            Ok::<_, ExecutionError>((child, stdin, stdout))
+        }).await.map_err(|_| ExecutionError::new("Codex startup timed out before compaction."))??;
+        let result = timeout(Duration::from_secs(180), async {
+            send_request(&mut stdin, 3, "thread/compact/start", json!({"threadId":request.binding.native_session_id})).await?;
+            let mut accepted = false;
+            let mut compacted = false;
+            let mut completed = false;
+            loop {
+                let value = read_message(&mut stdout).await?;
+                if value["id"] == 3 {
+                    if !value["error"].is_null() { return Err(ExecutionError::new(format!("Codex could not compact this session: {}", value["error"]))); }
+                    accepted = true;
+                }
+                if value["params"]["threadId"] == request.binding.native_session_id {
+                    if value["method"] == "item/completed" && value["params"]["item"]["type"] == "contextCompaction" { compacted = true; }
+                    if value["method"] == "turn/completed" {
+                        if value["params"]["turn"]["status"] != "completed" { return Err(ExecutionError::new(format!("Codex compaction did not complete: {}", value["params"]["turn"]))); }
+                        completed = true;
+                    }
+                    if value["method"] == "error" { return Err(ExecutionError::new(format!("Codex compaction failed: {}", value["params"]))); }
+                }
+                if accepted && completed {
+                    return if compacted { Ok(smaller_talk_application::CompactionOutcome::Compacted) } else { Err(ExecutionError::new("Codex finished without confirming context compaction.")) };
+                }
+            }
+        }).await.unwrap_or_else(|_| Err(ExecutionError::new("Codex compaction timed out; its outcome is uncertain. Review the session before trying again.")));
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        result
+    }
+
     async fn capabilities(
         &self,
         _provider: Provider,

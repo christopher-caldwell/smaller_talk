@@ -3,12 +3,15 @@ use unicode_segmentation::UnicodeSegmentation;
 
 #[derive(Clone)]
 pub(super) enum PickerAction {
+    CompactCommand,
     Skill(SkillReference),
     Model(Provider, String),
     Effort(Option<String>),
+    Permission(PermissionMode),
     Retry(Provider),
     SettingsModel(settings::SettingsPicker, Provider, String),
     SettingsEffort(Option<String>),
+    SettingsPermission(Provider, PermissionMode),
 }
 
 pub(super) struct PickerChoice {
@@ -67,17 +70,40 @@ impl ChatsView {
     }
 
     pub(super) fn picker_choices(&self) -> Vec<PickerChoice> {
+        if matches!(self.popup, Some(Popup::Commands)) {
+            return if "compact".starts_with(&self.command_query)
+                && self
+                    .active()
+                    .is_some_and(|id| self.compaction_unavailable(id).is_none())
+            {
+                vec![PickerChoice {
+                    label: "/compact · Reduce conversation context".into(),
+                    selected: false,
+                    action: PickerAction::CompactCommand,
+                }]
+            } else {
+                vec![]
+            };
+        }
         if matches!(self.popup, Some(Popup::Skills)) {
             return self.skill_choices();
         }
         if let Some(Popup::Settings(picker)) = self.popup {
             return self.settings_picker_choices(picker);
         }
-        let Some(id) = self.active else {
+        let Some(id) = self.active() else {
             return Vec::new();
         };
         let settings = &self.states[&id].preferences.execution;
         match self.popup {
+            Some(Popup::Permissions) => PermissionMode::ALL
+                .into_iter()
+                .map(|mode| PickerChoice {
+                    label: mode.label().into(),
+                    selected: settings.permission_mode() == mode,
+                    action: PickerAction::Permission(mode),
+                })
+                .collect(),
             Some(Popup::Models) => [Provider::Codex, Provider::Claude]
                 .into_iter()
                 .filter(|provider| self.app_settings.provider(*provider).enabled)
@@ -173,13 +199,22 @@ impl ChatsView {
             Some(
                 Popup::Models
                     | Popup::Effort
+                    | Popup::Permissions
+                    | Popup::Commands
                     | Popup::Skills
                     | Popup::Attachments
                     | Popup::SkillDetails
             )
         ) && !self.settings_open;
+        if matches!(self.popup, Some(Popup::Commands)) {
+            self.command_dismissed = self.active().and_then(|id| {
+                self.states
+                    .get(&id)
+                    .map(|s| (id, s.composer.read(cx).content()))
+            });
+        }
         self.popup = None;
-        if let Some(id) = self.active
+        if let Some(id) = self.active()
             && let Some(state) = self.states.get(&id)
         {
             state
@@ -188,7 +223,7 @@ impl ChatsView {
         }
         if return_to_composer {
             self.popup_return_focus = None;
-            if let Some(id) = self.active
+            if let Some(id) = self.active()
                 && let Some(state) = self.states.get(&id)
             {
                 state.composer.focus_handle(cx).focus(window, cx);
@@ -209,6 +244,10 @@ impl ChatsView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if matches!(action, PickerAction::CompactCommand) {
+            self.accept_command(window, cx);
+            return;
+        }
         if let PickerAction::Skill(reference) = &action {
             self.select_skill(reference.clone(), window, cx);
             return;
@@ -216,17 +255,19 @@ impl ChatsView {
         self.dismiss_popup(window, cx);
         if matches!(
             action,
-            PickerAction::SettingsModel(..) | PickerAction::SettingsEffort(_)
+            PickerAction::SettingsModel(..)
+                | PickerAction::SettingsEffort(_)
+                | PickerAction::SettingsPermission(..)
         ) {
             self.choose_settings(action, cx);
             return;
         }
-        let Some(id) = self.active else {
+        let Some(id) = self.active() else {
             return;
         };
         let mut prefs = self.states[&id].preferences.clone();
         match action {
-            PickerAction::Skill(_) => unreachable!(),
+            PickerAction::Skill(_) | PickerAction::CompactCommand => unreachable!(),
             PickerAction::Retry(provider) => {
                 self.discover(provider);
                 self.open_picker(Popup::Models, window, cx);
@@ -246,7 +287,15 @@ impl ChatsView {
                 prefs.execution.effort = None;
             }
             PickerAction::Effort(effort) => prefs.execution.effort = effort,
-            PickerAction::SettingsModel(..) | PickerAction::SettingsEffort(_) => unreachable!(),
+            PickerAction::Permission(mode) => {
+                prefs
+                    .execution
+                    .permissions
+                    .insert(prefs.execution.provider, mode);
+            }
+            PickerAction::SettingsModel(..)
+            | PickerAction::SettingsEffort(_)
+            | PickerAction::SettingsPermission(..) => unreachable!(),
         }
         self.save_preferences(id, prefs, cx);
     }
@@ -260,7 +309,7 @@ impl ChatsView {
         let key = event.keystroke.key.as_str();
         if matches!(self.popup, Some(Popup::Skills))
             && self
-                .active
+                .active()
                 .and_then(|id| self.states.get(&id))
                 .is_some_and(|s| s.composer.read(cx).composing())
         {
@@ -275,6 +324,14 @@ impl ChatsView {
             self.save_instructions(cx);
             window.prevent_default();
             cx.stop_propagation();
+            return;
+        }
+        if self.management.is_some() && self.popup.is_none() && key == "escape" {
+            self.management = None;
+            self.focus_composer = true;
+            window.prevent_default();
+            cx.stop_propagation();
+            cx.notify();
             return;
         }
         if self.settings_open && self.popup.is_none() && key == "escape" {
@@ -298,9 +355,19 @@ impl ChatsView {
         }
         if matches!(
             self.popup,
-            Some(Popup::Models | Popup::Effort | Popup::Skills | Popup::Settings(_))
+            Some(
+                Popup::Models
+                    | Popup::Effort
+                    | Popup::Permissions
+                    | Popup::Commands
+                    | Popup::Skills
+                    | Popup::Settings(_)
+            )
         ) {
-            let searching = matches!(self.popup, Some(Popup::Models | Popup::Skills));
+            let searching = matches!(
+                self.popup,
+                Some(Popup::Models | Popup::Skills | Popup::Commands)
+            );
             if searching && !matches!(key, "up" | "down" | "enter" | "tab") {
                 return;
             }
@@ -330,7 +397,13 @@ impl ChatsView {
         }
         let context_menu = matches!(
             self.popup,
-            Some(Popup::Chat(_) | Popup::Assign(_) | Popup::ProjectMenu(_))
+            Some(
+                Popup::Chat(_)
+                    | Popup::Assign(_)
+                    | Popup::ProjectMenu(_)
+                    | Popup::Panes
+                    | Popup::ProjectSort
+            )
         );
         if key == "tab" || (context_menu && matches!(key, "up" | "down")) {
             for _ in 0..128 {
@@ -350,6 +423,7 @@ impl ChatsView {
 
     pub(super) fn picker_control(
         &self,
+        chat: Option<Uuid>,
         key: &'static str,
         control: impl IntoElement,
         cx: &Context<Self>,
@@ -360,7 +434,7 @@ impl ChatsView {
             .on_children_prepainted(move |bounds, _, cx| {
                 if let Some(bounds) = bounds.first() {
                     let _ = weak.update(cx, |this, _| {
-                        this.picker_bounds.insert(key, *bounds);
+                        this.picker_bounds.insert((chat, key), *bounds);
                     });
                 }
             })

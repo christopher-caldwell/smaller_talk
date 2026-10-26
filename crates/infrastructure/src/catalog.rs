@@ -190,6 +190,25 @@ impl ProviderControl for AgentRouter {
 }
 #[async_trait]
 impl ExecutionAdapter for AgentRouter {
+    async fn compact(
+        &self,
+        request: smaller_talk_application::CompactionRequest,
+    ) -> Result<smaller_talk_application::CompactionOutcome, ExecutionError> {
+        let connection = self.connection(request.settings.provider)?;
+        match request.settings.provider {
+            Provider::Codex => {
+                CodexAdapter::new(connection.executable)
+                    .compact(request)
+                    .await
+            }
+            Provider::Claude => {
+                ClaudeAdapter::new(connection.executable)
+                    .compact(request)
+                    .await
+            }
+        }
+    }
+
     async fn capabilities(
         &self,
         provider: Provider,

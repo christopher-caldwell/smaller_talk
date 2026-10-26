@@ -35,6 +35,59 @@ pub struct ExecutionSettings {
     pub model: Option<String>,
     pub effort: Option<String>,
     pub plan_mode: bool,
+    /// Each conversation remembers its choice separately for each provider.
+    #[serde(default)]
+    pub permissions: BTreeMap<Provider, PermissionMode>,
+}
+
+impl ExecutionSettings {
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.permissions
+            .get(&self.provider)
+            .copied()
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PermissionMode {
+    #[default]
+    ProviderDefault,
+    Supervised,
+    AcceptEdits,
+    Auto,
+    FullAccess,
+}
+
+impl PermissionMode {
+    pub const ALL: [Self; 5] = [
+        Self::ProviderDefault,
+        Self::Supervised,
+        Self::AcceptEdits,
+        Self::Auto,
+        Self::FullAccess,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ProviderDefault => "Provider default",
+            Self::Supervised => "Supervised",
+            Self::AcceptEdits => "Auto-accept edits",
+            Self::Auto => "Auto",
+            Self::FullAccess => "Full access",
+        }
+    }
+
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::ProviderDefault => "Use the provider's own permission settings.",
+            Self::Supervised => "Ask before commands and file changes.",
+            Self::AcceptEdits => "Allow file edits; other actions can require approval.",
+            Self::Auto => "Let the provider review routine actions automatically.",
+            Self::FullAccess => "Allow commands and edits without routine approvals.",
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -82,6 +135,8 @@ pub struct Draft {
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct SessionState {
+    #[serde(default)]
+    pub navigation: crate::NavigationPreferences,
     pub open_tabs: Vec<String>,
     pub active_tab: Option<String>,
     pub sidebar_collapsed: bool,
@@ -90,6 +145,37 @@ pub struct SessionState {
     /// One reusable, unsent conversation; it is not part of saved chat history.
     #[serde(default)]
     pub new_chat: Option<NewChatDraft>,
+    #[serde(default)]
+    pub pane_layout: Option<PaneLayout>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PaneLayout {
+    pub root: PaneNode,
+    pub focused: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PaneAxis {
+    Row,
+    Column,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PaneNode {
+    Pane {
+        id: u64,
+        chat: Option<Uuid>,
+    },
+    Split {
+        id: u64,
+        axis: PaneAxis,
+        ratio: f32,
+        first: Box<PaneNode>,
+        second: Box<PaneNode>,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -146,6 +232,7 @@ pub struct ProviderCapabilities {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Activity {
+    Compacting,
     Starting,
     Working,
     Thinking,
@@ -156,6 +243,7 @@ pub enum Activity {
 impl Activity {
     pub fn label(self) -> &'static str {
         match self {
+            Self::Compacting => "Compacting…",
             Self::Starting => "Starting…",
             Self::Working => "Working…",
             Self::Thinking => "Thinking…",

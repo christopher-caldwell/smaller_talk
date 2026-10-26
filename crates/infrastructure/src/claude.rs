@@ -128,14 +128,9 @@ impl ClaudeAdapter {
                 cmd.arg("--append-system-prompt")
                     .arg(&request.instructions.text);
             }
-            cmd.args([
-                "--permission-mode",
-                if request.settings.plan_mode {
-                    "plan"
-                } else {
-                    "default"
-                },
-            ]);
+            if let Some(mode) = claude_permission_mode(&request.settings) {
+                cmd.args(["--permission-mode", mode]);
+            }
             if let Some(model) = &request.settings.model {
                 cmd.args(["--model", model]);
             }
@@ -270,6 +265,18 @@ impl ClaudeAdapter {
                     continue;
                 }
             };
+            if value["type"] == "system" && value["subtype"] == "init" {
+                let mode = match value["permissionMode"].as_str() {
+                    Some("default" | "manual") => Some(PermissionMode::Supervised),
+                    Some("acceptEdits") => Some(PermissionMode::AcceptEdits),
+                    Some("auto") => Some(PermissionMode::Auto),
+                    Some("bypassPermissions") => Some(PermissionMode::FullAccess),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    let _ = events.send(ExecutionEvent::Permissions(mode));
+                }
+            }
             if value["type"] == "user" {
                 if value["uuid"].as_str() == Some(initial_id.as_str()) {
                     replay_verified = replay_inputs.is_empty() && replay_id.is_none();
@@ -418,6 +425,50 @@ impl ClaudeAdapter {
 
 #[async_trait]
 impl ExecutionAdapter for ClaudeAdapter {
+    async fn compact(
+        &self,
+        request: smaller_talk_application::CompactionRequest,
+    ) -> Result<smaller_talk_application::CompactionOutcome, ExecutionError> {
+        let session = request.binding.native_session_id.clone();
+        let execution = ExecutionRequest {
+            chat_id: request.chat_id,
+            binding: Some(request.binding),
+            workspace: request.workspace,
+            settings: request.settings,
+            instructions: request.instructions,
+            prompt: String::new(),
+            attachments: vec![],
+            skills: vec![],
+            retry_inputs: vec![],
+            prior_context: None,
+        };
+        let (mut child, mut stdin, mut stdout) = self.start(Some(&execution)).await?;
+        // The ordinary adapter drains stderr in start(); initialization has the same 25s deadline.
+        Self::initialize(&mut stdin, &mut stdout).await?;
+        let result = timeout(Duration::from_secs(180), async {
+            write(&mut stdin, &json!({"uuid":uuid::Uuid::new_v4().to_string(),"type":"user","session_id":session,"parent_tool_use_id":null,"message":{"role":"user","content":"/compact"}})).await?;
+            let mut compacted = false;
+            loop {
+                let value = read(&mut stdout).await?;
+                if value["type"] == "system" && value["subtype"] == "compact_boundary" { compacted = true; }
+                if value["type"] == "control_request" { return Err(ExecutionError::new("Claude requested an unexpected interaction during compaction.")); }
+                if value["type"] == "system" && value["subtype"] == "error" { return Err(ExecutionError::new(format!("Claude compaction failed: {}", value["message"]))); }
+                if value["type"] == "result" {
+                    let reason = value["result"].as_str().unwrap_or_default();
+                    if value["is_error"] == true { return Err(ExecutionError::new(format!("Claude compaction failed: {reason}"))); }
+                    if compacted { return Ok(smaller_talk_application::CompactionOutcome::Compacted); }
+                    if reason.to_lowercase().contains("not enough") || reason.to_lowercase().contains("nothing to compact") {
+                        return Ok(smaller_talk_application::CompactionOutcome::NothingToCompact(reason.into()));
+                    }
+                    return Err(ExecutionError::new(format!("Claude did not confirm context compaction. {reason}")));
+                }
+            }
+        }).await.unwrap_or_else(|_| Err(ExecutionError::new("Claude compaction timed out; its outcome is uncertain. Review the session before trying again.")));
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        result
+    }
+
     async fn capabilities(
         &self,
         _provider: Provider,
@@ -500,6 +551,19 @@ impl ExecutionAdapter for ClaudeAdapter {
     ) -> Result<(), ExecutionError> {
         let (_, controls) = mpsc::unbounded_channel();
         self.run(request, events, responses, controls).await
+    }
+}
+
+fn claude_permission_mode(settings: &ExecutionSettings) -> Option<&'static str> {
+    if settings.plan_mode {
+        return Some("plan");
+    }
+    match settings.permission_mode() {
+        PermissionMode::ProviderDefault => None,
+        PermissionMode::Supervised => Some("default"),
+        PermissionMode::AcceptEdits => Some("acceptEdits"),
+        PermissionMode::Auto => Some("auto"),
+        PermissionMode::FullAccess => Some("bypassPermissions"),
     }
 }
 

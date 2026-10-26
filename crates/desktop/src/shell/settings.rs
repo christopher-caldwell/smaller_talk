@@ -13,6 +13,7 @@ pub(crate) enum SettingsPicker {
     DefaultModel,
     DefaultEffort,
     RewriteModel,
+    Permissions(Provider),
 }
 
 impl SettingsPicker {
@@ -21,6 +22,8 @@ impl SettingsPicker {
             Self::DefaultModel => "settings-default-model",
             Self::DefaultEffort => "settings-default-effort",
             Self::RewriteModel => "settings-rewrite-model",
+            Self::Permissions(Provider::Codex) => "settings-codex-permissions",
+            Self::Permissions(Provider::Claude) => "settings-claude-permissions",
         }
     }
     pub(super) fn title(self) -> &'static str {
@@ -28,6 +31,7 @@ impl SettingsPicker {
             Self::DefaultModel => "Default model",
             Self::DefaultEffort => "Default effort",
             Self::RewriteModel => "Rewrite model",
+            Self::Permissions(_) => "Default permissions for new conversations",
         }
     }
 }
@@ -52,7 +56,7 @@ fn control(
         .on_click(cx.listener(move |this, _, window, cx| action(this, window, cx)))
 }
 
-fn toggle(
+pub(super) fn toggle(
     id: impl Into<gpui::ElementId>,
     checked: bool,
     label: String,
@@ -194,6 +198,7 @@ impl ChatsView {
                             model: Some(m.id.clone()),
                             effort: None,
                             plan_mode: false,
+                            permissions: Default::default(),
                         })
                 })
             })
@@ -206,8 +211,21 @@ impl ChatsView {
                         ..Default::default()
                     })
             })
+            .map(|mut execution| {
+                execution.permissions = PROVIDERS
+                    .into_iter()
+                    .map(|provider| {
+                        (
+                            provider,
+                            self.app_settings.provider(provider).default_permissions,
+                        )
+                    })
+                    .collect();
+                execution
+            })
     }
     pub(super) fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.management = None;
         let return_focus = self
             .popup_return_focus
             .take()
@@ -269,6 +287,16 @@ impl ChatsView {
     }
     pub(super) fn settings_picker_choices(&self, picker: SettingsPicker) -> Vec<PickerChoice> {
         let settings = self.settings_for_edit();
+        if let SettingsPicker::Permissions(provider) = picker {
+            return PermissionMode::ALL
+                .into_iter()
+                .map(|mode| PickerChoice {
+                    label: mode.label().into(),
+                    selected: settings.provider(provider).default_permissions == mode,
+                    action: PickerAction::SettingsPermission(provider, mode),
+                })
+                .collect();
+        }
         if matches!(picker, SettingsPicker::DefaultEffort) {
             let selected = settings.default_execution.as_ref();
             let model = selected.and_then(|s| {
@@ -327,6 +355,12 @@ impl ChatsView {
     pub(super) fn choose_settings(&mut self, action: PickerAction, cx: &mut Context<Self>) {
         let mut next = self.settings_for_edit();
         match action {
+            PickerAction::SettingsPermission(provider, mode) => {
+                next.providers
+                    .entry(provider)
+                    .or_default()
+                    .default_permissions = mode;
+            }
             PickerAction::SettingsModel(picker, provider, model) => {
                 if !next.visible(provider, &model) {
                     return;
@@ -402,7 +436,7 @@ impl ChatsView {
         .gap_2()
         .child(div().flex_1().min_w(px(0.)).truncate().child(label))
         .child(div().text_size(px(11.)).text_color(rgb(MUTED)).child("⌄"));
-        self.picker_control(picker.anchor(), selector, cx)
+        self.picker_control(None, picker.anchor(), selector, cx)
     }
 
     fn render_provider_settings(
@@ -493,6 +527,16 @@ impl ChatsView {
         if let Some(ProviderReadiness::Unavailable(detail)) = self.provider_status.get(&provider) {
             section = section.child(caption(detail.clone()));
         }
+        section = section.child(
+            row()
+                .flex_wrap()
+                .child(caption("New conversations · Permissions"))
+                .child(self.settings_selector(
+                    SettingsPicker::Permissions(provider),
+                    prefs.default_permissions.label().into(),
+                    cx,
+                )),
+        );
         if matches!(
             self.provider_status.get(&provider),
             Some(ProviderReadiness::Missing | ProviderReadiness::SignedOut)

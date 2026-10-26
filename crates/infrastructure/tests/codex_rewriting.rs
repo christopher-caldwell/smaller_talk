@@ -58,6 +58,7 @@ fn input() -> TextGenerationInput {
             model: Some("gpt-6-luna".into()),
             effort: Some("low".into()),
             plan_mode: true, // Rewrite invocations never inherit a chat's Plan mode.
+            permissions: Default::default(),
         },
         instructions: "Synthetic instructions: café 東京".into(),
         text: "Synthetic answer with `src/items.rs`.".into(),

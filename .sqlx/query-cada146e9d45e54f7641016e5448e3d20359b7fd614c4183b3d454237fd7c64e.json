@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT id, title, created_at, adapter_key, native_session_id, instructions_fingerprint\nFROM chats\nORDER BY created_at DESC, id DESC;\n",
+  "query": "SELECT id, title, created_at, adapter_key, native_session_id, instructions_fingerprint, archived_at\nFROM chats\nWHERE id = ?;\n",
   "describe": {
     "columns": [
       {
@@ -32,10 +32,15 @@
         "name": "instructions_fingerprint",
         "ordinal": 5,
         "type_info": "Text"
+      },
+      {
+        "name": "archived_at",
+        "ordinal": 6,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
-      "Right": 0
+      "Right": 1
     },
     "nullable": [
       false,
@@ -43,8 +48,9 @@
       false,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "e51e75f8985c8130891239b4d4fbf22de31af0d0d3f635b4608197714fd2f2cf"
+  "hash": "cada146e9d45e54f7641016e5448e3d20359b7fd614c4183b3d454237fd7c64e"
 }

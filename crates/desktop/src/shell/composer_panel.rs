@@ -13,7 +13,7 @@ impl ChatsView {
         let settings_locked =
             working || state.settings_pending || state.enqueue_pending || state.queue_edit_pending;
         // Use the measured conversation width; leave room for the fixed controls.
-        let model_width = (self.last_width - px(240.)).clamp(px(48.), px(210.));
+        let model_width = (state.width - px(240.)).clamp(px(48.), px(210.));
         let model = self
             .selected_model(id)
             .map(|m| m.label.clone())
@@ -69,6 +69,8 @@ impl ChatsView {
             && provider_ready
             && model_available
             && !self.global_settings_save.is_saving()
+            && !self.command_pending.contains(&id)
+            && !self.navigation_pending.contains(&id)
             && !state.enqueue_pending
             && !state.queue_edit_pending
             && !state.importing
@@ -224,6 +226,7 @@ impl ChatsView {
             }));
         let model = self
             .picker_control(
+                Some(id),
                 "model-picker",
                 compact_button("model-picker", "")
                     .h(px(28.))
@@ -255,6 +258,7 @@ impl ChatsView {
             .max_w(model_width);
         let effort = self
             .picker_control(
+                Some(id),
                 "effort-picker",
                 compact_button("effort-picker", "")
                     .h(px(28.))
@@ -317,49 +321,116 @@ impl ChatsView {
                 }
             }))
         });
-        let send = compact_button("send-message", "")
-            .tooltip(hint(if !selected_skills_valid {
-                "Replace or remove unresolved skills before sending"
-            } else if !provider_enabled {
-                "Enable this provider in Settings or choose another model"
-            } else if !provider_ready {
-                "Check provider installation and sign-in in Settings, then Refresh"
-            } else if !model_available {
-                "Choose an available model before sending"
-            } else if self.global_settings_save.is_saving() {
-                "Saving global settings…"
-            } else if state.enqueue_pending {
-                "Saving message…"
-            } else if state.importing {
-                "Wait for attachments to finish saving"
-            } else if state.settings_pending {
-                "Saving chat settings…"
-            } else if state.settings_error {
-                "Resolve the settings error before sending"
-            } else if queued_action {
-                "Queue message"
-            } else {
-                "Send message (Enter or Cmd+Enter)"
-            }))
-            .tab_stop(can_send)
-            .flex_shrink_0()
-            .size(px(30.))
-            .px_0()
-            .py_0()
-            .flex()
-            .items_center()
-            .justify_center()
-            .rounded_full()
-            .bg(rgb(if can_send { SEND } else { PANEL_HOVER }))
-            .text_color(rgb(if can_send { PANEL } else { MUTED }))
-            .child(
-                icon(if queued_action { "queue" } else { "arrow-up" })
-                    .size(px(16.))
-                    .text_color(rgb(if can_send { PANEL } else { MUTED })),
-            )
-            .when(can_send, |b| {
-                b.on_click(cx.listener(move |this, _, _, cx| this.send(id, cx)))
-            });
+        let send = compact_button_with_hover(
+            "send-message",
+            "",
+            if can_send { ACCENT } else { PANEL_HOVER },
+        )
+        .focus(move |s| {
+            s.border_color(rgb(FOCUS))
+                .bg(rgb(if can_send { ACCENT } else { PANEL_HOVER }))
+        })
+        .tooltip(hint(if !selected_skills_valid {
+            "Replace or remove unresolved skills before sending"
+        } else if !provider_enabled {
+            "Enable this provider in Settings or choose another model"
+        } else if !provider_ready {
+            "Check provider installation and sign-in in Settings, then Refresh"
+        } else if !model_available {
+            "Choose an available model before sending"
+        } else if self.global_settings_save.is_saving() {
+            "Saving global settings…"
+        } else if state.enqueue_pending {
+            "Saving message…"
+        } else if state.importing {
+            "Wait for attachments to finish saving"
+        } else if state.settings_pending {
+            "Saving chat settings…"
+        } else if state.settings_error {
+            "Resolve the settings error before sending"
+        } else if queued_action {
+            "Queue message"
+        } else {
+            "Send message (Enter or Cmd+Enter)"
+        }))
+        .tab_stop(can_send)
+        .flex_shrink_0()
+        .size(px(30.))
+        .px_0()
+        .py_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(if can_send { SEND } else { PANEL_HOVER }))
+        .text_color(rgb(if can_send { PANEL } else { MUTED }))
+        .child(
+            icon(if queued_action { "queue" } else { "arrow-up" })
+                .size(px(16.))
+                .text_color(rgb(if can_send { PANEL } else { MUTED })),
+        )
+        .when(can_send, |b| {
+            b.on_click(cx.listener(move |this, _, _, cx| this.send(id, cx)))
+        });
+        let permission_mode = settings.permission_mode();
+        let effective = state.effective_permissions;
+        let permission_label = match effective {
+            Some(effective)
+                if permission_mode != PermissionMode::ProviderDefault
+                    && effective != permission_mode
+                    && !settings.plan_mode =>
+            {
+                format!("{} → {}", permission_mode.label(), effective.label())
+            }
+            _ => permission_mode.label().to_owned(),
+        };
+        let permission_detail = effective
+            .map(|mode| {
+                format!(
+                    "\nProvider reports: {}. Account and organization policies still apply.",
+                    mode.label()
+                )
+            })
+            .unwrap_or_default();
+        let permissions = self.picker_control(
+            Some(id),
+            "permissions-picker",
+            compact_button("permissions-picker", "")
+                .h(px(28.))
+                .py_0()
+                .flex()
+                .items_center()
+                .gap_1()
+                .max_w(px(130.))
+                .child(div().min_w(px(0.)).truncate().child(permission_label))
+                .child(icon("chevron-down").size(px(11.)).text_color(rgb(MUTED)))
+                .text_color(rgb(if permission_mode == PermissionMode::FullAccess {
+                    ATTENTION
+                } else {
+                    MUTED
+                }))
+                .opacity(if settings_locked { 0.5 } else { 1. })
+                .tab_stop(!settings_locked)
+                .tooltip(hint(format!(
+                    "{} permissions · This conversation\n{}\n{}{}",
+                    settings.provider.label(),
+                    permission_mode.description(),
+                    if settings.plan_mode {
+                        "Plan mode remains active."
+                    } else if settings_locked {
+                        "Change permissions after the current operation finishes."
+                    } else {
+                        "Saved locally, separately for each provider."
+                    },
+                    permission_detail
+                )))
+                .when(!settings_locked, |button| {
+                    button.on_click(cx.listener(|this, _, window, cx| {
+                        this.open_picker(Popup::Permissions, window, cx)
+                    }))
+                }),
+            cx,
+        );
         let selection = row()
             .gap_1()
             .min_w(px(0.))
@@ -368,13 +439,21 @@ impl ChatsView {
             .child(effort);
         let controls = row()
             .w_full()
+            .items_end()
             .gap_1()
-            .child(attach)
-            .child(mode)
-            .child(selection)
-            .child(div().flex_1().min_w(px(0.)))
+            .child(
+                row()
+                    .flex_1()
+                    .min_w(px(0.))
+                    .flex_wrap()
+                    .gap_1()
+                    .child(attach)
+                    .child(mode)
+                    .child(selection)
+                    .child(permissions),
+            )
             .child(send);
-        self.picker_control("skills-picker", composer.child(controls), cx)
+        self.picker_control(Some(id), "skills-picker", composer.child(controls), cx)
             .w_full()
             .max_w(px(800.))
             .into_any_element()

@@ -51,6 +51,13 @@ pub struct NewChat {
     pub binding: Option<ExecutionBinding>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ArchiveChatOutcome {
+    Updated(Chat),
+    Busy,
+    NotFound,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DeleteChatOutcome {
     Deleted,
@@ -80,6 +87,11 @@ pub trait ChatQueries: Send + Sync {
 
 #[async_trait]
 pub trait ChatWrites: Send + Sync {
+    async fn set_archived(
+        &self,
+        id: Uuid,
+        archived: bool,
+    ) -> Result<ArchiveChatOutcome, PersistenceError>;
     async fn create_chat(&self, chat: NewChat) -> Result<Chat, PersistenceError>;
     async fn delete_chat(&self, id: Uuid) -> Result<DeleteChatOutcome, PersistenceError>;
     async fn rename_chat(
@@ -162,6 +174,7 @@ impl ExecutionRequest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ExecutionEvent {
+    Permissions(PermissionMode),
     SkillsChanged,
     BindingEstablished(ExecutionBinding),
     InputAccepted(SteerInput),
@@ -208,6 +221,14 @@ pub struct SendMessageInput {
 
 #[async_trait]
 pub trait ExecutionAdapter: Send + Sync {
+    async fn compact(
+        &self,
+        _request: CompactionRequest,
+    ) -> Result<CompactionOutcome, ExecutionError> {
+        Err(ExecutionError::new(
+            "This provider does not support context compaction.",
+        ))
+    }
     async fn capabilities(
         &self,
         _provider: Provider,
@@ -252,6 +273,10 @@ pub trait ExecutionAdapter: Send + Sync {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConversationEvent {
+    Permissions {
+        chat_id: Uuid,
+        mode: PermissionMode,
+    },
     SkillsChanged {
         chat_id: Uuid,
     },
@@ -287,6 +312,8 @@ pub enum ConversationEvent {
 
 #[derive(Debug, Error)]
 pub enum SendMessageError {
+    #[error("Restore this archived chat before sending.")]
+    Archived,
     #[error("the selected chat no longer exists")]
     ChatNotFound,
     #[error("chat storage failed: {0}")]
@@ -616,6 +643,9 @@ impl ConversationService {
             .await
             .map_err(SendMessageError::Storage)?
             .ok_or(SendMessageError::ChatNotFound)?;
+        if chat.archived_at.is_some() {
+            return Err(SendMessageError::Archived);
+        }
         let mut preferences = ChatPreferences::default();
         let mut workspace = self.workspace.clone();
         if let Some((queries, _)) = &self.workspace_data {
@@ -1071,6 +1101,9 @@ impl ConversationService {
                         text,
                     });
                 }
+                ExecutionEvent::Permissions(mode) => {
+                    let _ = output.send(ConversationEvent::Permissions { chat_id, mode });
+                }
                 ExecutionEvent::Activity(activity) => {
                     let _ = output.send(ConversationEvent::Activity { chat_id, activity });
                 }
@@ -1332,11 +1365,20 @@ impl ChatService {
             .await
             .map_err(StartChatError::Storage)?;
         Ok(Chat {
+            archived_at: None,
             id: input.chat_id,
             title,
             created_at,
             binding: None,
         })
+    }
+
+    pub async fn set_archived(&self, id: Uuid, archived: bool) -> Result<Chat, ArchiveChatError> {
+        match self.writes.set_archived(id, archived).await? {
+            ArchiveChatOutcome::Updated(chat) => Ok(chat),
+            ArchiveChatOutcome::Busy => Err(ArchiveChatError::Busy),
+            ArchiveChatOutcome::NotFound => Err(ArchiveChatError::NotFound),
+        }
     }
 
     pub async fn delete_chat(&self, id: Uuid) -> Result<(), DeleteChatError> {
@@ -1408,3 +1450,6 @@ pub use rewriting::*;
 
 mod skills;
 pub use skills::*;
+
+mod compaction;
+pub use compaction::*;

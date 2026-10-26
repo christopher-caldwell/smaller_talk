@@ -1,0 +1,26 @@
+{
+  "db_name": "SQLite",
+  "query": "SELECT s.project_id AS \"project_id!: String\", MAX(m.created_at) AS \"updated_at?: i64\"\nFROM chat_settings s JOIN chats c ON c.id = s.chat_id JOIN messages m ON m.chat_id = c.id\nWHERE s.project_id IS NOT NULL AND c.archived_at IS NULL GROUP BY s.project_id;\n",
+  "describe": {
+    "columns": [
+      {
+        "name": "project_id!: String",
+        "ordinal": 0,
+        "type_info": "Text"
+      },
+      {
+        "name": "updated_at?: i64",
+        "ordinal": 1,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 0
+    },
+    "nullable": [
+      true,
+      false
+    ]
+  },
+  "hash": "0ef954d5303c03d41fd13894406e1d7e4e89ab328ccfe70253c5e2e1220fb54f"
+}

@@ -19,6 +19,7 @@ fn pending() -> NewChatDraft {
                 model: Some("draft-model".into()),
                 effort: Some("low".into()),
                 plan_mode: true,
+                permissions: Default::default(),
             },
             ..Default::default()
         },

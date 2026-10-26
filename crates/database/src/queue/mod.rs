@@ -142,6 +142,16 @@ impl QueueStore<SqliteUnitOfWork> for SqliteChatStore {
         chat: Uuid,
     ) -> Result<QueueCapacity, PersistenceError> {
         let chat = chat.to_string();
+        let archived = sqlx::query_file_scalar!("src/queue/sql/is_archived.sql", chat)
+            .fetch_one(&mut *uow.transaction)
+            .await
+            .map_err(PersistenceError::new)?;
+        if archived != 0 {
+            return Err(PersistenceError::new(std::io::Error::other(
+                "Restore this archived chat before sending.",
+            )));
+        }
+
         let count: i64 = sqlx::query_file_scalar!("src/queue/sql/count.sql", chat)
             .fetch_one(&mut *uow.transaction)
             .await

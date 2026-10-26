@@ -35,6 +35,35 @@ Attachments are copied into app-managed storage; source files remain untouched. 
 
 SQLite stores projects, settings, drafts, attachment references, turn settings/status, and restored UI state. Startup marks incomplete turns as interrupted. Transcript rows use GPUI’s variable-height list, with cached measurements and bounded Markdown/text-view caches. Closing an inactive tab clears its heavy view caches; closing a responding tab keeps its execution alive and clears those caches when it finishes.
 
+## Split panes
+
+Use the pane button above the conversation to split right or down, even out the layout, switch focus, or close a pane. Splits can be nested in either direction. Drag a divider to resize; double-click it to restore equal sizes. Each conversation keeps its own measured transcript width, reading position, composer, draft, model, and permissions.
+
+An empty pane offers open conversations that are not already visible. Opening a conversation that another pane already shows focuses that pane. Closing a pane keeps its conversation open as a tab and does not stop its execution. The pane tree, divider ratios, visible conversations, and focused pane are saved locally with the existing session state and restored on restart.
+
+| Shortcut | Action |
+| --- | --- |
+| Cmd+D | Split right |
+| Cmd+Shift+D | Split down |
+| Cmd+Option+] / Cmd+Option+[ | Focus next / previous pane |
+| Cmd+Option+W | Close focused pane |
+
+## Conversation permissions
+
+The composer has a permission menu beside the model and effort controls. It identifies the selected provider and applies to that conversation. Each provider's choice is remembered separately, including after an application restart. Settings → Providers & Models also offers a permission default for each provider; those defaults apply to new conversations.
+
+| Choice | Behavior |
+| --- | --- |
+| Provider default | Use the provider's native configuration. Existing conversations without a saved choice use this option. |
+| Supervised | Request approval for commands and file changes. |
+| Auto-accept edits | Allow file edits while other actions can require approval. |
+| Auto | Use the provider's automatic action review. |
+| Full access | Allow commands and edits without routine approvals. |
+
+The adapters enforce these choices through native permission controls. Codex receives explicit approval, reviewer, and sandbox policies on thread start/resume and on each turn; Claude receives its permission-mode flag. Returning from an explicit mode to Provider default starts a fresh native session with visible conversation context so a resumed Codex thread cannot retain its earlier elevated policy. Native account, organization, and explicit ask/deny policies still apply. Unsupported controls surface provider errors; when Claude reports a different effective mode, the composer shows the requested and effective selections.
+
+Chat/Plan remains a separate control. Permission changes are locked while an operation is running, and the selected choice is saved before another message can be sent. Response shortening keeps its separate isolated configuration.
+
 ## Verification
 
 Run:
@@ -88,3 +117,35 @@ Message queuing and verified native steering are implemented. See [message queue
 ### Settings, Git review, and answer shortening
 
 Global provider/model settings, model search, structured approvals, aligned activity, read-only Git review, and opt-in response shortening are documented in [the feature guide](settings-git-response-display.md). Upgrade existing databases with `just db-migrate` before starting this build.
+
+## Project navigation and local archive (ST-013)
+
+The controls beside **New chat** sort and filter projects. **Alphabetical** is the default. **Last chat updated** uses the latest saved user or assistant message in each project's unarchived chats; projects without messages sort last. Drafts and streaming tokens do not change the order. Chat ordering within a project stays the same.
+
+**Filter projects** opens Project visibility, with search, individual switches, Show all, and Hide all. Hidden projects also disappear from sidebar search. The reset control beside the active filter shows all projects without changing the sort or collapse choices. Open tabs, panes, drafts, and execution continue normally. Newly created projects are visible, and the unassigned Chats group stays visible. Clicking a project's title or disclosure arrow collapses its children. Sorting, visibility, and collapse choices survive restart.
+
+**Archive chat** is available in a saved chat's action menu once the chat is idle and its queue is empty. It saves a local archive timestamp and closes that chat's tabs and panes after the write succeeds. History, draft content, attachments, settings, and the native provider binding are retained. The app makes no provider archive or delete request. Existing Delete chat behavior remains separate.
+
+The archive icon at the bottom of the sidebar, or in its collapsed rail, opens **Archived chats**. This view searches archived titles, project names, and saved messages across all projects, including hidden projects. Selecting a chat opens its transcript read-only. Restore returns it to ordinary chat navigation and opens it for continuation, preserving project filter and collapse choices. Startup removes stale archived chat references from saved tabs and panes.
+
+## Commands and activity (ST-013)
+
+Type `/` at the beginning of the composer to open the command picker. The initial command set contains only `/compact`; skills remain under `$name`. Arrows navigate, Enter accepts the suggestion without executing it, and Escape dismisses the picker. Submit `/compact` alone to compact the current native session. Attachments, arguments, mixed content, and unsupported command names are rejected without discarding the draft. Paths containing additional slashes, escaped commands, and commands inside prose or code remain ordinary text.
+
+Compaction requires an idle, unarchived conversation with an empty queue and a binding valid for its current provider, folder, and custom instructions. Send a normal message first if the current configuration needs a new session. Codex resumes the thread and calls `thread/compact/start`; Claude resumes the session and sends its native `/compact` command. Native completion is required before reporting success. Claude can report that there is not enough history to compact. Compaction preserves the local transcript and binding and does not append a local user or assistant message.
+
+Compaction runs through the same per-chat coordinator as delivery. Follow-up messages entered during compaction wait in the durable queue. A compaction failure holds them for review; there is no automatic command retry or text-prompt fallback. Startup has the existing 25-second deadline, followed by a 180-second compaction deadline. A timeout reports an uncertain outcome.
+
+Starting, Working, Thinking, Responding, and Compacting display a small green pulse beside the status in the conversation and sidebar. Waiting for input remains a static attention indicator. The pulse uses a separate view, runs at most 20 frames per second, and respects reduced motion. Enabled send and queue controls use the activity green on hover and keyboard focus; disabled controls retain their muted appearance.
+
+Migration `0007_chat_archive.sql` adds the archive field. Run `just db-migrate` before launching an existing installation; normal startup does not migrate the database. New navigation preferences default to alphabetical sorting, all projects visible, and all projects expanded when older session JSON is loaded.
+
+The opt-in compaction smoke test uses disposable workspaces, local databases, and native sessions:
+
+```sh
+SMALLER_TALK_LIVE=1 cargo test -p smaller-talk-desktop --test compaction native_compaction_preserves -- --ignored --nocapture
+```
+
+It compacts both providers, verifies that local messages and bindings are unchanged, and asks each provider to recall a synthetic token on the next turn. This passed with Codex CLI 0.163.0 (`gpt-6-luna`) and Claude Code 2.1.303 (`claude-haiku-5-5`). Deterministic tests cover archive retention/failures, search filtering before its result limit, preference reopening, native compaction acceptance versus completion, unsupported/disconnected providers, timeout cleanup, and queue serialization.
+
+Native UI verification used a disposable application, database, and deterministic Codex fixture. It covered wide and 480-logical-pixel windows, split panes, sorting, individual/bulk project visibility, filtered search, collapse and restart restoration, local archive/read-only viewing/restore, command selection versus execution, unsupported-command draft retention, compaction/working feedback, and green send/queue hover states. GPUI tests verify that the pulse stops after any outstanding frame when waiting or when reduced motion is enabled, and that stale archived tabs/panes are cleared on restoration. The ordinary application database was not migrated or changed by these checks.

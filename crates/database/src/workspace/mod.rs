@@ -168,7 +168,38 @@ impl WorkspaceQueries for SqliteChatStore {
             .transpose()
             .map(|d| d.unwrap_or_default())
     }
+    async fn project_activity(
+        &self,
+    ) -> Result<std::collections::BTreeMap<Uuid, chrono::DateTime<chrono::Utc>>, PersistenceError>
+    {
+        sqlx::query_file!("src/workspace/sql/project_activity.sql")
+            .fetch_all(self.pool())
+            .await
+            .map_err(PersistenceError::new)?
+            .into_iter()
+            .filter_map(|r| r.updated_at.map(|t| (r.project_id, t)))
+            .map(|(id, t)| {
+                Ok((
+                    Uuid::parse_str(&id).map_err(PersistenceError::new)?,
+                    chrono::DateTime::from_timestamp_millis(t).ok_or_else(|| {
+                        PersistenceError::new(std::io::Error::other("Invalid activity timestamp"))
+                    })?,
+                ))
+            })
+            .collect()
+    }
     async fn search(&self, query: &str) -> Result<Vec<SearchHit>, PersistenceError> {
+        self.search_scoped(&SearchChatsInput {
+            text: query.into(),
+            ..Default::default()
+        })
+        .await
+    }
+    async fn search_scoped(
+        &self,
+        input: &SearchChatsInput,
+    ) -> Result<Vec<SearchHit>, PersistenceError> {
+        let query = &input.text;
         let needle = query.trim().to_lowercase();
         if needle.is_empty() {
             return Ok(Vec::new());
@@ -179,6 +210,16 @@ impl WorkspaceQueries for SqliteChatStore {
         let mut rows = sqlx::query_file!("src/workspace/sql/search.sql").fetch(self.pool());
         let mut hits: Vec<SearchHit> = Vec::new();
         while let Some(row) = rows.try_next().await.map_err(PersistenceError::new)? {
+            if row.archived_at.is_some() != input.archived
+                || (!input.archived
+                    && row
+                        .project_id
+                        .as_ref()
+                        .and_then(|id| Uuid::parse_str(id).ok())
+                        .is_some_and(|id| input.hidden_projects.contains(&id)))
+            {
+                continue;
+            }
             let id = Uuid::parse_str(&row.chat_id).map_err(PersistenceError::new)?;
             let existing = hits.iter().position(|h| h.chat_id == id);
             if existing.is_none() && hits.len() == 50 {

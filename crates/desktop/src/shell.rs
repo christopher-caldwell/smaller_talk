@@ -1,9 +1,15 @@
+mod activity;
 mod benchmark;
+mod commands;
 mod composer_panel;
 mod drafts;
 mod instructions;
 mod menus;
 mod navigation;
+mod navigation_tools;
+use navigation_tools::ManagementView;
+mod pane_view;
+mod panes;
 mod polish;
 mod repository;
 mod rewriting;
@@ -54,6 +60,7 @@ pub struct Services {
 }
 
 pub(crate) struct ChatViewState {
+    pub effective_permissions: Option<PermissionMode>,
     pub queue_edit_pending: bool,
     pub composer: Entity<Composer>,
     pub attachments: Vec<Attachment>,
@@ -80,6 +87,8 @@ pub(crate) struct ChatViewState {
     pub interaction_scroll: ScrollHandle,
     pub importing: bool,
     pub enqueue_pending: bool,
+    /// Width the transcript was last laid out at, from the pane showing it.
+    pub width: gpui::Pixels,
 }
 
 pub(crate) struct PendingInteraction {
@@ -114,6 +123,7 @@ pub(crate) enum Popup {
     SkillDetails,
     Models,
     Effort,
+    Permissions,
     Settings(settings::SettingsPicker),
     Chat(Uuid),
     Assign(Uuid),
@@ -121,6 +131,9 @@ pub(crate) enum Popup {
     Delete(Uuid),
     Project(Option<Uuid>),
     ProjectMenu(Uuid),
+    Panes,
+    ProjectSort,
+    Commands,
 }
 
 enum Persist {
@@ -129,7 +142,7 @@ enum Persist {
     Enqueue(Uuid, Draft),
     Respond(Uuid, InteractionResponse),
     Draft(Uuid, Draft),
-    Session(SessionState),
+    Session(Box<SessionState>),
     Preferences(Uuid, ChatPreferences),
     StartChat(StartChatInput),
     GlobalSettings(AppSettings),
@@ -141,6 +154,13 @@ enum Persist {
 }
 
 enum UiEvent {
+    ProjectActivity(
+        u64,
+        Result<BTreeMap<Uuid, chrono::DateTime<chrono::Utc>>, String>,
+    ),
+    ArchiveChanged(Uuid, Result<Chat, String>),
+    ArchiveSearch(u64, Result<Vec<SearchHit>, String>),
+    CompactionAccepted(Uuid, Draft, Result<(), String>),
     QueueEdited(Uuid, Result<Draft, String>),
     Skills(
         u64,
@@ -184,6 +204,19 @@ enum UiEvent {
 }
 
 pub struct ChatsView {
+    management: Option<ManagementView>,
+    management_search: Entity<Composer>,
+    management_query: String,
+    management_generation: u64,
+    archive_hits: Option<Vec<SearchHit>>,
+    navigation_pending: std::collections::HashSet<Uuid>,
+    command_pending: std::collections::HashSet<Uuid>,
+    command_notices: HashMap<Uuid, String>,
+    activity_indicators: HashMap<(Uuid, bool), Entity<activity::ActivityIndicator>>,
+    command_query: String,
+    command_dismissed: Option<(Uuid, String)>,
+    activity_generation: u64,
+    project_activity: BTreeMap<Uuid, chrono::DateTime<chrono::Utc>>,
     benchmark: Option<benchmark::State>,
     skill_ui: skills::SkillUi,
     instructions: instructions::InstructionUi,
@@ -194,7 +227,12 @@ pub struct ChatsView {
     pub(crate) queues: HashMap<Uuid, MessageQueue>,
     pub(crate) metadata: HashMap<Uuid, ChatPreferences>,
     pub(crate) session: SessionState,
-    pub(crate) active: Option<Uuid>,
+    pub(crate) panes: panes::Panes,
+    pane_focus: HashMap<panes::PaneId, FocusHandle>,
+    pane_sizes: HashMap<panes::PaneId, gpui::Size<gpui::Pixels>>,
+    split_bounds: HashMap<u64, gpui::Bounds<gpui::Pixels>>,
+    pane_resize: Option<u64>,
+    panes_area: gpui::Size<gpui::Pixels>,
     pub(crate) popup: Option<Popup>,
     pub(crate) catalogs: HashMap<Provider, Result<ProviderCapabilities, String>>,
     rewriting: rewriting::RewriteUi,
@@ -226,7 +264,8 @@ pub struct ChatsView {
     pub(crate) focus_composer: bool,
     tabs_scroll: ScrollHandle,
     previews: HashMap<Uuid, String>,
-    picker_bounds: HashMap<&'static str, gpui::Bounds<gpui::Pixels>>,
+    /// Keyed by chat for composer controls, which every pane renders.
+    picker_bounds: HashMap<(Option<Uuid>, &'static str), gpui::Bounds<gpui::Pixels>>,
     popup_index: usize,
     context_anchor: gpui::Point<gpui::Pixels>,
     popup_scroll: ScrollHandle,
@@ -234,8 +273,6 @@ pub struct ChatsView {
     popup_return_focus: Option<FocusHandle>,
     sender: mpsc::UnboundedSender<UiEvent>,
     persist: mpsc::UnboundedSender<Persist>,
-    pub(crate) last_width: gpui::Pixels,
-    detail_width: gpui::Pixels,
     pub(crate) content_inset: gpui::Pixels,
     last_window_width: gpui::Pixels,
 }
@@ -427,13 +464,7 @@ impl ChatsView {
         if let Some((id, draft)) = drafts::recover_started_chat(&mut session, &chats) {
             let _ = persist.send(Persist::Draft(id, draft));
         }
-        session.open_tabs.retain(|id| {
-            chats.iter().any(|c| c.id.to_string() == *id)
-                || session
-                    .new_chat
-                    .as_ref()
-                    .is_some_and(|draft| draft.id == *id)
-        });
+        drafts::restore_tabs(&mut session, &chats);
         let active = session
             .active_tab
             .as_ref()
@@ -459,7 +490,30 @@ impl ChatsView {
             this.focus_composer = true;
         })
         .detach();
+        let open: Vec<_> = session
+            .open_tabs
+            .iter()
+            .filter_map(|id| Uuid::parse_str(id).ok())
+            .collect();
+        let panes = session
+            .pane_layout
+            .as_ref()
+            .and_then(|saved| panes::Panes::restore(saved, &open))
+            .unwrap_or_else(|| panes::Panes::new(active));
         let mut view = Self {
+            management: None,
+            management_search: cx.new(Composer::new_single_line),
+            management_query: String::new(),
+            management_generation: 0,
+            archive_hits: None,
+            navigation_pending: Default::default(),
+            command_pending: Default::default(),
+            command_notices: Default::default(),
+            activity_indicators: Default::default(),
+            command_query: String::new(),
+            command_dismissed: None,
+            project_activity: Default::default(),
+            activity_generation: 0,
             benchmark: None,
             instructions: instructions::InstructionUi::new(cx),
             services,
@@ -469,7 +523,12 @@ impl ChatsView {
             queues: HashMap::new(),
             metadata: HashMap::new(),
             session,
-            active,
+            panes,
+            pane_focus: HashMap::new(),
+            pane_sizes: HashMap::new(),
+            split_bounds: HashMap::new(),
+            pane_resize: None,
+            panes_area: gpui::Size::default(),
             popup: None,
             skill_ui: Default::default(),
             catalogs: HashMap::new(),
@@ -510,11 +569,17 @@ impl ChatsView {
             popup_return_focus: None,
             sender,
             persist,
-            last_width: px(1.),
-            detail_width: px(800.),
             content_inset: px(24.),
             last_window_width: px(0.),
         };
+        cx.subscribe(
+            &view.management_search,
+            |this, _, _: &composer::Changed, cx| this.management_search_changed(cx),
+        )
+        .detach();
+        view.management_search
+            .update(cx, |e, _| e.set_placeholder("Search…"));
+        view.refresh_project_activity();
         view.model_search
             .update(cx, |editor, _| editor.set_placeholder("Search models…"));
         cx.subscribe(
@@ -533,7 +598,7 @@ impl ChatsView {
             &view.model_search,
             |this, editor, _: &composer::Changed, cx| {
                 this.model_query = editor.read(cx).content();
-                if matches!(this.popup, Some(Popup::Skills)) {
+                if matches!(this.popup, Some(Popup::Skills | Popup::Commands)) {
                     this.skill_ui.query = this.model_query.clone();
                 }
                 this.popup_index = 0;
@@ -716,7 +781,7 @@ impl ChatsView {
             let composer = cx.new(Composer::new);
             composer.update(cx, |editor, _| editor.set_font_size(15.));
             cx.subscribe(&composer, move |this, _, _: &composer::Submitted, cx| {
-                if matches!(this.popup, Some(Popup::Skills)) {
+                if matches!(this.popup, Some(Popup::Skills | Popup::Commands)) {
                     this.picker_requested = this
                         .picker_choices()
                         .get(this.popup_index)
@@ -732,7 +797,7 @@ impl ChatsView {
             })
             .detach();
             cx.subscribe(&composer, |this, _, event: &composer::Navigate, cx| {
-                if matches!(this.popup, Some(Popup::Skills)) {
+                if matches!(this.popup, Some(Popup::Skills | Popup::Commands)) {
                     let count = this.picker_choices().len();
                     if count > 0 {
                         this.popup_index = (this.popup_index as isize + event.0 as isize)
@@ -748,6 +813,12 @@ impl ChatsView {
                     state
                         .composer
                         .update(cx, |e, _| e.set_picker_navigation(false));
+                }
+                if matches!(this.popup, Some(Popup::Commands)) {
+                    this.command_dismissed = this
+                        .states
+                        .get(&id)
+                        .map(|s| (id, s.composer.read(cx).content()));
                 }
                 this.popup = None;
                 cx.notify();
@@ -771,6 +842,7 @@ impl ChatsView {
             self.states.insert(
                 id,
                 ChatViewState {
+                    effective_permissions: None,
                     queue_edit_pending: false,
                     composer,
                     attachments: vec![],
@@ -797,6 +869,7 @@ impl ChatsView {
                     interaction_scroll: ScrollHandle::new(),
                     importing: false,
                     enqueue_pending: false,
+                    width: px(0.),
                 },
             );
         }
@@ -885,6 +958,60 @@ impl ChatsView {
     fn apply_event(&mut self, event: UiEvent, cx: &mut Context<Self>) {
         self.benchmark_event(&event);
         match event {
+            UiEvent::ProjectActivity(generation, result) => {
+                if generation == self.activity_generation {
+                    match result {
+                        Ok(activity) => self.project_activity = activity,
+                        Err(e) => self.banner = Some(e),
+                    }
+                }
+            }
+            UiEvent::ArchiveSearch(generation, result) => {
+                if generation == self.management_generation {
+                    match result {
+                        Ok(hits) => self.archive_hits = Some(hits),
+                        Err(e) => {
+                            self.banner = Some(e);
+                            self.archive_hits = Some(vec![]);
+                        }
+                    }
+                }
+            }
+            UiEvent::ArchiveChanged(id, result) => {
+                self.navigation_pending.remove(&id);
+                match result {
+                    Ok(chat) => {
+                        let archived = chat.archived_at.is_some();
+                        if let Some(old) = self.chats.iter_mut().find(|c| c.id == id) {
+                            *old = chat;
+                        }
+                        if archived {
+                            self.close_tab(id, cx);
+                        } else {
+                            self.management = None;
+                            self.open_chat(id, None, cx);
+                        }
+                        self.refresh_project_activity();
+                        self.search_changed(cx);
+                        self.management_search_changed(cx);
+                    }
+                    Err(e) => self.banner = Some(e),
+                }
+            }
+            UiEvent::CompactionAccepted(id, draft, result) => {
+                self.command_pending.remove(&id);
+                if let Some(state) = self.states.get_mut(&id) {
+                    match result {
+                        Ok(()) => {
+                            if state.composer.read(cx).draft(state.attachments.clone()) == draft {
+                                state.composer.update(cx, |e, cx| e.reset(cx));
+                            }
+                        }
+                        Err(e) => state.error = Some(e),
+                    }
+                }
+                self.draft_changed(id, cx);
+            }
             UiEvent::QueueEdited(id, result) => {
                 if let Some(state) = self.states.get_mut(&id) {
                     state.queue_edit_pending = false;
@@ -937,6 +1064,28 @@ impl ChatsView {
                 self.draft_changed(id, cx);
             }
             UiEvent::Queue(event) => match event {
+                QueueEvent::CompactionStarted(id) => {
+                    self.command_notices.remove(&id);
+                    if let Some(state) = self.states.get_mut(&id) {
+                        state.activity = Some(Activity::Compacting);
+                        state.error = None;
+                    }
+                }
+                QueueEvent::CompactionFinished(id, result) => {
+                    self.activity_indicators.retain(|(chat, _), _| *chat != id);
+                    if let Some(state) = self.states.get_mut(&id) {
+                        state.activity = None;
+                        match result {
+                            Ok(CompactionOutcome::Compacted) => {
+                                self.command_notices.insert(id, "Context compacted".into());
+                            }
+                            Ok(CompactionOutcome::NothingToCompact(reason)) => {
+                                self.command_notices.insert(id, reason);
+                            }
+                            Err(e) => state.error = Some(e),
+                        }
+                    }
+                }
                 QueueEvent::Snapshot(id, queue) => {
                     self.queues.insert(id, queue);
                 }
@@ -1156,6 +1305,8 @@ impl ChatsView {
             UiEvent::Search(_, _) => {}
             UiEvent::Started(id, draft, result) => self.started_chat(id, draft, result, cx),
             UiEvent::Deleted(id) => {
+                self.refresh_project_activity();
+                self.search_changed(cx);
                 self.chats.retain(|c| c.id != id);
                 // Deletion already removed the persisted draft; do not save it on close.
                 self.release_response_display(id);
@@ -1172,6 +1323,16 @@ impl ChatsView {
                 }
             }
             UiEvent::Projects(projects) => {
+                self.refresh_project_activity();
+                self.session
+                    .navigation
+                    .hidden_projects
+                    .retain(|id| projects.iter().any(|p| p.id == *id));
+                self.session
+                    .navigation
+                    .collapsed_projects
+                    .retain(|id| projects.iter().any(|p| p.id == *id));
+                self.save_session();
                 self.projects = projects;
                 for prefs in self.metadata.values_mut() {
                     if prefs
@@ -1221,6 +1382,8 @@ impl ChatsView {
                 self.banner_details = false;
             }
             UiEvent::SettingsResult(id, expected, result) => {
+                self.refresh_project_activity();
+                self.search_changed(cx);
                 if let Some(state) = self.states.get_mut(&id) {
                     if state.preferences.execution == expected.execution
                         && state.preferences.project_id == expected.project_id
@@ -1248,8 +1411,9 @@ impl ChatsView {
                 }
             }
             UiEvent::Finished(id, result) => {
+                self.activity_indicators.retain(|(chat, _), _| *chat != id);
                 let completed = result.is_ok();
-                if self.active == Some(id) {
+                if self.active() == Some(id) {
                     self.refresh_repository(false);
                 }
                 if let Some(state) = self.states.get_mut(&id) {
@@ -1312,12 +1476,19 @@ impl ChatsView {
         if matches!(event, ConversationEvent::SteeringAvailable { .. }) {
             return;
         }
+        if matches!(
+            &event,
+            ConversationEvent::UserMessage(_) | ConversationEvent::AssistantMessage(_)
+        ) {
+            self.refresh_project_activity();
+        }
         let id = match &event {
             ConversationEvent::UserMessage(m) | ConversationEvent::AssistantMessage(m) => m.chat_id,
             ConversationEvent::AssistantDelta { chat_id, .. }
             | ConversationEvent::AssistantSnapshot { chat_id, .. }
             | ConversationEvent::SkillsChanged { chat_id }
             | ConversationEvent::SteeringAvailable { chat_id, .. }
+            | ConversationEvent::Permissions { chat_id, .. }
             | ConversationEvent::Activity { chat_id, .. }
             | ConversationEvent::FinalAnswer { chat_id, .. }
             | ConversationEvent::Interaction { chat_id, .. } => *chat_id,
@@ -1387,6 +1558,10 @@ impl ChatsView {
                     state.messages.len() - 1
                 }
             }
+            ConversationEvent::Permissions { mode, .. } => {
+                state.effective_permissions = Some(mode);
+                return;
+            }
             ConversationEvent::Activity { activity, .. } => {
                 state.activity = Some(activity);
                 return;
@@ -1452,6 +1627,14 @@ impl ChatsView {
     }
 
     pub(crate) fn open_chat(&mut self, id: Uuid, message: Option<Uuid>, cx: &mut Context<Self>) {
+        self.management = None;
+        if self
+            .chats
+            .iter()
+            .any(|c| c.id == id && c.archived_at.is_some())
+        {
+            return;
+        }
         self.settings_open = false;
         self.settings_focus = None;
         if self.last_window_width < px(720.) {
@@ -1461,7 +1644,7 @@ impl ChatsView {
         if !self.session.open_tabs.contains(&id.to_string()) {
             self.session.open_tabs.push(id.to_string());
         }
-        self.active = Some(id);
+        self.panes.show(Some(id));
         self.session.active_tab = Some(id.to_string());
         self.popup = None;
         self.focus_composer = true;
@@ -1504,14 +1687,25 @@ impl ChatsView {
         self.capture_scroll();
         self.session.open_tabs.remove(index);
         self.focus_composer = true;
-        if self.active == Some(id) {
-            self.active = self
+        let was_active = self.active() == Some(id);
+        self.panes.clear(id);
+        if was_active {
+            // Prefer the neighbouring tab, skipping chats other panes already show.
+            let tabs: Vec<Uuid> = self
                 .session
                 .open_tabs
-                .get(index.min(self.session.open_tabs.len().saturating_sub(1)))
-                .and_then(|s| Uuid::parse_str(s).ok());
+                .iter()
+                .filter_map(|s| Uuid::parse_str(s).ok())
+                .collect();
+            let start = index.min(tabs.len().saturating_sub(1));
+            let next = tabs[start..]
+                .iter()
+                .chain(tabs[..start].iter().rev())
+                .find(|tab| self.panes.pane_of(**tab).is_none())
+                .copied();
+            self.panes.show(next);
         }
-        self.session.active_tab = self.active.map(|id| id.to_string());
+        self.session.active_tab = self.active().map(|id| id.to_string());
         if self.states.get(&id).is_some_and(|s| s.activity.is_none()) {
             self.release_response_display(id);
         }
@@ -1604,7 +1798,11 @@ impl ChatsView {
     }
     pub(crate) fn save_session(&mut self) {
         self.capture_scroll();
-        let _ = self.persist.send(Persist::Session(self.session.clone()));
+        self.session.pane_layout = Some(self.panes.snapshot());
+        self.session.active_tab = self.active().map(|id| id.to_string());
+        let _ = self
+            .persist
+            .send(Persist::Session(Box::new(self.session.clone())));
     }
     pub fn persist_all(&mut self, cx: &mut Context<Self>) -> oneshot::Receiver<()> {
         let ids: Vec<_> = self.states.keys().copied().collect();
@@ -1618,6 +1816,13 @@ impl ChatsView {
     }
 
     fn send(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if self.navigation_pending.contains(&id) {
+            return;
+        }
+        if self.try_command(id, cx) {
+            return;
+        }
+        self.command_notices.remove(&id);
         if !self.states.contains_key(&id) || !self.prepare_skill_send(id, cx) {
             return;
         }
@@ -1715,8 +1920,13 @@ impl ChatsView {
         self.search_query = self.search.read(cx).content();
         self.search_generation += 1;
         let generation = self.search_generation;
-        let query = self.search_query.clone();
-        self.search_loading = !query.trim().is_empty();
+        let query = SearchChatsInput {
+            text: self.search_query.clone(),
+            hidden_projects: self.session.navigation.hidden_projects.clone(),
+            ..Default::default()
+        };
+        self.search_results.clear();
+        self.search_loading = !query.text.trim().is_empty();
         if !self.search_loading {
             self.search_results.clear();
             cx.notify();
@@ -1738,7 +1948,10 @@ impl ChatsView {
                     .ok();
                 if let Some(runtime) = runtime {
                     runtime.spawn(async move {
-                        let result = service.search(&query).await.map_err(|e| e.to_string());
+                        let result = service
+                            .search_scoped(&query)
+                            .await
+                            .map_err(|e| e.to_string());
                         let _ = sender.send(UiEvent::Search(generation, result));
                     });
                 }
@@ -1791,13 +2004,17 @@ impl ChatsView {
             return;
         }
         let old = self.metadata.get(&id).cloned().unwrap_or_default();
-        if old.execution.provider != prefs.execution.provider || old.project_id != prefs.project_id
+        if old.execution.provider != prefs.execution.provider
+            || old.project_id != prefs.project_id
+            || (prefs.execution.permission_mode() == PermissionMode::ProviderDefault
+                && old.execution.permission_mode() != PermissionMode::ProviderDefault)
         {
             prefs.new_session = true;
         }
         self.metadata.insert(id, prefs.clone());
         let new_chat = self.is_new_chat(id);
         if let Some(state) = self.states.get_mut(&id) {
+            state.effective_permissions = None;
             state.preferences = prefs.clone();
             state.settings_pending = !new_chat;
             state.settings_error = false;
@@ -1942,7 +2159,7 @@ impl ChatsView {
             return;
         }
         let index = self
-            .active
+            .active()
             .and_then(|id| {
                 self.session
                     .open_tabs
@@ -1950,8 +2167,12 @@ impl ChatsView {
                     .position(|s| *s == id.to_string())
             })
             .unwrap_or(0);
-        let next = (index as isize + direction).rem_euclid(len as isize) as usize;
-        if let Ok(id) = Uuid::parse_str(&self.session.open_tabs[next]) {
+        // Cycle within the focused pane; tabs other panes show stay put.
+        let next = (1..=len)
+            .map(|step| (index as isize + direction * step as isize).rem_euclid(len as isize))
+            .filter_map(|next| Uuid::parse_str(&self.session.open_tabs[next as usize]).ok())
+            .find(|id| !self.panes.shown_elsewhere(*id));
+        if let Some(id) = next {
             self.open_chat(id, None, cx);
             if let Some(s) = self.states.get(&id) {
                 s.composer.focus_handle(cx).focus(window, cx);
@@ -1991,6 +2212,11 @@ pub(crate) fn element_id(kind: &'static str, value: impl ToString) -> gpui::Elem
 }
 
 impl ChatsView {
+    /// The chat in the focused pane.
+    pub(crate) fn active(&self) -> Option<Uuid> {
+        self.panes.active()
+    }
+
     pub(crate) fn selected_model(&self, id: Uuid) -> Option<&ModelCapability> {
         let prefs = &self.states.get(&id)?.preferences.execution;
         let catalog = self.catalogs.get(&prefs.provider)?.as_ref().ok()?;
@@ -2065,212 +2291,22 @@ impl Render for ChatsView {
         } else {
             (sidebar, None)
         };
-        let weak = cx.entity().downgrade();
-        let mut detail = div()
-            .flex_1()
-            .min_w(px(0.))
-            .h_full()
-            .min_h(px(0.))
-            .flex()
-            .flex_col()
-            .child(self.render_tabs(cx))
-            .child(self.render_repository_header(cx))
-            .on_children_prepainted(move |bounds, _, cx| {
-                if let Some(bounds) = bounds.first() {
-                    let width = bounds.size.width;
-                    let weak = weak.clone();
-                    cx.defer(move |cx| {
-                        let _ = weak.update(cx, |this, cx| {
-                            if this.detail_width != width {
-                                this.detail_width = width;
-                                cx.notify();
-                            }
-                        });
-                    });
-                }
-            });
-        let width = (self.detail_width - self.content_inset * 2.)
-            .max(px(1.))
-            .min(px(800.));
-        if width != self.last_width {
-            self.last_width = width;
-            for state in self.states.values() {
-                let offset = state.list.logical_scroll_top();
-                state.list.reset(state.messages.len());
-                if state.follow {
-                    state.list.scroll_to(ListOffset {
-                        item_ix: state.messages.len(),
-                        offset_in_item: px(0.),
-                    });
-                } else {
-                    state.list.scroll_to(offset);
-                }
-            }
-        }
-        if let Some(id) = self.active.filter(|id| self.states.contains_key(id)) {
-            let pending = self.states[&id].pending.is_some();
-            if self.focus_composer && self.states[&id].loaded && !self.settings_open {
-                if pending && window.viewport_size().height < px(600.) {
-                    self.focus.focus(window, cx);
-                } else {
-                    self.states[&id].composer.focus_handle(cx).focus(window, cx);
-                }
-                self.focus_composer = false;
-            }
-            self.states[&id].composer.update(cx, |composer, cx| {
-                composer.set_max_rows(
-                    composer_rows(f32::from(window.viewport_size().height), pending),
-                    cx,
-                )
-            });
-            detail = detail.child(self.render_transcript(id, window, cx));
-            let compact_request = pending && window.viewport_size().height < px(600.);
-            let interaction_height = if compact_request {
-                (window.viewport_size().height * 0.35).clamp(px(140.), px(180.))
-            } else {
-                (window.viewport_size().height * 0.3).clamp(px(180.), px(280.))
-            };
-            if let Some(interaction) = self.render_interaction(id, interaction_height, cx) {
-                detail = detail.child(
-                    div()
-                        .flex_shrink_0()
-                        .id("interaction-viewport")
-                        .max_h(interaction_height)
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .px(self.content_inset)
-                        .child(interaction),
-                );
-            }
-            let state = &self.states[&id];
-            let status = state
-                .activity
-                .filter(|_| state.pending.is_none())
-                .map(|a| a.label().to_owned());
-            let error = state.error.clone();
-            if let Some(status) = status.filter(|_| !compact_request) {
-                detail = detail.child(
-                    div()
-                        .flex_shrink_0()
-                        .px(self.content_inset)
-                        .py_1()
-                        .text_size(px(13.))
-                        .text_color(rgb(ACCENT))
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .child(div().w_full().max_w(px(800.)).child(status)),
-                );
-            }
-            if let Some(error) = error {
-                let expanded = self.states[&id].error_details;
-                let summary = error_summary(&error, self.states[&id].settings_error, pending);
-                detail = detail.child(
-                    div()
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .px(self.content_inset)
-                        .py_2()
-                        .flex_shrink_0()
-                        .child(
-                            div()
-                                .id("chat-error")
-                                .w_full()
-                                .max_w(px(800.))
-                                .max_h(px(if compact_request { 36. } else { 120. }))
-                                .overflow_y_scroll()
-                                .text_sm()
-                                .child(
-                                    row()
-                                        .child(
-                                            div().flex_1().text_color(rgb(DANGER)).child(summary),
-                                        )
-                                        .child(
-                                            button(
-                                                "chat-error-details",
-                                                if expanded { "Hide details" } else { "Details" },
-                                            )
-                                            .on_click(
-                                                cx.listener(move |this, _, _, cx| {
-                                                    if let Some(s) = this.states.get_mut(&id) {
-                                                        s.error_details = !s.error_details;
-                                                    }
-                                                    cx.notify();
-                                                }),
-                                            ),
-                                        ),
-                                )
-                                .when(expanded, |d| {
-                                    d.child(div().text_color(rgb(MUTED)).child(error))
-                                }),
-                        ),
-                );
-            }
-            if let Some(queue) = self.render_queue(id, window.viewport_size().height, cx) {
-                detail = detail.child(
-                    div()
-                        .flex_shrink_0()
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .px(self.content_inset)
-                        .child(queue),
-                );
-            }
-            // Keep a compact composer available for queuing while an approval is pending.
-            {
-                detail = detail.child(
-                    div()
-                        .flex_shrink_0()
-                        .w_full()
-                        .flex()
-                        .justify_center()
-                        .px(self.content_inset)
-                        .pt_2()
-                        .pb_2()
-                        .child(self.render_composer(id, window, cx)),
-                );
-            }
-            if pending && !compact_request {
-                detail = detail.child(
-                    div()
-                        .flex_shrink_0()
-                        .px_3()
-                        .pb_3()
-                        .text_center()
-                        .text_xs()
-                        .text_color(rgb(MUTED))
-                        .child("Your draft is saved."),
-                );
-            }
+        let mut detail = if self.settings_open {
+            self.render_settings(window, cx)
+        } else if self.management.is_some() {
+            self.render_management(window, cx)
         } else {
-            if self.focus_composer && !self.settings_open {
-                self.focus.focus(window, cx);
-                self.focus_composer = false;
-            }
-            detail = detail.child(
-                div()
-                    .flex_1()
-                    .flex()
-                    .flex_col()
-                    .items_center()
-                    .justify_center()
-                    .gap_3()
-                    .child(
-                        div()
-                            .text_2xl()
-                            .font_weight(gpui::FontWeight::MEDIUM)
-                            .child("What’s on your mind?"),
-                    )
-                    .child(muted("Open a chat from the sidebar, or start a new one."))
-                    .child(
-                        button("empty-new-chat", "+  New chat")
-                            .on_click(cx.listener(|this, _, _, cx| this.new_chat(cx))),
-                    ),
-            );
-        }
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .h_full()
+                .min_h(px(0.))
+                .flex()
+                .flex_col()
+                .child(self.render_tabs(cx))
+                .child(self.render_repository_header(cx))
+                .child(self.render_panes(window, cx))
+        };
         if let Some(error) = &self.banner {
             detail = detail.child(
                 row()
@@ -2305,11 +2341,8 @@ impl Render for ChatsView {
                     ),
             );
         }
-        if self.settings_open {
-            detail = self.render_settings(window, cx);
-        }
         let popup = self.render_popup(window, cx);
-        let review = if self.repository.open && !self.settings_open {
+        let review = if self.repository.open && !self.settings_open && self.management.is_none() {
             Some(self.render_repository_panel(window, cx))
         } else {
             None
@@ -2341,12 +2374,22 @@ impl Render for ChatsView {
             }))
             .on_action(cx.listener(|this, _: &crate::NewChat, _, cx| this.new_chat(cx)))
             .on_action(cx.listener(|this, _: &crate::CloseTab, window, cx| {
+                if this.management.take().is_some() {
+                    this.focus_composer = true;
+                    cx.notify();
+                    return;
+                }
                 if this.settings_open {
                     this.close_settings(window, cx);
                     return;
                 }
-                if let Some(id) = this.active {
-                    this.close_tab(id, cx);
+                match this.active() {
+                    Some(id) => this.close_tab(id, cx),
+                    None if this.panes.is_split() => {
+                        let pane = this.panes.focused();
+                        this.close_pane(pane, cx);
+                    }
+                    None => {}
                 }
             }))
             .on_action(
@@ -2355,12 +2398,33 @@ impl Render for ChatsView {
             .on_action(cx.listener(|this, _: &crate::PreviousTab, window, cx| {
                 this.switch_tab(-1, window, cx)
             }))
+            .on_action(cx.listener(|this, _: &crate::SplitRight, _, cx| {
+                this.split_pane(panes::Axis::Row, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::SplitDown, _, cx| {
+                this.split_pane(panes::Axis::Column, cx)
+            }))
+            .on_action(
+                cx.listener(|this, _: &crate::NextPane, window, cx| {
+                    this.switch_pane(1, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &crate::PreviousPane, window, cx| {
+                this.switch_pane(-1, window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &crate::ClosePane, _, cx| {
+                this.close_pane(this.panes.focused(), cx)
+            }))
             .on_action(cx.listener(|this, _: &crate::ToggleSidebar, _, cx| {
                 this.session.sidebar_collapsed = !this.session.sidebar_collapsed;
                 this.save_session();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &crate::SearchChats, window, cx| {
+                if this.management.is_some() {
+                    this.management_search.focus_handle(cx).focus(window, cx);
+                    return;
+                }
                 if this.settings_open {
                     if matches!(this.popup, Some(Popup::Settings(_))) {
                         this.dismiss_popup(window, cx);

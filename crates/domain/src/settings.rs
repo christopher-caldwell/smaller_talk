@@ -13,6 +13,7 @@ pub struct ProviderPreferences {
     pub enabled: bool,
     pub executable: Option<PathBuf>,
     pub hidden_models: BTreeSet<String>,
+    pub default_permissions: crate::PermissionMode,
 }
 impl Default for ProviderPreferences {
     fn default() -> Self {
@@ -20,6 +21,7 @@ impl Default for ProviderPreferences {
             enabled: true,
             executable: None,
             hidden_models: BTreeSet::new(),
+            default_permissions: Default::default(),
         }
     }
 }

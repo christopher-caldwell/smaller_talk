@@ -146,8 +146,8 @@ impl ChatsView {
             .cloned()
             .unwrap_or_default();
         let mut body = div()
-            .w(self.last_width)
-            .max_w(self.last_width)
+            .w(self.states[&chat].width)
+            .max_w(self.states[&chat].width)
             .flex_shrink_0()
             .min_w(px(0.))
             .flex()
@@ -472,7 +472,7 @@ impl ChatsView {
                     })
                     .max()
                     .unwrap_or(px(0.))
-                    .max(self.last_width - px(26.));
+                    .max(self.states[&chat].width - px(26.));
                 let scroll: ScrollHandle = self
                     .states
                     .get_mut(&chat)

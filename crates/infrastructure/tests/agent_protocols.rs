@@ -32,6 +32,7 @@ fn request(root: &std::path::Path, provider: Provider) -> ExecutionRequest {
             model: Some("fixture-model".into()),
             effort: Some("low".into()),
             plan_mode: true,
+            permissions: Default::default(),
         },
         attachments: vec![Attachment {
             id: "image".into(),

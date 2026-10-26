@@ -134,6 +134,20 @@ async fn projects_search_drafts_attachments_and_tabs_survive_restart() {
     };
     db.save_draft(chat.id, &draft).await.unwrap();
     let session = SessionState {
+        navigation: Default::default(),
+        pane_layout: Some(PaneLayout {
+            focused: 2,
+            root: PaneNode::Split {
+                id: 1,
+                axis: PaneAxis::Row,
+                ratio: 0.4,
+                first: Box::new(PaneNode::Pane {
+                    id: 0,
+                    chat: Some(chat.id),
+                }),
+                second: Box::new(PaneNode::Pane { id: 2, chat: None }),
+            },
+        }),
         open_tabs: vec![chat.id.to_string()],
         active_tab: Some(chat.id.to_string()),
         sidebar_collapsed: true,

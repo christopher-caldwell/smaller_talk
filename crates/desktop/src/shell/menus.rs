@@ -24,7 +24,7 @@ impl ChatsView {
             .on_click(|_, _, cx| cx.stop_propagation());
         match *popup {
             Popup::Attachments => {
-                if let Some(id) = self.active {
+                if let Some(id) = self.active() {
                     content = content
                         .child(
                             compact_button("attach-menu-files", "Attach files…").on_click(
@@ -39,6 +39,57 @@ impl ChatsView {
                         ));
                 }
             }
+            Popup::ProjectSort => {
+                for (sort, label) in [
+                    (ProjectSort::Alphabetical, "Alphabetical"),
+                    (ProjectSort::LastChatUpdated, "Last chat updated"),
+                ] {
+                    content = content.child(
+                        button(
+                            element_id("project-sort", label),
+                            format!(
+                                "{}  {label}",
+                                if self.session.navigation.project_sort == sort {
+                                    "✓"
+                                } else {
+                                    " "
+                                }
+                            ),
+                        )
+                        .on_click(cx.listener(
+                            move |this, _, window, cx| {
+                                this.session.navigation.project_sort = sort;
+                                this.navigation_changed(cx);
+                                this.dismiss_popup(window, cx);
+                            },
+                        )),
+                    );
+                }
+            }
+            Popup::Commands => {
+                content = content.child(muted("Commands · Skills use $name"));
+                if "compact".starts_with(&self.command_query) {
+                    let reason = self.active().and_then(|id| self.compaction_unavailable(id));
+                    content = content.child(
+                        button(
+                            "compact-command",
+                            "/compact  ·  Reduce conversation context",
+                        )
+                        .tab_stop(reason.is_none())
+                        .text_color(rgb(if reason.is_some() { MUTED } else { TEXT }))
+                        .when(reason.is_none(), |b| {
+                            b.on_click(
+                                cx.listener(|this, _, window, cx| this.accept_command(window, cx)),
+                            )
+                        }),
+                    );
+                    if let Some(reason) = reason {
+                        content = content.child(muted(reason));
+                    }
+                } else {
+                    content = content.child(muted("Unsupported command. Available: /compact"));
+                }
+            }
             Popup::Skills => {
                 content = content.child(self.render_skills(cx));
             }
@@ -50,7 +101,7 @@ impl ChatsView {
                 );
             }
 
-            Popup::Models | Popup::Effort | Popup::Settings(_) => {
+            Popup::Models | Popup::Effort | Popup::Permissions | Popup::Settings(_) => {
                 if matches!(popup, Popup::Models) {
                     content = content.child(
                         row()
@@ -90,6 +141,11 @@ impl ChatsView {
                     .gap_1();
                 for (index, choice) in choices.into_iter().enumerate() {
                     let action = choice.action;
+                    let description = match &action {
+                        PickerAction::Permission(mode)
+                        | PickerAction::SettingsPermission(_, mode) => Some(mode.description()),
+                        _ => None,
+                    };
                     items = items.child(
                         compact_button(element_id("picker-choice", index), "")
                             .w_full()
@@ -102,7 +158,20 @@ impl ChatsView {
                             } else {
                                 ""
                             }))
-                            .child(div().flex_1().min_w(px(0.)).truncate().child(choice.label))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w(px(0.))
+                                    .child(div().truncate().child(choice.label))
+                                    .when_some(description, |item, description| {
+                                        item.child(
+                                            div()
+                                                .text_size(px(11.))
+                                                .text_color(rgb(MUTED))
+                                                .child(description),
+                                        )
+                                    }),
+                            )
                             .bg(rgb(if index == self.popup_index {
                                 PANEL_HOVER
                             } else {
@@ -157,9 +226,16 @@ impl ChatsView {
                             .text_size(px(11.))
                             .text_color(rgb(MUTED))
                             .child(match popup {
-                                Popup::Models => "Select model",
-                                Popup::Settings(picker) => picker.title(),
-                                _ => "Reasoning effort",
+                                Popup::Models => "Select model".to_owned(),
+                                Popup::Settings(picker) => picker.title().to_owned(),
+                                Popup::Permissions => format!(
+                                    "{} permissions · This conversation",
+                                    self.active()
+                                        .and_then(|id| self.states.get(&id))
+                                        .map(|state| state.preferences.execution.provider.label())
+                                        .unwrap_or("Provider")
+                                ),
+                                _ => "Reasoning effort".to_owned(),
                             }),
                     )
                     .child(items);
@@ -175,6 +251,23 @@ impl ChatsView {
             }
             Popup::Chat(id) => {
                 let busy = self.states.get(&id).is_some_and(|s| s.activity.is_some());
+                let eligible = self.archive_eligible(id);
+                content =
+                    content.child(
+                        menu_item("archive-chat", "archive", "Archive chat")
+                            .tab_stop(eligible)
+                            .text_color(rgb(if eligible { TEXT } else { MUTED }))
+                            .tooltip(hint(if eligible {
+                                "Archive locally; preserve the provider session"
+                            } else {
+                                "Wait until the chat is idle and its queue is empty"
+                            }))
+                            .when(eligible, |b| {
+                                b.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.change_archive(id, true, cx)
+                                }))
+                            }),
+                    );
                 content = content.child(menu_item("rename-chat", "pencil", "Rename").on_click(
                     cx.listener(move |this, _, window, cx| {
                         let title = this
@@ -520,14 +613,27 @@ impl ChatsView {
                                 })),
                         );
             }
+            Popup::Panes => {
+                content = content.child(self.render_pane_menu(cx));
+            }
         }
         let anchored = matches!(
             popup,
-            Popup::Models | Popup::Effort | Popup::Skills | Popup::Attachments | Popup::Settings(_)
+            Popup::Models
+                | Popup::Effort
+                | Popup::Permissions
+                | Popup::Commands
+                | Popup::Skills
+                | Popup::Attachments
+                | Popup::Settings(_)
         );
         let context_menu = matches!(
             popup,
-            Popup::Chat(_) | Popup::Assign(_) | Popup::ProjectMenu(_)
+            Popup::Chat(_)
+                | Popup::Assign(_)
+                | Popup::ProjectMenu(_)
+                | Popup::Panes
+                | Popup::ProjectSort
         );
         if !anchored && !context_menu && !matches!(popup, Popup::Project(_)) {
             content = content.child(
@@ -546,7 +652,7 @@ impl ChatsView {
             let viewport = window.viewport_size();
             let bounds = self
                 .picker_bounds
-                .get(picker.anchor())
+                .get(&(None, picker.anchor()))
                 .copied()
                 .unwrap_or_default();
             let width = px(300.).min(viewport.width - px(24.));
@@ -569,15 +675,21 @@ impl ChatsView {
             };
             backdrop = backdrop.child(anchor.child(content));
         } else if anchored {
-            let key = if matches!(popup, Popup::Skills | Popup::Attachments) {
+            let key = if matches!(popup, Popup::Skills | Popup::Commands | Popup::Attachments) {
                 "skills-picker"
             } else if matches!(popup, Popup::Models) {
                 "model-picker"
+            } else if matches!(popup, Popup::Permissions) {
+                "permissions-picker"
             } else {
                 "effort-picker"
             };
             let viewport = window.viewport_size();
-            let bounds = self.picker_bounds.get(key).copied().unwrap_or_default();
+            let bounds = self
+                .picker_bounds
+                .get(&(self.active(), key))
+                .copied()
+                .unwrap_or_default();
             let width = px(350.).min(viewport.width - px(24.));
             let left = bounds
                 .left()
@@ -608,6 +720,7 @@ impl ChatsView {
             let height = match popup {
                 Popup::Assign(_) => (self.projects.len() as f32 * 34. + 90.).min(350.),
                 Popup::ProjectMenu(_) => 245.,
+                Popup::Panes if self.panes.is_split() => 170.,
                 _ => 150.,
             };
             let top = (self.context_anchor.y - px(12.))

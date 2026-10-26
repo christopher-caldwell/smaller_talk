@@ -60,7 +60,7 @@ impl ChatsView {
             }
             Some("send") if benchmark.ready && !benchmark.submitted => {
                 benchmark.submitted = true;
-                let Some(id) = self.active else {
+                let Some(id) = self.panes.active() else {
                     return;
                 };
                 benchmark.log.emit(
@@ -93,14 +93,14 @@ impl ChatsView {
                 }
             }
             Some("close") => {
-                if let Some(id) = self.active {
+                if let Some(id) = self.panes.active() {
                     self.close_tab(id, cx);
                 }
                 self.benchmark.as_mut().unwrap().frame_pending =
                     Some(json!({"request":request,"action":"close"}));
             }
             Some("scroll") => {
-                if let Some(state) = self.active.and_then(|id| self.states.get_mut(&id)) {
+                if let Some(state) = self.panes.active().and_then(|id| self.states.get_mut(&id)) {
                     let index = if command["end"] == true {
                         state.messages.len()
                     } else {
@@ -177,7 +177,7 @@ impl ChatsView {
         }
         if benchmark
             .completion
-            .is_some_and(|id| self.active != Some(id))
+            .is_some_and(|id| self.panes.active() != Some(id))
         {
             benchmark.log.emit(
                 "error",
@@ -186,7 +186,7 @@ impl ChatsView {
             return;
         }
         let loaded = self
-            .active
+            .active()
             .is_none_or(|id| self.states.get(&id).is_some_and(|s| s.loaded));
         let provider_ready = matches!(
             self.provider_status.get(&Provider::Codex),
@@ -217,7 +217,7 @@ impl ChatsView {
                 benchmark.frame_scheduled = false;
                 if !benchmark.ready {
                     benchmark.ready = true;
-                    benchmark.log.emit("ui_ready", json!({"chat_id":this.active.map(|id|id.to_string())}));
+                    benchmark.log.emit("ui_ready", json!({"chat_id":this.panes.active().map(|id|id.to_string())}));
                 }
                 if let Some(id) = benchmark.completion.take() {
                     let bytes: usize = this.states.get(&id).map(|s| s.messages.iter()
@@ -226,8 +226,8 @@ impl ChatsView {
                         "evidence":"GPUI callback after completed view frame; not a pixel assertion"}));
                 }
                 if let Some(mut data) = benchmark.frame_pending.take() {
-                    data["active_chat_id"] = json!(this.active.map(|id|id.to_string()));
-                    if let Some(state) = this.active.and_then(|id|this.states.get(&id)) {
+                    data["active_chat_id"] = json!(this.panes.active().map(|id|id.to_string()));
+                    if let Some(state) = this.panes.active().and_then(|id|this.states.get(&id)) {
                         data["message_count"] = json!(state.messages.len());
                         data["scroll_item"] = json!(state.list.logical_scroll_top().item_ix);
                     }

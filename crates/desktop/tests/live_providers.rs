@@ -106,6 +106,7 @@ async fn authenticated_codex_claude_codex_context_images_and_plan_mode() {
         let effort = model.efforts.iter().find(|e| *e == "low").cloned();
         let mut prefs = db.preferences(chat.id).await.unwrap();
         prefs.execution = ExecutionSettings {
+            permissions: Default::default(),
             provider,
             model: Some(model.id.clone()),
             effort,
@@ -188,6 +189,7 @@ async fn authenticated_queue_and_steering_both_providers() {
                 model: Some(model.id.clone()),
                 effort: model.efforts.iter().find(|e| *e == "low").cloned(),
                 plan_mode: true,
+                permissions: Default::default(),
             },
             ..Default::default()
         };

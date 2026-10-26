@@ -131,6 +131,8 @@ pub enum SteerOutcome {
 }
 
 pub enum QueueEvent {
+    CompactionStarted(Uuid),
+    CompactionFinished(Uuid, Result<crate::CompactionOutcome, String>),
     Snapshot(Uuid, MessageQueue),
     Started(Uuid),
     Conversation(ConversationEvent),
@@ -143,6 +145,13 @@ pub struct QueueCoordinator {
     commands: mpsc::UnboundedSender<Command>,
 }
 enum Command {
+    Archive(
+        Uuid,
+        bool,
+        oneshot::Sender<Result<smaller_talk_domain::Chat, crate::ArchiveChatError>>,
+    ),
+    Compact(Uuid, oneshot::Sender<Result<(), String>>),
+    Compacted(Uuid, Result<crate::CompactionOutcome, String>),
     Edit(Uuid, Uuid, oneshot::Sender<Result<Draft, QueueError>>),
     Enqueue(Uuid, Draft, oneshot::Sender<Result<(), EnqueueError>>),
     Refresh(Uuid),
@@ -174,6 +183,7 @@ struct Coordinator<U: UnitOfWork> {
     sender: mpsc::UnboundedSender<Command>,
     output: mpsc::UnboundedSender<QueueEvent>,
     running: HashMap<Uuid, Running>,
+    compacting: std::collections::HashSet<Uuid>,
 }
 impl QueueCoordinator {
     /// Call once after startup recovery, while inside the application's runtime.
@@ -194,6 +204,7 @@ impl QueueCoordinator {
                 sender: sender.clone(),
                 output,
                 running: HashMap::new(),
+                compacting: Default::default(),
             }
             .run(receiver),
         );
@@ -216,6 +227,25 @@ impl QueueCoordinator {
             .send(Command::Ids(chat, tx))
             .map_err(|_| QueueError::Unavailable)?;
         rx.await.map_err(|_| QueueError::Unavailable)?
+    }
+    pub async fn set_archived(
+        &self,
+        chat: Uuid,
+        archived: bool,
+    ) -> Result<smaller_talk_domain::Chat, crate::ArchiveChatError> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(Command::Archive(chat, archived, tx))
+            .map_err(|_| crate::ArchiveChatError::Busy)?;
+        rx.await.map_err(|_| crate::ArchiveChatError::Busy)?
+    }
+    pub async fn compact(&self, chat: Uuid) -> Result<(), String> {
+        let (tx, rx) = oneshot::channel();
+        self.commands
+            .send(Command::Compact(chat, tx))
+            .map_err(|_| "The message coordinator is unavailable.".to_owned())?;
+        rx.await
+            .map_err(|_| "The message coordinator is unavailable.".to_owned())?
     }
     pub fn refresh(&self, chat: Uuid) {
         let _ = self.commands.send(Command::Refresh(chat));
@@ -274,7 +304,7 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
         Ok(())
     }
     async fn pump(&mut self, chat: Uuid) -> Result<(), QueueError> {
-        if self.running.contains_key(&chat) {
+        if self.running.contains_key(&chat) || self.compacting.contains(&chat) {
             return Ok(());
         }
         let queue = self
@@ -351,7 +381,10 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
     async fn run(mut self, mut commands: mpsc::UnboundedReceiver<Command>) {
         while let Some(command) = commands.recv().await {
             let chat = match &command {
-                Command::Edit(c, ..)
+                Command::Archive(c, ..)
+                | Command::Compact(c, _)
+                | Command::Compacted(c, _)
+                | Command::Edit(c, ..)
                 | Command::Enqueue(c, ..)
                 | Command::Ids(c, _)
                 | Command::Refresh(c)
@@ -374,6 +407,78 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
     }
     async fn handle(&mut self, command: Command) -> Result<(), QueueError> {
         match command {
+            Command::Archive(chat, archived, reply) => {
+                let queued = if archived {
+                    match self.queries.queue(chat).await {
+                        Ok(queue) => !queue.entries.is_empty(),
+                        Err(error) => {
+                            let _ = reply.send(Err(crate::ArchiveChatError::Storage(error)));
+                            return Ok(());
+                        }
+                    }
+                } else {
+                    false
+                };
+                let result = if archived
+                    && (queued
+                        || self.running.contains_key(&chat)
+                        || self.compacting.contains(&chat))
+                {
+                    Err(crate::ArchiveChatError::Busy)
+                } else {
+                    self.service.set_archived(chat, archived).await
+                };
+                let _ = reply.send(result);
+            }
+            Command::Compact(chat, reply) => {
+                let queue = match self.queries.queue(chat).await {
+                    Ok(queue) => queue,
+                    Err(error) => {
+                        let _ =
+                            reply.send(Err(format!("Could not check the message queue: {error}")));
+                        return Ok(());
+                    }
+                };
+                if self.running.contains_key(&chat)
+                    || self.compacting.contains(&chat)
+                    || !queue.entries.is_empty()
+                {
+                    let _ = reply.send(Err(
+                        "Wait until this chat is idle and its queue is empty before compacting."
+                            .into(),
+                    ));
+                } else {
+                    self.compacting.insert(chat);
+                    let _ = self.output.send(QueueEvent::CompactionStarted(chat));
+                    let service = self.service.clone();
+                    let sender = self.sender.clone();
+                    tokio::spawn(async move {
+                        let result = service
+                            .compact_conversation(chat)
+                            .await
+                            .map_err(|e| e.to_string());
+                        let _ = sender.send(Command::Compacted(chat, result));
+                    });
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            Command::Compacted(chat, result) => {
+                self.compacting.remove(&chat);
+                if let Err(reason) = &result {
+                    self.writes
+                        .pause_queue(chat, Some(reason))
+                        .await
+                        .map_err(QueueError::from_source)?;
+                }
+                let succeeded = result.is_ok();
+                let _ = self
+                    .output
+                    .send(QueueEvent::CompactionFinished(chat, result));
+                self.publish(chat).await?;
+                if succeeded {
+                    self.pump(chat).await?;
+                }
+            }
             Command::Enqueue(chat, draft, reply) => {
                 let result = self
                     .enqueuer

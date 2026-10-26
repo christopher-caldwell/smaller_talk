@@ -123,6 +123,13 @@ impl ChatsView {
         }
     }
     fn request_shorten(&mut self, chat: Uuid, message: Uuid, cx: &mut Context<Self>) {
+        if self
+            .chats
+            .iter()
+            .any(|c| c.id == chat && c.archived_at.is_some())
+        {
+            return;
+        }
         if self.rewriting.pending.contains(&message) {
             return;
         }
@@ -167,7 +174,7 @@ impl ChatsView {
         match result {
             Ok(variant) if self.variant_matches(&variant) => {
                 self.rewriting.variants.insert(message, variant);
-                let safe = self.active == Some(chat)
+                let safe = self.active() == Some(chat)
                     && !self.settings_open
                     && self.states.get(&chat).is_some_and(|s| {
                         s.follow
@@ -207,7 +214,12 @@ impl ChatsView {
         message: Uuid,
         cx: &mut Context<Self>,
     ) -> gpui::AnyElement {
-        if !self.rewriting.sources.contains_key(&message) {
+        if self
+            .chats
+            .iter()
+            .any(|c| c.id == chat && c.archived_at.is_some())
+            || !self.rewriting.sources.contains_key(&message)
+        {
             return div().into_any_element();
         }
         let pending = self.rewriting.pending.contains(&message);

@@ -290,6 +290,7 @@ async fn authenticated_instructions_resume_edit_clear_and_plan_both_providers() 
                 model: Some(model.id.clone()),
                 effort: model.efforts.iter().find(|e| *e == "low").cloned(),
                 plan_mode: true,
+                permissions: Default::default(),
             },
             ..Default::default()
         };

@@ -1,5 +1,21 @@
 use super::*;
 
+fn sidebar_menu_button(
+    id: impl Into<gpui::ElementId>,
+    hover: u32,
+    color: u32,
+) -> gpui::Stateful<gpui::Div> {
+    compact_button_with_hover(id, "", hover)
+        .size(px(24.))
+        .flex_shrink_0()
+        .px_0()
+        .py_0()
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(icon("ellipsis").size(px(16.)).text_color(rgb(color)))
+}
+
 impl ChatsView {
     pub(super) fn render_sidebar(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
         if self.session.sidebar_collapsed {
@@ -33,6 +49,13 @@ impl ChatsView {
                     icon_button_with_hover("rail-search", "search", NAV_HOVER)
                         .tooltip(hint("Search chats (⌘F)"))
                         .on_click(cx.listener(|this, _, window, cx| this.focus_search(window, cx))),
+                )
+                .child(
+                    icon_button_with_hover("rail-archive", "archive", NAV_HOVER)
+                        .tooltip(hint("Archived chats"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_management(ManagementView::Archive(None), window, cx)
+                        })),
                 )
                 .child(div().flex_1())
                 .child(
@@ -80,17 +103,50 @@ impl ChatsView {
                     ),
             )
             .child(
-                div().px_2().pb_2().child(
-                    compact_button_with_hover("new-chat", "", NAV_HOVER)
-                        .w_full()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .h(px(32.))
-                        .child(icon("compose").size(px(15.)).text_color(rgb(MUTED)))
-                        .child("New chat")
-                        .on_click(cx.listener(|this, _, _, cx| this.new_chat(cx))),
-                ),
+                row()
+                    .px_2()
+                    .pb_2()
+                    .gap_1()
+                    .child(
+                        compact_button_with_hover("new-chat", "", NAV_HOVER)
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .h(px(32.))
+                            .child(icon("compose").size(px(15.)).text_color(rgb(MUTED)))
+                            .child("New chat")
+                            .on_click(cx.listener(|this, _, _, cx| this.new_chat(cx))),
+                    )
+                    .child(
+                        icon_button_with_hover("sort-projects", "sort", NAV_HOVER)
+                            .tooltip(hint("Sort projects"))
+                            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                                this.open_context(Popup::ProjectSort, event.position(), window, cx)
+                            })),
+                    )
+                    .child(
+                        icon_button_with_hover("filter-projects", "filter", NAV_HOVER)
+                            .bg(rgb(if self.session.navigation.hidden_projects.is_empty() {
+                                NAVIGATION
+                            } else {
+                                CHROME
+                            }))
+                            .tooltip(hint("Filter projects"))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.open_management(ManagementView::Projects, window, cx)
+                            })),
+                    )
+                    .when(!self.session.navigation.hidden_projects.is_empty(), |r| {
+                        r.child(
+                            icon_button_with_hover("reset-project-filter", "close", NAV_HOVER)
+                                .tooltip(hint("Reset project filter · Show all"))
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.session.navigation.hidden_projects.clear();
+                                    this.navigation_changed(cx);
+                                })),
+                        )
+                    }),
             )
             .child(
                 div()
@@ -138,7 +194,7 @@ impl ChatsView {
             for hit in &self.search_results {
                 let id = hit.chat_id;
                 let message = hit.message_id;
-                let selected = self.active == Some(id);
+                let selected = self.active() == Some(id);
                 list = list.child(
                     compact_button_with_hover(
                         element_id("search-hit", id),
@@ -189,20 +245,60 @@ impl ChatsView {
                 );
             }
         } else {
-            for project in self.projects.clone() {
+            for project in self
+                .session
+                .navigation
+                .sorted_projects(&self.projects, &self.project_activity)
+            {
+                if self
+                    .session
+                    .navigation
+                    .hidden_projects
+                    .contains(&project.id)
+                {
+                    continue;
+                }
                 let id = project.id;
                 list = list.child(
                     row()
                         .mt_2()
                         .h(px(28.))
-                        .px_2()
+                        .pl_2()
                         .child(
-                            div()
-                                .flex_1()
-                                .text_size(px(11.))
-                                .text_color(rgb(MUTED))
-                                .truncate()
-                                .child(project.name),
+                            compact_button_with_hover(
+                                element_id("toggle-project", id),
+                                "",
+                                NAV_HOVER,
+                            )
+                            .flex_1()
+                            .min_w(px(0.))
+                            .px_0()
+                            .py_0()
+                            .flex()
+                            .items_center()
+                            .gap_1()
+                            .text_size(px(11.))
+                            .text_color(rgb(MUTED))
+                            .child(
+                                icon(
+                                    if self.session.navigation.collapsed_projects.contains(&id) {
+                                        "chevron"
+                                    } else {
+                                        "chevron-down"
+                                    },
+                                )
+                                .size(px(12.)),
+                            )
+                            .child(div().truncate().child(project.name))
+                            .on_click(cx.listener(
+                                move |this, _, _, cx| {
+                                    if !this.session.navigation.collapsed_projects.remove(&id) {
+                                        this.session.navigation.collapsed_projects.insert(id);
+                                    }
+                                    this.save_session();
+                                    cx.notify();
+                                },
+                            )),
                         )
                         .child(
                             icon_button_with_hover(
@@ -217,32 +313,30 @@ impl ChatsView {
                             ),
                         )
                         .child(
-                            compact_button_with_hover(
-                                element_id("project-menu", id),
-                                "···",
-                                NAV_HOVER,
-                            )
-                            .px_1()
-                            .py_0()
-                            .text_color(rgb(MUTED))
-                            .on_click(cx.listener(
-                                move |this, event: &gpui::ClickEvent, window, cx| {
-                                    this.open_context(
-                                        Popup::ProjectMenu(id),
-                                        event.position(),
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            )),
+                            sidebar_menu_button(element_id("project-menu", id), NAV_HOVER, MUTED)
+                                .tooltip(hint("Project actions"))
+                                .on_click(cx.listener(
+                                    move |this, event: &gpui::ClickEvent, window, cx| {
+                                        this.open_context(
+                                            Popup::ProjectMenu(id),
+                                            event.position(),
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                )),
                         ),
                 );
+                if self.session.navigation.collapsed_projects.contains(&id) {
+                    continue;
+                }
                 let chats: Vec<_> = self
                     .chats
                     .iter()
                     .filter(|c| {
-                        self.metadata.get(&c.id).and_then(|p| p.project_id.as_ref())
-                            == Some(&id.to_string())
+                        c.archived_at.is_none()
+                            && self.metadata.get(&c.id).and_then(|p| p.project_id.as_ref())
+                                == Some(&id.to_string())
                     })
                     .cloned()
                     .collect();
@@ -255,7 +349,7 @@ impl ChatsView {
                     })
                     .and_then(|draft| Uuid::parse_str(&draft.id).ok());
                 if let Some(draft_id) = draft_id {
-                    let selected = self.active == Some(draft_id);
+                    let selected = self.active() == Some(draft_id);
                     list = list.child(
                         compact_button_with_hover(
                             element_id("project-chat-draft", draft_id),
@@ -311,17 +405,19 @@ impl ChatsView {
                 .chats
                 .iter()
                 .filter(|c| {
-                    self.metadata
-                        .get(&c.id)
-                        .and_then(|p| p.project_id.as_ref())
-                        .is_none()
+                    c.archived_at.is_none()
+                        && self
+                            .metadata
+                            .get(&c.id)
+                            .and_then(|p| p.project_id.as_ref())
+                            .is_none()
                 })
                 .cloned()
                 .collect();
             for chat in unassigned {
                 list = list.child(self.render_chat_row(chat, cx));
             }
-            if self.chats.is_empty() {
+            if self.chats.iter().all(|c| c.archived_at.is_some()) {
                 list = list.child(div().p_3().child(muted("Your chats will appear here.")));
             }
         }
@@ -346,6 +442,13 @@ impl ChatsView {
                         ),
                 )
                 .child(
+                    icon_button_with_hover("archive-browser", "archive", NAV_HOVER)
+                        .tooltip(hint("Archived chats"))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.open_management(ManagementView::Archive(None), window, cx)
+                        })),
+                )
+                .child(
                     icon_button_with_hover("settings", "settings", NAV_HOVER)
                         .bg(rgb(if self.settings_open {
                             CHROME
@@ -361,15 +464,15 @@ impl ChatsView {
         sidebar.into_any_element()
     }
 
-    fn render_chat_row(&self, chat: Chat, cx: &mut Context<Self>) -> gpui::AnyElement {
+    fn render_chat_row(&mut self, chat: Chat, cx: &mut Context<Self>) -> gpui::AnyElement {
         let id = chat.id;
         let title = self.display_title(&chat);
-        let selected = self.active == Some(id);
+        let selected = self.active() == Some(id);
         let state = self.states.get(&id);
         let status = state
             .and_then(|s| {
                 s.activity
-                    .filter(|_| s.pending.is_none())
+                    .filter(|a| s.pending.is_none() || *a == Activity::Waiting)
                     .map(|a| a.label().to_string())
             })
             .or_else(|| state.and_then(|s| s.error.as_ref().map(|_| "Needs attention".into())));
@@ -380,6 +483,12 @@ impl ChatsView {
         } else {
             ACCENT
         };
+        let indicator = state
+            .and_then(|s| {
+                s.activity
+                    .filter(|a| s.pending.is_none() || *a == Activity::Waiting)
+            })
+            .map(|a| self.render_activity(id, a, status_color, true, cx));
         row()
             .id(element_id("chat-row", id))
             .w_full()
@@ -418,7 +527,13 @@ impl ChatsView {
                                         .text_size(px(11.))
                                         .text_color(rgb(status_color))
                                         .truncate()
-                                        .child(status),
+                                        .child(
+                                            indicator
+                                                .map(IntoElement::into_any_element)
+                                                .unwrap_or_else(|| {
+                                                    div().child(status).into_any_element()
+                                                }),
+                                        ),
                                 )
                             }),
                     )
@@ -430,20 +545,12 @@ impl ChatsView {
                     })),
             )
             .child(
-                compact_button_with_hover(
+                sidebar_menu_button(
                     element_id("chat-actions", id),
-                    "···",
                     if selected { NAV_SELECTED } else { CHROME },
+                    if selected { SELECTED_INK } else { MUTED },
                 )
                 .when(self.popup.is_none(), |b| b.tooltip(hint("Chat actions")))
-                .w(px(26.))
-                .h(px(26.))
-                .px_0()
-                .py_0()
-                .flex()
-                .items_center()
-                .justify_center()
-                .text_color(rgb(if selected { SELECTED_INK } else { MUTED }))
                 .on_click(cx.listener(
                     move |this, event: &gpui::ClickEvent, window, cx| {
                         this.open_context(Popup::Chat(id), event.position(), window, cx);
@@ -474,14 +581,33 @@ impl ChatsView {
                 None if self.is_new_chat(id) => "New chat".into(),
                 None => continue,
             };
-            let active = self.active == Some(id);
-            let working = self.states.get(&id).is_some_and(|s| s.activity.is_some());
+            let project = self
+                .metadata
+                .get(&id)
+                .and_then(|preferences| preferences.project_id.as_deref())
+                .and_then(|project_id| {
+                    self.projects
+                        .iter()
+                        .find(|project| project.id.to_string() == project_id)
+                });
+            let mut tooltip = match project {
+                Some(project) => format!("{} / {title}", project.name),
+                None => title.clone(),
+            };
+            let active = self.active() == Some(id);
+            let state = self.states.get(&id);
+            let waiting =
+                state.is_some_and(|s| s.pending.is_some() || s.activity == Some(Activity::Waiting));
+            let working = waiting || state.is_some_and(|s| s.activity.is_some());
+            if waiting {
+                tooltip.push_str("\nWaiting for your input");
+            }
             strip = strip.child(
                 row()
                     .id(element_id("tab", id))
                     .h(px(28.))
                     .min_w(px(96.))
-                    .max_w(px(216.))
+                    .max_w(px(if project.is_some() { 448. } else { 296. }))
                     .flex_shrink_0()
                     .gap_0()
                     .rounded_md()
@@ -502,24 +628,53 @@ impl ChatsView {
                             .border_1()
                             .border_color(gpui::rgba(0))
                             .focus(|s| s.border_color(rgb(FOCUS)))
-                            .tooltip(hint(title.clone()))
+                            .tooltip(hint(tooltip))
                             .when(working, |view| {
                                 view.child(
                                     div()
                                         .size(px(5.))
                                         .rounded_full()
                                         .flex_shrink_0()
-                                        .bg(rgb(ACCENT)),
+                                        .bg(rgb(if waiting { ATTENTION } else { ACCENT })),
                                 )
                             })
                             .child(
-                                div()
-                                    .min_w(px(0.))
-                                    .max_w(px(160.))
+                                row()
+                                    .gap_1()
                                     .text_size(px(12.))
-                                    .text_color(rgb(if active { TEXT } else { MUTED }))
-                                    .truncate()
-                                    .child(title),
+                                    .when_some(project, |label, project| {
+                                        label
+                                            .child(
+                                                div()
+                                                    .max_w(px(144.))
+                                                    .flex_shrink_0()
+                                                    .text_color(rgb(MUTED))
+                                                    .opacity(0.75)
+                                                    .truncate()
+                                                    .child(project.name.clone()),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_shrink_0()
+                                                    .text_color(rgb(MUTED))
+                                                    .opacity(0.5)
+                                                    .child("/"),
+                                            )
+                                    })
+                                    .child(
+                                        div()
+                                            .min_w(px(0.))
+                                            .max_w(px(240.))
+                                            .text_color(rgb(if waiting {
+                                                ATTENTION
+                                            } else if active {
+                                                TEXT
+                                            } else {
+                                                MUTED
+                                            }))
+                                            .truncate()
+                                            .child(title),
+                                    ),
                             )
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.open_chat(id, None, cx);

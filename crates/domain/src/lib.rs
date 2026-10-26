@@ -16,7 +16,11 @@ pub struct Chat {
     pub title: String,
     pub created_at: DateTime<Utc>,
     pub binding: Option<ExecutionBinding>,
+    pub archived_at: Option<DateTime<Utc>>,
 }
+
+mod navigation;
+pub use navigation::*;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExecutionBinding {

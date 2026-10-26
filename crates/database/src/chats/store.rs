@@ -1,6 +1,6 @@
 use smaller_talk_application::{
-    ChatQueries, ChatSetupWrites, ChatWrites, DeleteChatOutcome, MessageQueries, MessageWrites,
-    NewChat, NewMessage, PersistenceError, RenameChatOutcome,
+    ArchiveChatOutcome, ChatQueries, ChatSetupWrites, ChatWrites, DeleteChatOutcome,
+    MessageQueries, MessageWrites, NewChat, NewMessage, PersistenceError, RenameChatOutcome,
 };
 use smaller_talk_domain::{Chat, ExecutionBinding, Message, MessageRole};
 use sqlx::SqlitePool;
@@ -23,6 +23,7 @@ impl SqliteChatStore {
 }
 
 struct ChatRow {
+    archived_at: Option<i64>,
     id: String,
     title: String,
     created_at: i64,
@@ -80,6 +81,14 @@ impl TryFrom<ChatRow> for Chat {
         };
 
         Ok(Chat {
+            archived_at: row
+                .archived_at
+                .map(|ms| {
+                    chrono::DateTime::from_timestamp_millis(ms).ok_or_else(|| {
+                        PersistenceError::new(std::io::Error::other("Invalid archive timestamp"))
+                    })
+                })
+                .transpose()?,
             id,
             title: row.title,
             created_at,
@@ -139,6 +148,40 @@ impl ChatQueries for SqliteChatStore {
 
 #[async_trait::async_trait]
 impl ChatWrites for SqliteChatStore {
+    async fn set_archived(
+        &self,
+        id: Uuid,
+        archived: bool,
+    ) -> Result<ArchiveChatOutcome, PersistenceError> {
+        let id = id.to_string();
+        let timestamp = archived.then(|| chrono::Utc::now().timestamp_millis());
+        let row = sqlx::query_file_as!(
+            ChatRow,
+            "src/chats/sql/archive_chat.sql",
+            timestamp,
+            id,
+            archived
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(PersistenceError::new)?;
+        if let Some(row) = row {
+            return Ok(ArchiveChatOutcome::Updated(Chat::try_from(row)?));
+        }
+        Ok(
+            if sqlx::query_file_scalar!("src/chats/sql/chat_exists.sql", id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(PersistenceError::new)?
+                != 0
+            {
+                ArchiveChatOutcome::Busy
+            } else {
+                ArchiveChatOutcome::NotFound
+            },
+        )
+    }
+
     async fn create_chat(&self, chat: NewChat) -> Result<Chat, PersistenceError> {
         let id = chat.id.to_string();
         let title = chat.title;

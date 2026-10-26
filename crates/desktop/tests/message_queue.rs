@@ -208,6 +208,7 @@ async fn retry_after_restart_finds_original_input_before_accepted_steering() {
             model: Some("test-model".into()),
             effort: None,
             plan_mode: false,
+            permissions: Default::default(),
         },
         workspace: s._temp.path().into(),
         status: "running".into(),

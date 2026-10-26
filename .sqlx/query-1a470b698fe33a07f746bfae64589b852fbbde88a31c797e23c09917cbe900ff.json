@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO chats (id, title, created_at, adapter_key, native_session_id, instructions_fingerprint)\nVALUES (?, ?, ?, ?, ?, ?)\nRETURNING id, title, created_at, adapter_key, native_session_id, instructions_fingerprint;\n",
+  "query": "UPDATE chats SET archived_at = ?\nWHERE id = ? AND (? = 0 OR (\n    NOT EXISTS (SELECT 1 FROM turns WHERE chat_id = chats.id AND status = 'running')\n    AND NOT EXISTS (SELECT 1 FROM message_queue WHERE chat_id = chats.id)\n))\nRETURNING id, title, created_at, adapter_key, native_session_id, instructions_fingerprint, archived_at;\n",
   "describe": {
     "columns": [
       {
@@ -32,10 +32,15 @@
         "name": "instructions_fingerprint",
         "ordinal": 5,
         "type_info": "Text"
+      },
+      {
+        "name": "archived_at",
+        "ordinal": 6,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
-      "Right": 6
+      "Right": 3
     },
     "nullable": [
       false,
@@ -43,8 +48,9 @@
       false,
       true,
       true,
+      true,
       true
     ]
   },
-  "hash": "b1328543793e5e56ecf83e5265d2cdd3a8d3b0f04daa06f1f8972889644bb13f"
+  "hash": "1a470b698fe33a07f746bfae64589b852fbbde88a31c797e23c09917cbe900ff"
 }

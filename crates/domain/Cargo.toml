@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 chrono.workspace = true
-uuid.workspace = true
+uuid = { workspace = true, features = ["serde"] }
 serde.workspace = true
 
 [dev-dependencies]

@@ -11,6 +11,13 @@ pub use errors::*;
 
 #[async_trait]
 pub trait WorkspaceQueries: Send + Sync {
+    async fn project_activity(
+        &self,
+    ) -> Result<std::collections::BTreeMap<Uuid, chrono::DateTime<chrono::Utc>>, PersistenceError>;
+    async fn search_scoped(
+        &self,
+        input: &SearchChatsInput,
+    ) -> Result<Vec<SearchHit>, PersistenceError>;
     async fn chat_previews(&self) -> Result<Vec<(Uuid, String)>, PersistenceError>;
     async fn last_turn(&self, chat_id: Uuid) -> Result<Option<TurnSummary>, PersistenceError>;
     async fn accepted_turn_inputs(
@@ -82,6 +89,18 @@ pub struct WorkspaceService {
 impl WorkspaceService {
     pub fn new(queries: Arc<dyn WorkspaceQueries>, writes: Arc<dyn WorkspaceWrites>) -> Self {
         Self { queries, writes }
+    }
+    pub async fn project_activity(
+        &self,
+    ) -> Result<std::collections::BTreeMap<Uuid, chrono::DateTime<chrono::Utc>>, ListProjectsError>
+    {
+        Ok(self.queries.project_activity().await?)
+    }
+    pub async fn search_scoped(
+        &self,
+        input: &SearchChatsInput,
+    ) -> Result<Vec<SearchHit>, SearchChatsError> {
+        Ok(self.queries.search_scoped(input).await?)
     }
     pub async fn list_projects(&self) -> Result<Vec<Project>, ListProjectsError> {
         Ok(self.queries.list_projects().await?)
@@ -165,6 +184,8 @@ impl WorkspaceService {
         let old = self.queries.preferences(chat_id).await?;
         if old.execution.provider != preferences.execution.provider
             || old.project_id != preferences.project_id
+            || (preferences.execution.permission_mode() == PermissionMode::ProviderDefault
+                && old.execution.permission_mode() != PermissionMode::ProviderDefault)
         {
             preferences.new_session = true;
         }

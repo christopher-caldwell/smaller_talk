@@ -1,6 +1,6 @@
 {
   "db_name": "SQLite",
-  "query": "INSERT INTO chats (id, title, created_at, adapter_key, native_session_id)\nVALUES (?, ?, ?, ?, ?)\nRETURNING id, title, created_at, adapter_key, native_session_id;\n",
+  "query": "UPDATE chats\nSET title = ?\nWHERE id = ?\nRETURNING id, title, created_at, adapter_key, native_session_id, instructions_fingerprint, archived_at;\n",
   "describe": {
     "columns": [
       {
@@ -27,18 +27,30 @@
         "name": "native_session_id",
         "ordinal": 4,
         "type_info": "Text"
+      },
+      {
+        "name": "instructions_fingerprint",
+        "ordinal": 5,
+        "type_info": "Text"
+      },
+      {
+        "name": "archived_at",
+        "ordinal": 6,
+        "type_info": "Integer"
       }
     ],
     "parameters": {
-      "Right": 5
+      "Right": 2
     },
     "nullable": [
       false,
       false,
       false,
       true,
+      true,
+      true,
       true
     ]
   },
-  "hash": "095e905e036defdf79f9abb1820b84078724292449305b26e8eeefd9cde94da0"
+  "hash": "47bb7f3698b44c91d9baac5fb5086a6012a58bdcd43b93cc15c1ba4c95b61b0f"
 }

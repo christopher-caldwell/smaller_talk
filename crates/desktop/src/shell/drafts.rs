@@ -31,6 +31,7 @@ impl ChatsView {
     }
 
     pub(super) fn new_chat(&mut self, cx: &mut Context<Self>) {
+        self.management = None;
         if self.session.new_chat.is_none() {
             self.session.new_chat = Some(NewChatDraft {
                 id: Uuid::new_v4().to_string(),
@@ -66,7 +67,7 @@ impl ChatsView {
             return;
         }
         self.new_chat(cx);
-        if let Some(id) = self.active {
+        if let Some(id) = self.active() {
             let mut preferences = self.metadata.get(&id).cloned().unwrap_or_default();
             preferences.project_id = Some(project_id.to_string());
             self.save_preferences(id, preferences, cx);
@@ -153,6 +154,7 @@ mod tests {
             ..Default::default()
         };
         let chats = [Chat {
+            archived_at: None,
             id,
             title: "first message".into(),
             created_at: chrono::Utc::now(),
@@ -174,6 +176,7 @@ mod tests {
             ..Default::default()
         };
         let chats = [Chat {
+            archived_at: None,
             id,
             title: "first message".into(),
             created_at: chrono::Utc::now(),
@@ -184,5 +187,71 @@ mod tests {
             Some((id, expected))
         );
         assert!(session.new_chat.is_none());
+    }
+}
+
+/// Archived chats cannot reappear through a stale session snapshot after a crash.
+pub(super) fn restore_tabs(session: &mut SessionState, chats: &[Chat]) {
+    session.open_tabs.retain(|id| {
+        chats
+            .iter()
+            .any(|c| c.id.to_string() == *id && c.archived_at.is_none())
+            || session
+                .new_chat
+                .as_ref()
+                .is_some_and(|draft| draft.id == *id)
+    });
+    session.active_tab = session
+        .active_tab
+        .take()
+        .filter(|id| session.open_tabs.contains(id))
+        .or_else(|| session.open_tabs.last().cloned());
+}
+
+#[cfg(test)]
+mod archive_restart_tests {
+    use super::*;
+    #[test]
+    fn stale_archived_tabs_and_panes_are_cleared_while_other_tabs_survive() {
+        let archived = Uuid::from_u128(1);
+        let available = Uuid::from_u128(2);
+        let now = chrono::Utc::now();
+        let chats = [
+            Chat {
+                id: archived,
+                title: "Archived".into(),
+                created_at: now,
+                binding: None,
+                archived_at: Some(now),
+            },
+            Chat {
+                id: available,
+                title: "Active".into(),
+                created_at: now,
+                binding: None,
+                archived_at: None,
+            },
+        ];
+        let mut session = SessionState {
+            open_tabs: vec![archived.to_string(), available.to_string()],
+            active_tab: Some(archived.to_string()),
+            pane_layout: Some(PaneLayout {
+                focused: 0,
+                root: PaneNode::Pane {
+                    id: 0,
+                    chat: Some(archived),
+                },
+            }),
+            ..Default::default()
+        };
+        restore_tabs(&mut session, &chats);
+        assert_eq!(session.open_tabs, vec![available.to_string()]);
+        assert_eq!(session.active_tab, Some(available.to_string()));
+        let panes = super::super::panes::Panes::restore(
+            session.pane_layout.as_ref().unwrap(),
+            &[available],
+        )
+        .unwrap();
+        assert_eq!(panes.snapshot().root, PaneNode::Pane { id: 0, chat: None });
     }
 }

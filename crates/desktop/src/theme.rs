@@ -13,6 +13,7 @@ pub const CHROME: u32 = 0x302360;
 pub const COMPOSER: u32 = 0x303134;
 pub const MENU: u32 = 0x242427;
 pub const ACCENT: u32 = 0x92cda4;
+pub const ATTENTION: u32 = 0xe5c07b;
 pub const FOCUS: u32 = 0xa6a6ad;
 pub const TEXT: u32 = 0xf1f0f4;
 pub const MUTED: u32 = 0xb4afbe;
@@ -203,6 +204,10 @@ pub struct Icons;
 impl gpui::AssetSource for Icons {
     fn load(&self, path: &str) -> anyhow::Result<Option<std::borrow::Cow<'static, [u8]>>> {
         let bytes: &'static [u8] = match path {
+            "ellipsis" => include_bytes!("../assets/icons/ellipsis.svg"),
+            "sort" => include_bytes!("../assets/icons/sort.svg"),
+            "filter" => include_bytes!("../assets/icons/filter.svg"),
+            "archive" => include_bytes!("../assets/icons/archive.svg"),
             "pencil" => include_bytes!("../assets/icons/pencil.svg"),
             "folder" => include_bytes!("../assets/icons/folder.svg"),
             "trash" => include_bytes!("../assets/icons/trash.svg"),
@@ -217,6 +222,9 @@ impl gpui::AssetSource for Icons {
             "close" => include_bytes!("../assets/icons/close.svg"),
             "chevron-down" => include_bytes!("../assets/icons/chevron-down.svg"),
             "arrow-up" => include_bytes!("../assets/icons/arrow-up.svg"),
+            "panes" => include_bytes!("../assets/icons/panes.svg"),
+            "split-right" => include_bytes!("../assets/icons/split-right.svg"),
+            "split-down" => include_bytes!("../assets/icons/split-down.svg"),
             _ => return Ok(None),
         };
         Ok(Some(std::borrow::Cow::Borrowed(bytes)))

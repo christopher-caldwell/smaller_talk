@@ -42,7 +42,7 @@ impl RepositoryUi {
 }
 impl ChatsView {
     fn effective_folder(&self) -> PathBuf {
-        self.active
+        self.active()
             .and_then(|id| self.states.get(&id))
             .and_then(|s| s.preferences.project_id.as_ref())
             .and_then(|id| self.projects.iter().find(|p| p.id.to_string() == *id))
@@ -64,10 +64,10 @@ impl ChatsView {
         self.repository.focused = window.is_window_active();
         let folder = self.effective_folder();
         if self.repository.folder.as_ref() != Some(&folder)
-            || self.repository.context_chat != self.active
+            || self.repository.context_chat != self.active()
         {
             self.repository.folder = Some(folder);
-            self.repository.context_chat = self.active;
+            self.repository.context_chat = self.active();
             self.repository.context_generation += 1;
             self.repository.loading = false;
             self.repository.status = None;
@@ -245,9 +245,39 @@ impl ChatsView {
         }
     }
     pub(super) fn render_repository_header(&self, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let Some(status) = &self.repository.status else {
-            return div()
-                .when(self.repository.error.is_some(), |d| {
+        let status = self.repository.status.as_ref().map(|status| {
+            let additions: u64 = status.files.iter().filter_map(|f| f.additions).sum();
+            let deletions: u64 = status.files.iter().filter_map(|f| f.deletions).sum();
+            let label = format!(
+                "⑂ {} · {} files · +{additions} −{deletions}",
+                status.branch,
+                status.files.len()
+            );
+            compact_button("repo-status", label)
+                .text_xs()
+                .tooltip(hint(format!(
+                    "{} · {:?} changes",
+                    status.root.display(),
+                    status.scope
+                )))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.repository.open = !this.repository.open;
+                    if this.repository.open {
+                        this.refresh_repository(false);
+                    }
+                    cx.notify();
+                }))
+        });
+        row()
+            .h(px(30.))
+            .flex_shrink_0()
+            .px_3()
+            .border_b_1()
+            .border_color(quiet_border())
+            .children(status)
+            .when(
+                self.repository.status.is_none() && self.repository.error.is_some(),
+                |d| {
                     d.child(
                         button("repo-error", "Git review unavailable · Retry")
                             .text_xs()
@@ -257,36 +287,7 @@ impl ChatsView {
                                 cx.notify();
                             })),
                     )
-                })
-                .into_any_element();
-        };
-        let additions: u64 = status.files.iter().filter_map(|f| f.additions).sum();
-        let deletions: u64 = status.files.iter().filter_map(|f| f.deletions).sum();
-        let label = format!(
-            "⑂ {} · {} files · +{additions} −{deletions}",
-            status.branch,
-            status.files.len()
-        );
-        row()
-            .h(px(30.))
-            .px_3()
-            .border_b_1()
-            .border_color(quiet_border())
-            .child(
-                compact_button("repo-status", label)
-                    .text_xs()
-                    .tooltip(hint(format!(
-                        "{} · {:?} changes",
-                        status.root.display(),
-                        status.scope
-                    )))
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.repository.open = !this.repository.open;
-                        if this.repository.open {
-                            this.refresh_repository(false);
-                        }
-                        cx.notify();
-                    })),
+                },
             )
             .child(div().flex_1())
             .when_some(self.repository.pull_request.clone(), |d, url| {
@@ -296,6 +297,16 @@ impl ChatsView {
                         .on_click(move |_, _, cx| cx.open_url(&url)),
                 )
             })
+            .child(
+                icon_button("pane-menu", "panes")
+                    .size(px(24.))
+                    .when(self.popup.is_none(), |b| {
+                        b.tooltip(hint("Split into panes"))
+                    })
+                    .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                        this.open_context(Popup::Panes, event.position(), window, cx)
+                    })),
+            )
             .into_any_element()
     }
     pub(super) fn render_repository_panel(

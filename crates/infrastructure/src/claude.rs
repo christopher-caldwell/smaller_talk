@@ -1,4 +1,9 @@
-use std::{collections::HashSet, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    collections::{HashSet, VecDeque},
+    path::PathBuf,
+    process::Stdio,
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -11,8 +16,11 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command},
     sync::mpsc,
-    time::timeout,
+    time::{Instant, sleep_until, timeout},
 };
+
+// Long silent tool calls are allowed, but a disconnected backend must leave the queue recoverable.
+const TURN_INACTIVITY_LIMIT: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Clone)]
 pub struct ClaudeAdapter {
@@ -226,8 +234,7 @@ impl ClaudeAdapter {
                 &commands,
             )
             .await?;
-        let mut replay_inputs: std::collections::VecDeque<_> =
-            request.retry_inputs.iter().cloned().collect();
+        let mut replay_inputs: VecDeque<_> = request.retry_inputs.iter().cloned().collect();
         let mut replay_id: Option<String> = None;
         let initial_id = uuid::Uuid::new_v4().to_string();
         write(&mut stdin, &json!({ "uuid": initial_id, "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": request.binding.as_ref().map(|b| &b.native_session_id) })).await?;
@@ -248,10 +255,25 @@ impl ClaudeAdapter {
             }
         });
         let mut bound = false;
+        let mut interactions: VecDeque<(Interaction, Value)> = VecDeque::new();
+        let mut last_progress = Instant::now();
         loop {
             let value = tokio::select! {
                 frame = incoming.recv() => frame.ok_or_else(|| ExecutionError::new("Claude disconnected"))??,
-                command = controls.recv(), if controls_open && pending_steer.is_none() => {
+                response = responses.recv(), if !interactions.is_empty() => {
+                    let response = response.ok_or_else(|| ExecutionError::new("The chat closed while Claude was waiting for an answer"))?;
+                    if interactions.front().is_some_and(|(interaction, _)| interaction.id == response.id) {
+                        let (interaction, request) = interactions.pop_front().expect("matched request");
+                        write_interaction_response(&mut stdin, &request, &interaction, response).await?;
+                        show_next_interaction(&events, &interactions)?;
+                        last_progress = Instant::now();
+                    }
+                    continue;
+                }
+                _ = sleep_until(last_progress + TURN_INACTIVITY_LIMIT), if interactions.is_empty() => {
+                    return Err(ExecutionError::new("Claude stopped sending progress for 10 minutes. Review any partial response before retrying."));
+                }
+                command = controls.recv(), if controls_open && pending_steer.is_none() && interactions.is_empty() => {
                     let Some(command) = command else { controls_open = false; continue; };
                     if !replay_verified { let _ = command.result.send(SteerOutcome::Rejected("This Claude version has not verified input acknowledgements. The message remains queued.".into())); continue; }
                     if let Err(error) = crate::steering::validate(&command.input).await { let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue; }
@@ -265,6 +287,7 @@ impl ClaudeAdapter {
                     continue;
                 }
             };
+            last_progress = Instant::now();
             if value["type"] == "system" && value["subtype"] == "init" {
                 let mode = match value["permissionMode"].as_str() {
                     Some("default" | "manual") => Some(PermissionMode::Supervised),
@@ -356,7 +379,24 @@ impl ClaudeAdapter {
                     }
                 }
                 Some("control_request") => {
-                    handle_interaction(&mut stdin, &value, &events, &mut responses).await?
+                    let interaction = read_interaction(&mut stdin, &value).await?;
+                    interactions.push_back((interaction, value));
+                    if interactions.len() == 1 {
+                        show_next_interaction(&events, &interactions)?;
+                    }
+                }
+                Some("control_cancel_request") => {
+                    let Some(id) = value["request_id"].as_str() else {
+                        continue;
+                    };
+                    let was_visible = interactions
+                        .front()
+                        .is_some_and(|(interaction, _)| interaction.id == id);
+                    interactions.retain(|(interaction, _)| interaction.id != id);
+                    if was_visible {
+                        let _ = events.send(ExecutionEvent::InteractionResolved(id.to_owned()));
+                        show_next_interaction(&events, &interactions)?;
+                    }
                 }
                 Some("result") => {
                     if value["is_error"].as_bool() == Some(true) {
@@ -567,12 +607,10 @@ fn claude_permission_mode(settings: &ExecutionSettings) -> Option<&'static str> 
     }
 }
 
-async fn handle_interaction(
+async fn read_interaction(
     stdin: &mut ChildStdin,
     value: &Value,
-    events: &mpsc::UnboundedSender<ExecutionEvent>,
-    responses: &mut mpsc::UnboundedReceiver<InteractionResponse>,
-) -> Result<(), ExecutionError> {
+) -> Result<Interaction, ExecutionError> {
     let id = value["request_id"]
         .as_str()
         .ok_or_else(|| ExecutionError::new("Claude interaction has no request ID"))?
@@ -602,29 +640,43 @@ async fn handle_interaction(
     if matches!(&kind, InteractionKind::Questions(questions) if questions.is_empty()) {
         return Err(ExecutionError::new("Claude sent an empty question request"));
     }
-    let questions = matches!(kind, InteractionKind::Questions(_));
-    let _ = events.send(ExecutionEvent::Activity(Activity::Waiting));
-    events
-        .send(ExecutionEvent::Interaction(Interaction {
-            id: id.clone(),
-            title: if questions {
-                "A question from Claude".into()
-            } else {
-                format!("Claude requests {tool}")
-            },
-            kind,
-        }))
-        .map_err(|_| {
-            ExecutionError::new("The chat closed before the interaction could be shown")
-        })?;
-    let answer = loop {
-        let answer = responses.recv().await.ok_or_else(|| {
-            ExecutionError::new("The chat closed while Claude was waiting for an answer")
-        })?;
-        if answer.id == id {
-            break answer;
-        }
-    };
+    Ok(Interaction {
+        id,
+        title: if matches!(kind, InteractionKind::Questions(_)) {
+            "A question from Claude".into()
+        } else {
+            format!("Claude requests {tool}")
+        },
+        kind,
+    })
+}
+
+fn show_next_interaction(
+    events: &mpsc::UnboundedSender<ExecutionEvent>,
+    interactions: &VecDeque<(Interaction, Value)>,
+) -> Result<(), ExecutionError> {
+    if let Some((next, _)) = interactions.front() {
+        let _ = events.send(ExecutionEvent::Activity(Activity::Waiting));
+        events
+            .send(ExecutionEvent::Interaction(next.clone()))
+            .map_err(|_| {
+                ExecutionError::new("The chat closed before the interaction could be shown")
+            })?;
+    } else {
+        let _ = events.send(ExecutionEvent::Activity(Activity::Working));
+    }
+    Ok(())
+}
+
+async fn write_interaction_response(
+    stdin: &mut ChildStdin,
+    value: &Value,
+    interaction: &Interaction,
+    answer: InteractionResponse,
+) -> Result<(), ExecutionError> {
+    let input = &value["request"]["input"];
+    let id = &interaction.id;
+    let questions = matches!(interaction.kind, InteractionKind::Questions(_));
     let response = if answer.approved || questions {
         let mut updated = input.clone();
         if questions {
@@ -640,7 +692,6 @@ async fn handle_interaction(
         json!({ "behavior": "deny", "message": "The user declined this request." })
     };
     write(stdin, &json!({ "type": "control_response", "response": { "subtype": "success", "request_id": id, "response": response } })).await?;
-    let _ = events.send(ExecutionEvent::Activity(Activity::Working));
     Ok(())
 }
 

@@ -510,3 +510,52 @@ async fn verify_steering(agent: impl ExecutionAdapter + 'static, request: Execut
     task.await.unwrap().unwrap();
     assert!(submitted && accepted && after);
 }
+
+#[tokio::test]
+async fn claude_reads_completion_and_disconnect_while_a_question_is_unanswered() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = executable(
+        temp.path(),
+        "claude-question-fixture",
+        r##"#!/usr/bin/env python3
+import json,sys
+send=lambda value:print(json.dumps(value),flush=True)
+init=json.loads(sys.stdin.readline())
+send({'type':'control_response','response':{'subtype':'success','request_id':init['request_id'],'response':{}}})
+message=json.loads(sys.stdin.readline())
+send({'type':'control_request','request_id':'question','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','input':{'questions':[{'question':'Which color?'}]}}})
+if 'disconnect' in message['message']['content'][0]['text']:
+ sys.exit(1)
+send({'type':'control_cancel_request','request_id':'question'})
+send({'type':'assistant','message':{'id':'answer','content':[{'type':'text','text':'Continuing without the question'}]}})
+send({'type':'result','is_error':False})
+"##,
+    );
+    let agent = ClaudeAdapter::new(script);
+    for disconnect in [false, true] {
+        let mut input = request(temp.path(), Provider::Claude);
+        if disconnect {
+            input.prompt = "disconnect".into();
+        }
+        let (events, mut stream) = mpsc::unbounded_channel();
+        let (_keep_answer_channel_open, responses) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            agent.execute_interactive(input, events, responses),
+        )
+        .await
+        .expect("an unanswered question must not block Claude's output");
+        assert_eq!(result.is_err(), disconnect);
+        let mut observed = Vec::new();
+        while let Ok(event) = stream.try_recv() {
+            observed.push(event);
+        }
+        assert!(observed.iter().any(|event| matches!(
+            event,
+            ExecutionEvent::Interaction(Interaction { id, .. }) if id == "question"
+        )));
+        if !disconnect {
+            assert!(observed.contains(&ExecutionEvent::InteractionResolved("question".into())));
+        }
+    }
+}

@@ -589,7 +589,18 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
                     run.waiting = true;
                     run.pending_request = Some(interaction.id.clone());
                 }
-                if matches!(event, ConversationEvent::Interaction { .. }) {
+                if let ConversationEvent::InteractionResolved { id, .. } = &event
+                    && let Some(run) = self.running.get_mut(&chat)
+                    && run.pending_request.as_deref() == Some(id.as_str())
+                {
+                    run.waiting = false;
+                    run.pending_request = None;
+                }
+                if matches!(
+                    event,
+                    ConversationEvent::Interaction { .. }
+                        | ConversationEvent::InteractionResolved { .. }
+                ) {
                     self.publish(chat).await?;
                 }
                 let mut queue_changed = false;

@@ -452,6 +452,19 @@ impl ChatsView {
                     .child(selection)
                     .child(permissions),
             )
+            .when_some(
+                self.queues.get(&id).and_then(|queue| queue.active_entry),
+                |controls, entry| {
+                    controls.child(
+                        compact_button("stop-response", "Stop")
+                            .flex_shrink_0()
+                            .tooltip(hint("Stop this response and pause any queued messages"))
+                            .on_click(cx.listener(move |this, _, _, _| {
+                                this.services.queue.stop(id, entry)
+                            })),
+                    )
+                },
+            )
             .child(send);
         self.picker_control(Some(id), "skills-picker", composer.child(controls), cx)
             .w_full()
@@ -468,7 +481,7 @@ impl ChatsView {
         cx: &mut Context<Self>,
     ) -> Option<gpui::AnyElement> {
         let queue = self.queues.get(&chat)?;
-        if queue.entries.is_empty() {
+        if queue.entries.is_empty() && queue.paused.is_none() {
             return None;
         }
         let waiting = self.states.get(&chat).is_some_and(|s| s.pending.is_some());

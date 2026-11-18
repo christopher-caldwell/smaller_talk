@@ -197,7 +197,7 @@ enum UiEvent {
     Renamed(Chat),
     Projects(Vec<Project>),
     Imported(Uuid, Result<Vec<Attachment>, String>),
-    Finished(Uuid, Result<(), String>),
+    Finished(Uuid, Result<(), QueueError>),
     StorageError(String),
     SettingsResult(Uuid, ChatPreferences, Result<(), String>),
     ExecutionPreferences(Uuid, ChatPreferences),
@@ -1090,6 +1090,7 @@ impl ChatsView {
                     self.queues.insert(id, queue);
                 }
                 QueueEvent::Started(id) => {
+                    self.command_notices.remove(&id);
                     if let Some(state) = self.states.get_mut(&id) {
                         state.activity = Some(Activity::Starting);
                         state.error = None;
@@ -1110,10 +1111,7 @@ impl ChatsView {
                     self.apply_conversation(event, cx);
                 }
                 QueueEvent::Finished(id, result) => {
-                    self.apply_event(
-                        UiEvent::Finished(id, result.map_err(|error| error.to_string())),
-                        cx,
-                    );
+                    self.apply_event(UiEvent::Finished(id, result), cx);
                     let services = self.services.clone();
                     let notices = self.sender.clone();
                     self.services.runtime.spawn(async move {
@@ -1425,8 +1423,13 @@ impl ChatsView {
                         clear_approval_text(state, &request_id);
                     }
                     state.pending = None;
-                    if let Err(error) = result {
-                        state.error = Some(error);
+                    if matches!(&result, Err(QueueError::Stopped)) {
+                        state.error = None;
+                        state.submitted = None;
+                        state.retry_of = None;
+                        self.command_notices.insert(id, "Response stopped".into());
+                    } else if let Err(error) = result {
+                        state.error = Some(error.to_string());
                         if state.composer.read(cx).content().is_empty()
                             && state.attachments.is_empty()
                             && let Some(draft) = state.submitted.take()

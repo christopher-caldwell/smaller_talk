@@ -39,6 +39,7 @@ impl QueueQueries for SqliteChatStore {
             })
             .collect::<Result<_, PersistenceError>>()?;
         Ok(MessageQueue {
+            active_entry: None,
             entries,
             paused,
             steer_available: false,

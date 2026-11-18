@@ -269,7 +269,7 @@ impl ClaudeAdapter {
                         if let Some(answer) = transcript_answer {
                             let _ = events.send(ExecutionEvent::QuestionAnswered(answer));
                         }
-                        show_next_interaction(&events, &interactions)?;
+                        crate::approvals::show_interaction(&events, interactions.front().map(|(request, _)| request))?;
                         last_progress = Instant::now();
                     }
                     continue;
@@ -386,7 +386,10 @@ impl ClaudeAdapter {
                     let interaction = read_interaction(&mut stdin, &value).await?;
                     interactions.push_back((interaction, value));
                     if interactions.len() == 1 {
-                        show_next_interaction(&events, &interactions)?;
+                        crate::approvals::show_interaction(
+                            &events,
+                            interactions.front().map(|(request, _)| request),
+                        )?;
                     }
                 }
                 Some("control_cancel_request") => {
@@ -399,7 +402,10 @@ impl ClaudeAdapter {
                     interactions.retain(|(interaction, _)| interaction.id != id);
                     if was_visible {
                         let _ = events.send(ExecutionEvent::InteractionResolved(id.to_owned()));
-                        show_next_interaction(&events, &interactions)?;
+                        crate::approvals::show_interaction(
+                            &events,
+                            interactions.front().map(|(request, _)| request),
+                        )?;
                     }
                 }
                 Some("result") => {
@@ -653,23 +659,6 @@ async fn read_interaction(
         },
         kind,
     })
-}
-
-fn show_next_interaction(
-    events: &mpsc::UnboundedSender<ExecutionEvent>,
-    interactions: &VecDeque<(Interaction, Value)>,
-) -> Result<(), ExecutionError> {
-    if let Some((next, _)) = interactions.front() {
-        let _ = events.send(ExecutionEvent::Activity(Activity::Waiting));
-        events
-            .send(ExecutionEvent::Interaction(next.clone()))
-            .map_err(|_| {
-                ExecutionError::new("The chat closed before the interaction could be shown")
-            })?;
-    } else {
-        let _ = events.send(ExecutionEvent::Activity(Activity::Working));
-    }
-    Ok(())
 }
 
 async fn write_interaction_response(

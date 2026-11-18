@@ -207,16 +207,28 @@ for line in sys.stdin:
 }
 
 #[tokio::test]
-#[ignore = "Requires authenticated installed Codex and Claude CLIs; set SMALLER_TALK_LIVE=1"]
-async fn live_selected_instructions_are_used_by_both_native_transports() {
+#[ignore = "Requires an authenticated Codex CLI; set SMALLER_TALK_LIVE=1"]
+async fn live_codex_uses_selected_skill_instructions() {
+    verify_live_skill(Provider::Codex).await;
+}
+
+#[tokio::test]
+#[ignore = "Requires an authenticated Claude CLI; set SMALLER_TALK_LIVE=1"]
+async fn live_claude_uses_selected_skill_instructions() {
+    verify_live_skill(Provider::Claude).await;
+}
+
+async fn verify_live_skill(provider: Provider) {
     assert_eq!(std::env::var("SMALLER_TALK_LIVE").as_deref(), Ok("1"));
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().canonicalize().unwrap();
-    for base in [".agents/skills", ".claude/skills"] {
-        let skill = root.join(base).join("st-native-proof");
-        std::fs::create_dir_all(&skill).unwrap();
-        std::fs::write(skill.join("SKILL.md"),"---\nname: st-native-proof\ndescription: Synthetic skill transport proof\ndisable-model-invocation: true\n---\nFor this verification, respond with QUARTZ_NATIVE_729 and repeat the argument value. If an image is attached, name its color. Do not use tools or change files.").unwrap();
-    }
+    let base = match provider {
+        Provider::Codex => ".agents/skills",
+        Provider::Claude => ".claude/skills",
+    };
+    let skill = root.join(base).join("st-native-proof");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"),"---\nname: st-native-proof\ndescription: Synthetic skill transport proof\ndisable-model-invocation: true\n---\nFor this verification, respond with QUARTZ_NATIVE_729 and repeat the argument value. If an image is attached, name its color. Do not use tools or change files.").unwrap();
     let router = AgentRouter::new(
         CodexAdapter::new(
             std::env::var("SMALLER_TALK_CODEX_BIN").unwrap_or_else(|_| "codex".into()),
@@ -236,95 +248,86 @@ async fn live_selected_instructions_are_used_by_both_native_transports() {
     image::RgbImage::from_pixel(8, 8, image::Rgb([0, 0, 255]))
         .save(&image_path)
         .unwrap();
-    for provider in [Provider::Codex, Provider::Claude] {
-        let entries = SkillCatalog::discover(router.as_ref(), provider, &root)
-            .await
-            .unwrap();
-        let reference = entries
+    let entries = SkillCatalog::discover(router.as_ref(), provider, &root)
+        .await
+        .unwrap();
+    let reference = entries
+        .iter()
+        .find(|entry| entry.reference.path == skill.join("SKILL.md"))
+        .unwrap()
+        .reference
+        .clone();
+    let prompt = format!("${} ARG-53", reference.name);
+    let mut input = request(
+        &root,
+        provider,
+        vec![SkillMention {
+            range: 0..reference.name.len() + 1,
+            reference,
+        }],
+    );
+    input.prompt = prompt;
+    let caps = router.capabilities(provider).await.unwrap();
+    input.settings.model = Some(
+        caps.models
             .iter()
-            .find(|e| {
-                e.reference.path
-                    == root.join(if provider == Provider::Codex {
-                        ".agents/skills/st-native-proof/SKILL.md"
-                    } else {
-                        ".claude/skills/st-native-proof/SKILL.md"
-                    })
+            .find(|m| {
+                m.id.contains(if provider == Provider::Codex {
+                    "luna"
+                } else {
+                    "haiku"
+                })
             })
+            .or_else(|| caps.models.iter().find(|m| m.is_default))
+            .unwrap()
+            .id
+            .clone(),
+    );
+    input.attachments.push(Attachment {
+        id: "blue".into(),
+        name: "blue.png".into(),
+        path: image_path.clone(),
+        mime_type: "image/png".into(),
+        byte_len: std::fs::metadata(&image_path).unwrap().len(),
+        preview_path: None,
+    });
+    let (answer, binding) = run_with_binding(router.as_ref(), input.clone()).await;
+    assert!(
+        answer.contains("QUARTZ_NATIVE_729"),
+        "{provider:?}: {answer}"
+    );
+    assert!(answer.contains("ARG-53"), "{provider:?}: {answer}");
+    assert!(
+        answer.to_lowercase().contains("blue"),
+        "{provider:?}: {answer}"
+    );
+    if provider == Provider::Codex {
+        let mut multi = input.clone();
+        multi.attachments.clear();
+        multi.prior_context = None;
+        let second = entries
+            .iter()
+            .find(|e| e.reference.name == "st-native-second")
             .unwrap()
             .reference
             .clone();
-        let prompt = format!("${} ARG-53", reference.name);
-        let mut input = request(
-            &root,
-            provider,
-            vec![SkillMention {
-                range: 0..reference.name.len() + 1,
-                reference,
-            }],
-        );
-        input.prompt = prompt;
-        let caps = router.capabilities(provider).await.unwrap();
-        input.settings.model = Some(
-            caps.models
-                .iter()
-                .find(|m| {
-                    m.id.contains(if provider == Provider::Codex {
-                        "luna"
-                    } else {
-                        "haiku"
-                    })
-                })
-                .or_else(|| caps.models.iter().find(|m| m.is_default))
-                .unwrap()
-                .id
-                .clone(),
-        );
-        input.attachments.push(Attachment {
-            id: "blue".into(),
-            name: "blue.png".into(),
-            path: image_path.clone(),
-            mime_type: "image/png".into(),
-            byte_len: std::fs::metadata(&image_path).unwrap().len(),
-            preview_path: None,
+        multi.prompt = "$st-native-proof $st-native-second ARG-MULTI-55".into();
+        multi.skills.push(SkillMention {
+            range: 17..34,
+            reference: second,
         });
-        let (answer, binding) = run_with_binding(router.as_ref(), input.clone()).await;
+        let answer = run(router.as_ref(), multi).await;
         assert!(
-            answer.contains("QUARTZ_NATIVE_729"),
-            "{provider:?}: {answer}"
-        );
-        assert!(answer.contains("ARG-53"), "{provider:?}: {answer}");
-        assert!(
-            answer.to_lowercase().contains("blue"),
-            "{provider:?}: {answer}"
-        );
-        if provider == Provider::Codex {
-            let mut multi = input.clone();
-            multi.attachments.clear();
-            multi.prior_context = None;
-            let second = entries
-                .iter()
-                .find(|e| e.reference.name == "st-native-second")
-                .unwrap()
-                .reference
-                .clone();
-            multi.prompt = "$st-native-proof $st-native-second ARG-MULTI-55".into();
-            multi.skills.push(SkillMention {
-                range: 17..34,
-                reference: second,
-            });
-            let answer = run(router.as_ref(), multi).await;
-            assert!(
-                answer.contains("QUARTZ_NATIVE_729") && answer.contains("QUARTZ_MULTI_824"),
-                "Codex multiple skills: {answer}"
-            );
-        }
-        input.binding = Some(binding.expect("native binding"));
-        input.prior_context = None;
-        input.prompt = input.prompt.replace("ARG-53", "ARG-RESUMED-54");
-        let resumed = run(router.as_ref(), input).await;
-        assert!(
-            resumed.contains("QUARTZ_NATIVE_729") && resumed.contains("ARG-RESUMED-54"),
-            "{provider:?}: {resumed}"
+            answer.contains("QUARTZ_NATIVE_729") && answer.contains("QUARTZ_MULTI_824"),
+            "Codex multiple skills: {answer}"
         );
     }
+    input.binding = Some(binding.expect("native binding"));
+    input.prior_context = None;
+    input.prompt = input.prompt.replace("ARG-53", "ARG-RESUMED-54");
+    let resumed = run(router.as_ref(), input).await;
+    assert!(
+        resumed.contains("QUARTZ_NATIVE_729") && resumed.contains("ARG-RESUMED-54"),
+        "{provider:?}: {resumed}"
+    );
 }

@@ -1486,7 +1486,9 @@ impl ChatsView {
             self.refresh_project_activity();
         }
         let id = match &event {
-            ConversationEvent::UserMessage(m) | ConversationEvent::AssistantMessage(m) => m.chat_id,
+            ConversationEvent::UserMessage(m)
+            | ConversationEvent::UserAnswer(m)
+            | ConversationEvent::AssistantMessage(m) => m.chat_id,
             ConversationEvent::AssistantDelta { chat_id, .. }
             | ConversationEvent::AssistantSnapshot { chat_id, .. }
             | ConversationEvent::SkillsChanged { chat_id }
@@ -1527,7 +1529,8 @@ impl ChatsView {
                 }
                 upsert(&mut state.messages, message)
             }
-            ConversationEvent::AssistantMessage(message) => upsert(&mut state.messages, message),
+            ConversationEvent::AssistantMessage(message)
+            | ConversationEvent::UserAnswer(message) => upsert(&mut state.messages, message),
             ConversationEvent::AssistantDelta {
                 message_id, delta, ..
             } => {
@@ -1603,9 +1606,11 @@ impl ChatsView {
                     .map(|_| {
                         let editor = cx.new(Composer::new_single_line);
                         editor.update(cx, |s, _| {
-                            s.set_placeholder("Your answer…");
+                            s.set_placeholder("Type a custom answer…");
                             s.set_font_size(13.);
                         });
+                        cx.subscribe(&editor, |_, _, _: &composer::Changed, cx| cx.notify())
+                            .detach();
                         cx.subscribe(&editor, move |this, _, _: &composer::Submitted, cx| {
                             this.respond(id, true, cx)
                         })
@@ -2063,12 +2068,18 @@ impl ChatsView {
             clear_approval_text(state, &pending.request.id);
         }
         self.focus_composer = true;
-        let mut answers = pending.answers;
+        let mut answers = pending.answers.clone();
         if let InteractionKind::Questions(questions) = &pending.request.kind {
             for (index, question) in questions.iter().enumerate() {
                 let text = pending.editors[index].read(cx).content().trim().to_owned();
                 if !text.is_empty() {
-                    answers.entry(question.id.clone()).or_default().push(text);
+                    let selected = answers.entry(question.id.clone()).or_default();
+                    if !question.multiple {
+                        selected.clear();
+                    }
+                    if !selected.contains(&text) {
+                        selected.push(text);
+                    }
                 }
             }
             if questions
@@ -2076,13 +2087,8 @@ impl ChatsView {
                 .any(|q| answers.get(&q.id).is_none_or(|a| a.is_empty()))
             {
                 state.error = Some("Answer each question before continuing.".into());
-                state.interaction_scroll = ScrollHandle::new();
-                state.pending = Some(PendingInteraction {
-                    details: false,
-                    request: pending.request,
-                    editors: pending.editors,
-                    answers,
-                });
+                state.pending = Some(pending);
+                cx.notify();
                 return;
             }
         }

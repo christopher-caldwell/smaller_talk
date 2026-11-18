@@ -353,10 +353,7 @@ impl CodexAdapter {
                     } else if value.pointer("/result/turnId").and_then(Value::as_str)
                         == native_turn.as_deref()
                     {
-                        for (id, text) in &text_items {
-                            *offsets.entry(id.clone()).or_default() += text.len();
-                        }
-                        text_items.clear();
+                        close_text_segment(&mut text_items, &mut offsets);
                         let _ = events.send(ExecutionEvent::InputAccepted(command.input));
                         let _ = command.result.send(SteerOutcome::Accepted);
                     } else {
@@ -368,7 +365,13 @@ impl CodexAdapter {
                 continue;
             }
             if value.get("method").is_some() && value.get("id").is_some() {
-                handle_interaction(&mut stdin, &value, &events, &mut responses).await?;
+                if let Some(answer) =
+                    handle_interaction(&mut stdin, &value, &events, &mut responses).await?
+                {
+                    close_text_segment(&mut text_items, &mut offsets);
+                    final_text = None;
+                    let _ = events.send(ExecutionEvent::QuestionAnswered(answer));
+                }
                 continue;
             }
             if value.get("id") == Some(&json!(3)) && value.get("error").is_some() {
@@ -722,12 +725,21 @@ async fn handle_server_request(
     )))
 }
 
+fn close_text_segment(
+    text_items: &mut Vec<(String, String)>,
+    offsets: &mut std::collections::HashMap<String, usize>,
+) {
+    for (id, text) in text_items.drain(..) {
+        *offsets.entry(id).or_default() += text.len();
+    }
+}
+
 async fn handle_interaction(
     stdin: &mut ChildStdin,
     request: &Value,
     events: &mpsc::UnboundedSender<ExecutionEvent>,
     responses: &mut mpsc::UnboundedReceiver<InteractionResponse>,
-) -> Result<(), ExecutionError> {
+) -> Result<Option<String>, ExecutionError> {
     let method = request["method"].as_str().unwrap_or_default();
     let params = &request["params"];
     let id = request["id"].to_string();
@@ -755,17 +767,18 @@ async fn handle_interaction(
         return Err(ExecutionError::new("Codex sent an empty question request"));
     }
     let _ = events.send(ExecutionEvent::Activity(Activity::Waiting));
+    let interaction = Interaction {
+        id: id.clone(),
+        title: if matches!(kind, InteractionKind::Questions(_)) {
+            "A question from Codex"
+        } else {
+            "Codex needs approval"
+        }
+        .into(),
+        kind,
+    };
     events
-        .send(ExecutionEvent::Interaction(Interaction {
-            id: id.clone(),
-            title: if matches!(kind, InteractionKind::Questions(_)) {
-                "A question from Codex"
-            } else {
-                "Codex needs approval"
-            }
-            .into(),
-            kind,
-        }))
+        .send(ExecutionEvent::Interaction(interaction.clone()))
         .map_err(|_| {
             ExecutionError::new("The chat closed before the interaction could be shown")
         })?;
@@ -777,6 +790,7 @@ async fn handle_interaction(
             break answer;
         }
     };
+    let transcript_answer = interaction.answered_questions(&answer);
     let result = match method {
         "item/tool/requestUserInput" => {
             let answers: serde_json::Map<String, Value> = answer
@@ -796,7 +810,7 @@ async fn handle_interaction(
     };
     write_message(stdin, &json!({ "id": request["id"], "result": result })).await?;
     let _ = events.send(ExecutionEvent::Activity(Activity::Working));
-    Ok(())
+    Ok(transcript_answer)
 }
 
 pub(crate) fn parse_questions(value: &Value) -> Vec<Question> {
@@ -828,6 +842,7 @@ pub(crate) fn parse_questions(value: &Value) -> Vec<Question> {
                 })
                 .collect(),
             multiple: q["multiSelect"].as_bool().unwrap_or(false),
+            secret: q["isSecret"].as_bool().unwrap_or(false),
         })
         .collect()
 }

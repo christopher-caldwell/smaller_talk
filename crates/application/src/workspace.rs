@@ -59,16 +59,16 @@ pub trait WorkspaceWrites: Send + Sync {
 }
 
 #[async_trait]
-pub trait SteeredInputWrites: Send + Sync {
-    /// Persist the assistant segment and accepted steering input as one atomic
-    /// local mutation, including its attachments and turn association.
-    async fn persist_steered_input(
+pub trait AcceptedInputWrites: Send + Sync {
+    /// Persist the assistant segment and accepted user input as one atomic mutation.
+    /// A steering turn associates a message with the turn for replay on retry.
+    async fn persist_accepted_input(
         &self,
         assistant: Option<crate::NewMessage>,
         user: crate::NewMessage,
         attachments: &[Attachment],
         skills: &[SkillMention],
-        turn: Uuid,
+        steering_turn: Option<Uuid>,
     ) -> Result<(Option<Message>, Message), PersistenceError>;
 }
 

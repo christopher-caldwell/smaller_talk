@@ -110,7 +110,7 @@ async fn initial_and_steered_metadata_are_atomic_durable_and_chat_scoped() {
     };
     let bad = Uuid::new_v4();
     assert!(
-        db.persist_steered_input(None, user(bad), &[], &draft.skills, Uuid::new_v4())
+        db.persist_accepted_input(None, user(bad), &[], &draft.skills, Some(Uuid::new_v4()))
             .await
             .is_err()
     );
@@ -123,7 +123,7 @@ async fn initial_and_steered_metadata_are_atomic_durable_and_chat_scoped() {
     );
     assert!(db.message_skills(chat, bad).await.unwrap().is_empty());
     let accepted = Uuid::new_v4();
-    db.persist_steered_input(None, user(accepted), &[], &draft.skills, turn_id)
+    db.persist_accepted_input(None, user(accepted), &[], &draft.skills, Some(turn_id))
         .await
         .unwrap();
     db.recover_interrupted_turns().await.unwrap();

@@ -106,8 +106,8 @@ for line in sys.stdin:
   assert 'Saved visible context' in p['input'][0]['text']
   send({'id':r['id'],'result':{'turn':{'id':'turn'}}})
   send({'method':'item/reasoning/summaryTextDelta','params':{'delta':'Thinking'}})
-  send({'id':'q','method':'item/tool/requestUserInput','params':{'questions':[{'id':'color','question':'Which color?','options':[{'label':'Blue'}]}]}})
-  a=read();assert a['id']=='q';assert a['result']['answers']['color']['answers']==['Blue']
+  send({'id':'q','method':'item/tool/requestUserInput','params':{'questions':[{'id':'color','question':'Which color?','options':[{'label':'Blue'}]},{'id':'private','question':'Private value?','isSecret':True}]}})
+  a=read();assert a['id']=='q';assert a['result']['answers']['color']['answers']==['Blue'];assert a['result']['answers']['private']['answers']==['Blue']
   send({'id':'approve','method':'item/commandExecution/requestApproval','params':{'command':'read a file'}})
   a=read();assert a['result']['decision']=='accept'
   send({'method':'item/agentMessage/delta','params':{'threadId':'native-codex','delta':'Answered Blue'}})
@@ -128,6 +128,9 @@ for line in sys.stdin:
     );
     assert!(events.contains(&ExecutionEvent::Activity(Activity::Thinking)));
     assert!(events.contains(&ExecutionEvent::TextDelta("Answered Blue".into())));
+    assert!(events.contains(&ExecutionEvent::QuestionAnswered(
+        "Blue\n\n[Private answer]".into()
+    )));
 }
 
 #[tokio::test]
@@ -222,6 +225,7 @@ for line in sys.stdin:
         })
         .collect();
     assert_eq!(output, "Answered Blue");
+    assert!(events.contains(&ExecutionEvent::QuestionAnswered("Blue".into())));
     assert!(events.contains(&ExecutionEvent::Activity(Activity::Thinking)));
     assert!(events.iter().any(|e| matches!(
         e,

@@ -1097,6 +1097,13 @@ impl ChatsView {
                     }
                 }
                 QueueEvent::Conversation(event) => {
+                    if let ConversationEvent::CatalogUpdated {
+                        catalog, revision, ..
+                    } = &event
+                        && self.services.skills.revision(catalog.provider) == *revision
+                    {
+                        self.catalogs.insert(catalog.provider, Ok(catalog.clone()));
+                    }
                     if let ConversationEvent::UserMessage(message) = &event
                         && let Some(entry) = self
                             .queues
@@ -1492,6 +1499,7 @@ impl ChatsView {
             ConversationEvent::AssistantDelta { chat_id, .. }
             | ConversationEvent::AssistantSnapshot { chat_id, .. }
             | ConversationEvent::SkillsChanged { chat_id }
+            | ConversationEvent::CatalogUpdated { chat_id, .. }
             | ConversationEvent::SteeringAvailable { chat_id, .. }
             | ConversationEvent::Permissions { chat_id, .. }
             | ConversationEvent::Activity { chat_id, .. }
@@ -1507,6 +1515,7 @@ impl ChatsView {
         let draft_changed = matches!(&event, ConversationEvent::UserMessage(_));
         let changed = match event {
             ConversationEvent::SkillsChanged { .. }
+            | ConversationEvent::CatalogUpdated { .. }
             | ConversationEvent::SteeringAvailable { .. }
             | ConversationEvent::FinalAnswer { .. } => {
                 return;

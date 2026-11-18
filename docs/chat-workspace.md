@@ -31,6 +31,10 @@ GPUI Kit 0.8.0 supplies the unstyled `Textarea` for the composer and instruction
 
 Switching provider or effective working folder creates a fresh native session containing the saved visible conversation and attachment references. Subsequent turns resume that session. Hidden reasoning and provider-specific tool state are not transferred. Failed retries reuse the persisted user message; partial responses remain saved. Oversized or missing context fails visibly rather than being silently omitted.
 
+Smaller Talk keeps the most recently used Claude process available for up to two idle minutes so the next turn can use its existing MCP connections. A change to the working folder, instructions, model, effort, permissions, or attachment directories starts a new process. Processes older than 15 minutes are restarted on the next turn so Claude can reload workspace instructions, skills, and the installed CLI. Returning to Provider default still starts a fresh native session. Compaction stops the warm process before opening the same underlying session.
+
+Claude's model list comes from turn startup when available. Initial discovery and an explicit provider refresh can start a separate process. Regular sends reuse the last catalog, including after five idle minutes.
+
 Attachments are copied into app-managed storage; source files remain untouched. A message accepts at most 100 files, 10 MiB per image, 80 MiB total images, and 50 MiB per other file. Transferred image context counts toward the same limits. Provider limits still apply. Thumbnails have bounded dimensions and decoding allocation; their GPU caches belong to mounted thumbnail elements. Unreferenced app-owned files are collected at startup.
 
 SQLite stores projects, settings, drafts, attachment references, turn settings/status, and restored UI state. Startup marks incomplete turns as interrupted. Transcript rows use GPUI’s variable-height list, with cached measurements and bounded Markdown/text-view caches. Closing an inactive tab clears its heavy view caches; closing a responding tab keeps its execution alive and clears those caches when it finishes.

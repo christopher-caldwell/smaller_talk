@@ -158,7 +158,7 @@ impl RichText {
         );
         cx.spawn(async move |_, cx| {
             if let Ok(action) = action.await {
-                let _ = cx.update(|cx| match action {
+                cx.update(|cx| match action {
                     0 => cx.write_to_clipboard(ClipboardItem::new_string(display)),
                     1 => {
                         if let Ok(url) = Url::from_file_path(path) {
@@ -270,19 +270,19 @@ impl Render for RichText {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(move |this, event: &gpui::MouseUpEvent, window, cx| {
-                    if this.selection.dragging && this.selection.range().is_empty() {
-                        if let Ok(byte) = up_layout.index_for_position(event.position)
-                            && let Some((_, target)) =
-                                this.links.iter().find(|(r, _)| r.contains(&byte))
+                    if this.selection.dragging
+                        && this.selection.range().is_empty()
+                        && let Ok(byte) = up_layout.index_for_position(event.position)
+                        && let Some((_, target)) =
+                            this.links.iter().find(|(r, _)| r.contains(&byte))
+                    {
+                        if target.starts_with("https://")
+                            || target.starts_with("http://")
+                            || target.starts_with("mailto:")
                         {
-                            if target.starts_with("https://")
-                                || target.starts_with("http://")
-                                || target.starts_with("mailto:")
-                            {
-                                cx.open_url(target);
-                            } else {
-                                this.show_file_link(target, window, cx);
-                            }
+                            cx.open_url(target);
+                        } else {
+                            this.show_file_link(target, window, cx);
                         }
                     }
                     this.selection.dragging = false;

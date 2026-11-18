@@ -176,6 +176,10 @@ impl ExecutionRequest {
 pub enum ExecutionEvent {
     Permissions(PermissionMode),
     SkillsChanged,
+    CatalogUpdated {
+        catalog: ProviderCapabilities,
+        revision: u64,
+    },
     BindingEstablished(ExecutionBinding),
     InputAccepted(SteerInput),
     QuestionAnswered(String),
@@ -281,6 +285,11 @@ pub enum ConversationEvent {
     },
     SkillsChanged {
         chat_id: Uuid,
+    },
+    CatalogUpdated {
+        chat_id: Uuid,
+        catalog: ProviderCapabilities,
+        revision: u64,
     },
     SteeringAvailable {
         chat_id: Uuid,
@@ -1059,6 +1068,13 @@ impl ConversationService {
                 ExecutionEvent::SteeringAvailable(available) => {
                     let _ =
                         output.send(ConversationEvent::SteeringAvailable { chat_id, available });
+                }
+                ExecutionEvent::CatalogUpdated { catalog, revision } => {
+                    let _ = output.send(ConversationEvent::CatalogUpdated {
+                        chat_id,
+                        catalog,
+                        revision,
+                    });
                 }
                 ExecutionEvent::SkillsChanged => {
                     if let Some((skills, _)) = &self.skills {

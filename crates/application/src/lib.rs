@@ -184,6 +184,7 @@ pub enum ExecutionEvent {
     FinalAnswerText(String),
     Activity(Activity),
     Interaction(Interaction),
+    InteractionResolved(String),
 }
 
 #[derive(Debug, Error)]
@@ -307,6 +308,10 @@ pub enum ConversationEvent {
     Interaction {
         chat_id: Uuid,
         interaction: Interaction,
+    },
+    InteractionResolved {
+        chat_id: Uuid,
+        id: String,
     },
 }
 
@@ -1106,6 +1111,9 @@ impl ConversationService {
                 }
                 ExecutionEvent::Activity(activity) => {
                     let _ = output.send(ConversationEvent::Activity { chat_id, activity });
+                }
+                ExecutionEvent::InteractionResolved(id) => {
+                    let _ = output.send(ConversationEvent::InteractionResolved { chat_id, id });
                 }
                 ExecutionEvent::Interaction(interaction) => {
                     let _ = output.send(ConversationEvent::Interaction {

@@ -1491,7 +1491,8 @@ impl ChatsView {
             | ConversationEvent::Permissions { chat_id, .. }
             | ConversationEvent::Activity { chat_id, .. }
             | ConversationEvent::FinalAnswer { chat_id, .. }
-            | ConversationEvent::Interaction { chat_id, .. } => *chat_id,
+            | ConversationEvent::Interaction { chat_id, .. }
+            | ConversationEvent::InteractionResolved { chat_id, .. } => *chat_id,
         };
         let Some(state) = self.states.get_mut(&id) else {
             return;
@@ -1563,7 +1564,24 @@ impl ChatsView {
                 return;
             }
             ConversationEvent::Activity { activity, .. } => {
-                state.activity = Some(activity);
+                state.activity = Some(if state.pending.is_some() {
+                    Activity::Waiting
+                } else {
+                    activity
+                });
+                return;
+            }
+            ConversationEvent::InteractionResolved { id, .. } => {
+                if state
+                    .pending
+                    .as_ref()
+                    .is_some_and(|pending| pending.request.id == id)
+                {
+                    state.pending = None;
+                    state.activity = Some(Activity::Working);
+                    clear_approval_text(state, &id);
+                    self.focus_composer = true;
+                }
                 return;
             }
             ConversationEvent::Interaction { interaction, .. } => {

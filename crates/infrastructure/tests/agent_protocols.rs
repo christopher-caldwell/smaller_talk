@@ -106,8 +106,8 @@ for line in sys.stdin:
   assert 'Saved visible context' in p['input'][0]['text']
   send({'id':r['id'],'result':{'turn':{'id':'turn'}}})
   send({'method':'item/reasoning/summaryTextDelta','params':{'delta':'Thinking'}})
-  send({'id':'q','method':'item/tool/requestUserInput','params':{'questions':[{'id':'color','question':'Which color?','options':[{'label':'Blue'}]},{'id':'private','question':'Private value?','isSecret':True}]}})
-  a=read();assert a['id']=='q';assert a['result']['answers']['color']['answers']==['Blue'];assert a['result']['answers']['private']['answers']==['Blue']
+  send({'id':4,'method':'item/tool/requestUserInput','params':{'questions':[{'id':'color','question':'Which color?','options':[{'label':'Blue'}]},{'id':'private','question':'Private value?','isSecret':True}]}})
+  a=read();assert a['id']==4;assert a['result']['answers']['color']['answers']==['Blue'];assert a['result']['answers']['private']['answers']==['Blue']
   send({'id':'approve','method':'item/commandExecution/requestApproval','params':{'command':'read a file'}})
   a=read();assert a['result']['decision']=='accept'
   send({'method':'item/agentMessage/delta','params':{'threadId':'native-codex','delta':'Answered Blue'}})
@@ -560,6 +560,84 @@ send({'type':'result','is_error':False})
         )));
         if !disconnect {
             assert!(observed.contains(&ExecutionEvent::InteractionResolved("question".into())));
+        }
+    }
+}
+
+#[tokio::test]
+async fn codex_reconciles_a_prose_question_and_an_unanswered_native_request() {
+    let temp = tempfile::tempdir().unwrap();
+    let script = executable(
+        temp.path(),
+        "codex-plan-recovery",
+        r##"#!/usr/bin/env python3
+import json,sys
+send=lambda value:print(json.dumps(value),flush=True)
+thread='planning-thread'; turn='planning-turn'; halted=False
+def notify(method, params):
+ send({'method':method,'params':{'threadId':thread,**params}})
+for line in sys.stdin:
+ r=json.loads(line);m=r.get('method')
+ if m=='initialize':
+  send({'id':r['id'],'result':{}})
+ elif m=='thread/start':
+  send({'id':r['id'],'result':{'thread':{'id':thread}}})
+  notify('thread/status/changed', {'status':{'type':'idle'}})
+ elif m=='turn/start':
+  halted='native card' in r['params']['input'][0]['text']
+  send({'id':r['id'],'result':{'turn':{'id':turn}}})
+  notify('turn/started',{'turn':{'id':turn,'status':'inProgress'}})
+  notify('item/agentMessage/delta',{'itemId':'answer','turnId':turn,'delta':'Which color works?'})
+  if halted:
+   send({'id':4,'method':'item/tool/requestUserInput','params':{'threadId':thread,'turnId':turn,'questions':[{'id':'old','question':'Old question?'}]}})
+   send({'id':5,'method':'item/tool/requestUserInput','params':{'threadId':thread,'turnId':turn,'questions':[{'id':'new','question':'New question?'}]}})
+   notify('serverRequest/resolved',{'requestId':4})
+  notify('turn/completed',{'turn':{'id':'different-turn','status':'interrupted'}})
+  notify('thread/status/changed',{'status':{'type':'idle'}})
+ elif m=='thread/turns/list':
+  assert r['params']['limit']==1 and r['params']['itemsView']=='notLoaded'
+  send({'id':r['id'],'result':{'data':[{'id':turn,'status':'interrupted' if halted else 'completed'}]}})
+"##,
+    );
+    let agent = CodexAdapter::new(script);
+    for halted in [false, true] {
+        let mut input = request(temp.path(), Provider::Codex);
+        input.prompt = if halted {
+            "native card"
+        } else {
+            "prose question"
+        }
+        .into();
+        let (events, mut stream) = mpsc::unbounded_channel();
+        let (_keep_channel_open, responses) = mpsc::unbounded_channel();
+        let result = tokio::time::timeout(
+            Duration::from_secs(8),
+            agent.execute_interactive(input, events, responses),
+        )
+        .await
+        .expect("the provider's idle status must resolve the planning turn");
+        if halted {
+            assert!(result.unwrap_err().to_string().contains("interrupted"));
+        } else {
+            result.unwrap();
+        }
+        let mut observed = Vec::new();
+        while let Ok(event) = stream.try_recv() {
+            observed.push(event);
+        }
+        assert!(observed.contains(&ExecutionEvent::TextDelta("Which color works?".into())));
+        let cards = observed
+            .iter()
+            .filter_map(|event| match event {
+                ExecutionEvent::Interaction(request) => Some(request.id.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if halted {
+            assert_eq!(cards, ["4", "5"]);
+            assert!(observed.contains(&ExecutionEvent::InteractionResolved("4".into())));
+        } else {
+            assert!(cards.is_empty());
         }
     }
 }

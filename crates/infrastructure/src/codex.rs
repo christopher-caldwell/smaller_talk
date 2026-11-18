@@ -1,4 +1,4 @@
-use std::{path::PathBuf, process::Stdio, time::Duration};
+use std::{collections::VecDeque, path::PathBuf, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -10,13 +10,18 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
     process::{ChildStdin, ChildStdout, Command},
     sync::mpsc,
-    time::timeout,
+    time::{Instant, sleep_until, timeout},
 };
 
 const ADAPTER_KEY: &str = "codex";
 const CLIENT_NAME: &str = "smaller_talk";
 const CLIENT_TITLE: &str = "Smaller Talk";
 const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const TURN_INACTIVITY_LIMIT: Duration = Duration::from_secs(10 * 60);
+const TERMINAL_NOTIFICATION_GRACE: Duration = Duration::from_secs(2);
+const TURN_STATUS_TIMEOUT: Duration = Duration::from_secs(5);
+const TURN_STATUS_REQUEST: u64 = 5;
 
 struct CodexPermissions {
     approval: &'static str,
@@ -314,10 +319,42 @@ impl CodexAdapter {
         let mut turn_response_received = false;
         let mut turn_completed = false;
         let mut final_text = None;
+        let mut interactions: VecDeque<(Interaction, Value)> = VecDeque::new();
+        let mut last_progress = Instant::now();
+        let mut verified_active = false;
+        let mut reconcile_at = None;
+        let mut status_requested = false;
         while !turn_completed {
             let value = tokio::select! {
                 frame = incoming.recv() => frame.ok_or_else(|| ExecutionError::new("Codex disconnected"))??,
-                command = controls.recv(), if controls_open && pending_steer.is_none() => {
+                response = responses.recv(), if !interactions.is_empty() => {
+                    let response = response.ok_or_else(|| ExecutionError::new("The chat closed while Codex was waiting for an answer"))?;
+                    if interactions.front().is_some_and(|(interaction, _)| interaction.id == response.id) {
+                        let (interaction, request) = interactions.pop_front().expect("matched request");
+                        if let Some(answer) = write_interaction_response(&mut stdin, &request, &interaction, response).await? {
+                            close_text_segment(&mut text_items, &mut offsets);
+                            final_text = None;
+                            let _ = events.send(ExecutionEvent::QuestionAnswered(answer));
+                        }
+                        crate::approvals::show_interaction(&events, interactions.front().map(|(request, _)| request))?;
+                        last_progress = Instant::now();
+                    }
+                    continue;
+                }
+                _ = sleep_until(reconcile_at.unwrap_or(last_progress)), if reconcile_at.is_some() => {
+                    if status_requested {
+                        return Err(ExecutionError::new("Codex went idle and did not confirm the turn status. Review the conversation before retrying."));
+                    }
+                    send_request(&mut stdin, TURN_STATUS_REQUEST, "thread/turns/list",
+                        json!({"threadId": thread_id, "sortDirection": "desc", "limit": 1, "itemsView": "notLoaded"})).await?;
+                    reconcile_at = Some(Instant::now() + TURN_STATUS_TIMEOUT);
+                    status_requested = true;
+                    continue;
+                }
+                _ = sleep_until(last_progress + TURN_INACTIVITY_LIMIT), if interactions.is_empty() => {
+                    return Err(ExecutionError::new("Codex stopped sending progress for 10 minutes. Review any partial response before retrying."));
+                }
+                command = controls.recv(), if controls_open && pending_steer.is_none() && interactions.is_empty() && reconcile_at.is_none() => {
                     let Some(command) = command else { controls_open = false; continue; };
                     let Some(turn_id) = native_turn.as_ref() else { let _ = command.result.send(SteerOutcome::NotRunning); continue; };
                     if let Err(error) = crate::steering::validate(&command.input).await {
@@ -341,6 +378,49 @@ impl CodexAdapter {
                     continue;
                 }
             };
+            let params = &value["params"];
+            if params["threadId"]
+                .as_str()
+                .is_some_and(|id| id != thread_id)
+                || params["turnId"]
+                    .as_str()
+                    .zip(native_turn.as_deref())
+                    .is_some_and(|(actual, expected)| actual != expected)
+            {
+                continue;
+            }
+            last_progress = Instant::now();
+            if value.get("method").is_some() && value.get("id").is_some() {
+                let interaction = read_interaction(&mut stdin, &value).await?;
+                interactions.push_back((interaction, value));
+                if interactions.len() == 1 {
+                    crate::approvals::show_interaction(
+                        &events,
+                        interactions.front().map(|(request, _)| request),
+                    )?;
+                }
+                continue;
+            }
+            if value.get("method").is_none() && value.get("id") == Some(&json!(TURN_STATUS_REQUEST))
+            {
+                if status_requested {
+                    let turn = value["result"]["data"]
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .find(|turn| turn["id"].as_str() == native_turn.as_deref());
+                    match turn {
+                        Some(turn) => validate_turn_status(turn)?,
+                        None => {
+                            return Err(ExecutionError::new(
+                                "Codex went idle before confirming the active turn. Review the conversation before retrying.",
+                            ));
+                        }
+                    }
+                    turn_completed = true;
+                }
+                continue;
+            }
             if value["method"] == "skills/changed" {
                 let _ = events.send(ExecutionEvent::SkillsChanged);
             }
@@ -364,16 +444,6 @@ impl CodexAdapter {
                 }
                 continue;
             }
-            if value.get("method").is_some() && value.get("id").is_some() {
-                if let Some(answer) =
-                    handle_interaction(&mut stdin, &value, &events, &mut responses).await?
-                {
-                    close_text_segment(&mut text_items, &mut offsets);
-                    final_text = None;
-                    let _ = events.send(ExecutionEvent::QuestionAnswered(answer));
-                }
-                continue;
-            }
             if value.get("id") == Some(&json!(3)) && value.get("error").is_some() {
                 return Err(rpc_error(&value));
             }
@@ -390,12 +460,65 @@ impl CodexAdapter {
 
             match value.get("method").and_then(Value::as_str) {
                 Some("turn/started") => {
+                    verified_active = true;
                     native_turn = value
                         .pointer("/params/turn/id")
                         .and_then(Value::as_str)
                         .map(str::to_owned)
                         .or(native_turn);
                     let _ = events.send(ExecutionEvent::SteeringAvailable(native_turn.is_some()));
+                }
+                Some("serverRequest/resolved") => {
+                    let Some(id) = params.get("requestId").map(Value::to_string) else {
+                        continue;
+                    };
+                    let was_visible = interactions
+                        .front()
+                        .is_some_and(|(request, _)| request.id == id);
+                    interactions.retain(|(request, _)| request.id != id);
+                    if was_visible {
+                        let _ = events.send(ExecutionEvent::InteractionResolved(id));
+                        crate::approvals::show_interaction(
+                            &events,
+                            interactions.front().map(|(request, _)| request),
+                        )?;
+                    }
+                }
+                Some("thread/status/changed") => {
+                    match params.pointer("/status/type").and_then(Value::as_str) {
+                        Some("active") => {
+                            verified_active = true;
+                            reconcile_at = None;
+                            status_requested = false;
+                        }
+                        Some("idle") if verified_active && native_turn.is_some() => {
+                            // Codex can emit idle immediately before the ordinary completion.
+                            reconcile_at.get_or_insert_with(|| {
+                                Instant::now() + TERMINAL_NOTIFICATION_GRACE
+                            });
+                        }
+                        Some("notLoaded" | "systemError")
+                            if verified_active || turn_response_received =>
+                        {
+                            return Err(ExecutionError::new(
+                                "Codex lost the active thread. Review the conversation before retrying.",
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+                Some("thread/closed") => {
+                    return Err(ExecutionError::new(
+                        "Codex closed the thread before the turn finished.",
+                    ));
+                }
+                Some("error") if params["willRetry"] == false => {
+                    return Err(ExecutionError::new(
+                        params
+                            .pointer("/error/message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("Codex reported a terminal turn error."),
+                    ));
                 }
                 Some("item/agentMessage/delta" | "item/plan/delta") => {
                     let params = &value["params"];
@@ -482,25 +605,16 @@ impl CodexAdapter {
                     if params["threadId"].as_str() != Some(thread_id.as_str()) {
                         continue;
                     }
-                    turn_completed = true;
-                    match params.pointer("/turn/status").and_then(Value::as_str) {
-                        Some("completed") => {}
-                        Some(status) => {
-                            let detail = params
-                                .pointer("/turn/error/message")
-                                .and_then(Value::as_str)
-                                .map(|message| format!(" ({message})"))
-                                .unwrap_or_default();
-                            return Err(ExecutionError::new(format!(
-                                "Codex turn ended with status {status}{detail}"
-                            )));
-                        }
-                        None => {
-                            return Err(ExecutionError::new(
-                                "Codex completed a turn without reporting its status",
-                            ));
-                        }
+                    let turn = &params["turn"];
+                    if turn["id"]
+                        .as_str()
+                        .zip(native_turn.as_deref())
+                        .is_some_and(|(actual, expected)| actual != expected)
+                    {
+                        continue;
                     }
+                    validate_turn_status(turn)?;
+                    turn_completed = true;
                 }
                 _ => {}
             }
@@ -734,12 +848,27 @@ fn close_text_segment(
     }
 }
 
-async fn handle_interaction(
+fn validate_turn_status(turn: &Value) -> Result<(), ExecutionError> {
+    let status = turn["status"].as_str().ok_or_else(|| {
+        ExecutionError::new("Codex completed a turn without reporting its status")
+    })?;
+    if status == "completed" {
+        return Ok(());
+    }
+    let detail = turn
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .map(|message| format!(" ({message})"))
+        .unwrap_or_default();
+    Err(ExecutionError::new(format!(
+        "Codex turn ended with status {status}{detail}"
+    )))
+}
+
+async fn read_interaction(
     stdin: &mut ChildStdin,
     request: &Value,
-    events: &mpsc::UnboundedSender<ExecutionEvent>,
-    responses: &mut mpsc::UnboundedReceiver<InteractionResponse>,
-) -> Result<Option<String>, ExecutionError> {
+) -> Result<Interaction, ExecutionError> {
     let method = request["method"].as_str().unwrap_or_default();
     let params = &request["params"];
     let id = request["id"].to_string();
@@ -766,9 +895,8 @@ async fn handle_interaction(
     if matches!(&kind, InteractionKind::Questions(questions) if questions.is_empty()) {
         return Err(ExecutionError::new("Codex sent an empty question request"));
     }
-    let _ = events.send(ExecutionEvent::Activity(Activity::Waiting));
-    let interaction = Interaction {
-        id: id.clone(),
+    Ok(Interaction {
+        id,
         title: if matches!(kind, InteractionKind::Questions(_)) {
             "A question from Codex"
         } else {
@@ -776,20 +904,17 @@ async fn handle_interaction(
         }
         .into(),
         kind,
-    };
-    events
-        .send(ExecutionEvent::Interaction(interaction.clone()))
-        .map_err(|_| {
-            ExecutionError::new("The chat closed before the interaction could be shown")
-        })?;
-    let answer = loop {
-        let answer = responses.recv().await.ok_or_else(|| {
-            ExecutionError::new("The chat closed while Codex was waiting for an answer")
-        })?;
-        if answer.id == id {
-            break answer;
-        }
-    };
+    })
+}
+
+async fn write_interaction_response(
+    stdin: &mut ChildStdin,
+    request: &Value,
+    interaction: &Interaction,
+    answer: InteractionResponse,
+) -> Result<Option<String>, ExecutionError> {
+    let method = request["method"].as_str().unwrap_or_default();
+    let params = &request["params"];
     let transcript_answer = interaction.answered_questions(&answer);
     let result = match method {
         "item/tool/requestUserInput" => {
@@ -809,7 +934,6 @@ async fn handle_interaction(
         _ => json!({ "decision": if answer.approved { "accept" } else { "decline" } }),
     };
     write_message(stdin, &json!({ "id": request["id"], "result": result })).await?;
-    let _ = events.send(ExecutionEvent::Activity(Activity::Working));
     Ok(transcript_answer)
 }
 

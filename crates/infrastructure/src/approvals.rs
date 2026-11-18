@@ -1,5 +1,24 @@
 use serde_json::Value;
+use smaller_talk_application::{ExecutionError, ExecutionEvent};
 use smaller_talk_domain::*;
+use tokio::sync::mpsc;
+
+pub(crate) fn show_interaction(
+    events: &mpsc::UnboundedSender<ExecutionEvent>,
+    interaction: Option<&Interaction>,
+) -> Result<(), ExecutionError> {
+    if let Some(interaction) = interaction {
+        let _ = events.send(ExecutionEvent::Activity(Activity::Waiting));
+        events
+            .send(ExecutionEvent::Interaction(interaction.clone()))
+            .map_err(|_| {
+                ExecutionError::new("The chat closed before the interaction could be shown")
+            })?;
+    } else {
+        let _ = events.send(ExecutionEvent::Activity(Activity::Working));
+    }
+    Ok(())
+}
 
 pub(crate) fn present(tool: &str, input: &Value, turn_scope: bool) -> ApprovalPresentation {
     let action = if tool.to_lowercase().contains("search") {

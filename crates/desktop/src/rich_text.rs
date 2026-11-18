@@ -1,10 +1,17 @@
-use std::{collections::BTreeSet, ops::Range};
+use std::{
+    collections::BTreeSet,
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use gpui::{
     App, ClipboardItem, Context, FocusHandle, Focusable, HighlightStyle, IntoElement, KeyBinding,
-    MouseButton, Render, StyledText, WeakEntity, Window, actions, div, prelude::*, px, rgba,
+    MouseButton, PromptButton, PromptLevel, Render, StyledText, WeakEntity, Window, actions, div,
+    prelude::*, px, rgba,
 };
+use smaller_talk_application::effective_workspace;
 use unicode_segmentation::UnicodeSegmentation;
+use url::Url;
 use uuid::Uuid;
 
 use crate::shell::ChatsView;
@@ -119,6 +126,52 @@ impl RichText {
         self.selection.anchor = TextSelection::boundary(&self.text, self.selection.anchor);
         self.selection.caret = TextSelection::boundary(&self.text, self.selection.caret);
     }
+    fn show_file_link(&self, target: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let workspace = self
+            .selection_owner
+            .as_ref()
+            .and_then(|(owner, chat, _, _)| {
+                let owner = owner.upgrade()?;
+                let view = owner.read(cx);
+                let state = view.states.get(chat)?;
+                effective_workspace(
+                    &view.services.launch_folder,
+                    &state.preferences,
+                    &view.projects,
+                )
+                .ok()
+            });
+        let Some(path) = file_link_path(target, workspace.as_deref()) else {
+            return;
+        };
+        let display = path.display().to_string();
+        let action = window.prompt(
+            PromptLevel::Info,
+            "File link",
+            Some(&display),
+            &[
+                PromptButton::ok("Copy Path"),
+                PromptButton::ok("Open File"),
+                PromptButton::cancel("Close"),
+            ],
+            cx,
+        );
+        cx.spawn(async move |_, cx| {
+            if let Ok(action) = action.await {
+                let _ = cx.update(|cx| match action {
+                    0 => cx.write_to_clipboard(ClipboardItem::new_string(display)),
+                    1 => {
+                        if let Ok(url) = Url::from_file_path(path) {
+                            cx.open_url(url.as_str());
+                        }
+                    }
+                    _ => {}
+                });
+            }
+        })
+        .detach();
+    }
+
     pub fn has_selection(&self) -> bool {
         self.selection.has_selection()
     }
@@ -216,23 +269,19 @@ impl Render for RichText {
             )
             .on_mouse_up(
                 MouseButton::Left,
-                cx.listener(move |this, event: &gpui::MouseUpEvent, _, cx| {
+                cx.listener(move |this, event: &gpui::MouseUpEvent, window, cx| {
                     if this.selection.dragging && this.selection.range().is_empty() {
-                        let byte = up_layout
-                            .index_for_position(event.position)
-                            .unwrap_or_else(|i| i);
-                        if let Some((_, target)) =
-                            this.links.iter().find(|(r, _)| r.contains(&byte))
+                        if let Ok(byte) = up_layout.index_for_position(event.position)
+                            && let Some((_, target)) =
+                                this.links.iter().find(|(r, _)| r.contains(&byte))
                         {
                             if target.starts_with("https://")
                                 || target.starts_with("http://")
                                 || target.starts_with("mailto:")
                             {
                                 cx.open_url(target);
-                            } else if std::path::Path::new(target).is_absolute()
-                                && let Ok(url) = url::Url::from_file_path(target)
-                            {
-                                cx.open_url(url.as_str());
+                            } else {
+                                this.show_file_link(target, window, cx);
                             }
                         }
                     }
@@ -253,9 +302,48 @@ impl Render for RichText {
     }
 }
 
+fn file_link_path(target: &str, workspace: Option<&Path>) -> Option<PathBuf> {
+    if target.is_empty() || target.starts_with(['#', '?']) || target.starts_with("//") {
+        return None;
+    }
+    if let Ok(url) = Url::parse(target) {
+        return url.to_file_path().ok();
+    }
+    let base = if target.starts_with('/') {
+        Url::from_directory_path("/").ok()?
+    } else {
+        Url::from_directory_path(workspace?).ok()?
+    };
+    base.join(target).ok()?.to_file_path().ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TextSelection;
+    use super::{TextSelection, file_link_path};
+    use std::path::Path;
+
+    #[test]
+    fn local_links_resolve_to_paths_without_treating_web_links_as_files() {
+        let workspace = Some(Path::new("/workspace/project"));
+        for (destination, expected) in [
+            ("/tmp/a%20file.rs", "/tmp/a file.rs"),
+            ("file:///tmp/a%20file.rs", "/tmp/a file.rs"),
+            ("src/lib.rs#L12", "/workspace/project/src/lib.rs"),
+        ] {
+            assert_eq!(
+                file_link_path(destination, workspace).as_deref(),
+                Some(Path::new(expected))
+            );
+        }
+        for destination in [
+            "#section",
+            "https://example.com",
+            "//example.com",
+            "file://example.com/a",
+        ] {
+            assert_eq!(file_link_path(destination, workspace), None);
+        }
+    }
 
     #[test]
     fn clearing_selection_removes_copy_and_rewrite_selection_state() {

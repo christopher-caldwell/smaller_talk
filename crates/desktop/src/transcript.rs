@@ -2,7 +2,7 @@ use gpui::{
     AnyElement, Context, Entity, HighlightStyle, IntoElement, ScrollHandle, Styled, Window, div,
     list, prelude::*, px, rgb,
 };
-use smaller_talk_domain::MessageRole;
+use smaller_talk_domain::{Message, MessageRole};
 use std::ops::Range;
 use uuid::Uuid;
 
@@ -154,15 +154,8 @@ impl ChatsView {
             .flex_col()
             .gap_2()
             .py_3();
+        let content = self.render_message_markdown(chat, &message, window, cx);
         if message.role == MessageRole::User {
-            let text = self.text_view(
-                chat,
-                (message.id, "user".into()),
-                message.body.clone(),
-                vec![],
-                vec![],
-                cx,
-            );
             body = body.items_end().child(
                 div()
                     .max_w(px(650.))
@@ -173,7 +166,7 @@ impl ChatsView {
                     .bg(rgb(PANEL_HOVER))
                     .text_size(px(15.))
                     .line_height(px(24.))
-                    .child(text),
+                    .child(content),
             );
             let message_id = message.id;
             body = body.child(
@@ -209,31 +202,6 @@ impl ChatsView {
                         )
                     }),
             );
-            let blocks = self
-                .states
-                .get_mut(&chat)
-                .expect("chat exists")
-                .markdown
-                .get_or_parse(message.id, &message.body);
-            let mut content = div().w_full().min_w(px(0.)).flex().flex_col();
-            for (index, block) in blocks.iter().enumerate() {
-                let previous = index.checked_sub(1).map(|i| &blocks[i].kind);
-                let gap = match (previous, &block.kind) {
-                    (None, _) => 0.,
-                    (_, MarkdownBlockKind::Heading(_)) => 14.,
-                    (Some(MarkdownBlockKind::Heading(_)), _) => 6.,
-                    (Some(MarkdownBlockKind::ListItem), MarkdownBlockKind::ListItem) => 3.,
-                    (Some(MarkdownBlockKind::Quote), MarkdownBlockKind::Quote) => 4.,
-                    _ => 10.,
-                };
-                content = content.child(
-                    div()
-                        .w_full()
-                        .min_w(px(0.))
-                        .mt(px(gap))
-                        .child(self.render_block(chat, message.id, index, block, window, cx)),
-                );
-            }
             body = body.child(content);
         }
         for file in files {
@@ -326,6 +294,41 @@ impl ChatsView {
             .items_center()
             .child(body)
             .into_any_element()
+    }
+
+    fn render_message_markdown(
+        &mut self,
+        chat: Uuid,
+        message: &Message,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let blocks = self
+            .states
+            .get_mut(&chat)
+            .expect("chat exists")
+            .markdown
+            .get_or_parse(message.id, &message.body);
+        let mut content = div().w_full().min_w(px(0.)).flex().flex_col();
+        for (index, block) in blocks.iter().enumerate() {
+            let previous = index.checked_sub(1).map(|i| &blocks[i].kind);
+            let gap = match (previous, &block.kind) {
+                (None, _) => 0.,
+                (_, MarkdownBlockKind::Heading(_)) => 14.,
+                (Some(MarkdownBlockKind::Heading(_)), _) => 6.,
+                (Some(MarkdownBlockKind::ListItem), MarkdownBlockKind::ListItem) => 3.,
+                (Some(MarkdownBlockKind::Quote), MarkdownBlockKind::Quote) => 4.,
+                _ => 10.,
+            };
+            content = content.child(
+                div()
+                    .w_full()
+                    .min_w(px(0.))
+                    .mt(px(gap))
+                    .child(self.render_block(chat, message.id, index, block, window, cx)),
+            );
+        }
+        content
     }
 
     fn render_block(
@@ -471,8 +474,7 @@ impl ChatsView {
                             .unwrap_or(px(0.))
                     })
                     .max()
-                    .unwrap_or(px(0.))
-                    .max(self.states[&chat].width - px(26.));
+                    .unwrap_or(px(0.));
                 let scroll: ScrollHandle = self
                     .states
                     .get_mut(&chat)

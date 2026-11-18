@@ -259,6 +259,7 @@ pub struct Question {
     pub prompt: String,
     pub options: Vec<String>,
     pub multiple: bool,
+    pub secret: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -273,6 +274,32 @@ pub struct Interaction {
     pub id: String,
     pub title: String,
     pub kind: InteractionKind,
+}
+
+impl Interaction {
+    pub fn answered_questions(&self, response: &InteractionResponse) -> Option<String> {
+        let InteractionKind::Questions(questions) = &self.kind else {
+            return None;
+        };
+        if !response.approved {
+            return None;
+        }
+        let answers = questions
+            .iter()
+            .filter_map(|question| {
+                let values = response
+                    .answers
+                    .get(&question.id)
+                    .filter(|values| !values.is_empty())?;
+                Some(if question.secret {
+                    "[Private answer]".to_owned()
+                } else {
+                    values.join(", ")
+                })
+            })
+            .collect::<Vec<_>>();
+        (!answers.is_empty()).then(|| answers.join("\n\n"))
+    }
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

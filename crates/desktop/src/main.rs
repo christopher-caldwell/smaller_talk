@@ -182,7 +182,7 @@ fn main() -> anyhow::Result<()> {
             std::env::current_dir()?,
         )
         .with_workspace(store.clone(), store.clone())
-        .with_steered_input_writes(store.clone())
+        .with_accepted_input_writes(store.clone())
         .with_settings(store.clone())
         .with_instructions(instructions.clone(), store.clone())
         .with_skills(skills.clone(), store.clone())

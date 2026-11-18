@@ -264,7 +264,11 @@ impl ClaudeAdapter {
                     let response = response.ok_or_else(|| ExecutionError::new("The chat closed while Claude was waiting for an answer"))?;
                     if interactions.front().is_some_and(|(interaction, _)| interaction.id == response.id) {
                         let (interaction, request) = interactions.pop_front().expect("matched request");
+                        let transcript_answer = interaction.answered_questions(&response);
                         write_interaction_response(&mut stdin, &request, &interaction, response).await?;
+                        if let Some(answer) = transcript_answer {
+                            let _ = events.send(ExecutionEvent::QuestionAnswered(answer));
+                        }
                         show_next_interaction(&events, &interactions)?;
                         last_progress = Instant::now();
                     }

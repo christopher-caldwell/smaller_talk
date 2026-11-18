@@ -178,6 +178,7 @@ pub enum ExecutionEvent {
     SkillsChanged,
     BindingEstablished(ExecutionBinding),
     InputAccepted(SteerInput),
+    QuestionAnswered(String),
     SteeringAvailable(bool),
     TextDelta(String),
     TextSnapshot(String),
@@ -286,6 +287,7 @@ pub enum ConversationEvent {
         available: bool,
     },
     UserMessage(Message),
+    UserAnswer(Message),
     AssistantDelta {
         chat_id: Uuid,
         message_id: Uuid,
@@ -393,7 +395,7 @@ pub struct ConversationService {
     executor: Arc<dyn ExecutionAdapter>,
     workspace: PathBuf,
     workspace_data: Option<(Arc<dyn WorkspaceQueries>, Arc<dyn WorkspaceWrites>)>,
-    steered_input_writes: Option<Arc<dyn SteeredInputWrites>>,
+    accepted_input_writes: Option<Arc<dyn AcceptedInputWrites>>,
     settings_store: Option<Arc<dyn SettingsQueries>>,
     display_store: Option<Arc<dyn DisplayWrites>>,
     instructions: Option<(Arc<InstructionService>, Arc<dyn TurnStartWrites>)>,
@@ -505,7 +507,7 @@ impl ConversationService {
             workspace,
             skills: None,
             workspace_data: None,
-            steered_input_writes: None,
+            accepted_input_writes: None,
             settings_store: None,
             display_store: None,
             instructions: None,
@@ -522,8 +524,8 @@ impl ConversationService {
         self
     }
 
-    pub fn with_steered_input_writes(mut self, writes: Arc<dyn SteeredInputWrites>) -> Self {
-        self.steered_input_writes = Some(writes);
+    pub fn with_accepted_input_writes(mut self, writes: Arc<dyn AcceptedInputWrites>) -> Self {
+        self.accepted_input_writes = Some(writes);
         self
     }
 
@@ -1064,7 +1066,21 @@ impl ConversationService {
                     }
                     let _ = output.send(ConversationEvent::SkillsChanged { chat_id });
                 }
-                ExecutionEvent::InputAccepted(input) => {
+                event
+                @ (ExecutionEvent::InputAccepted(_) | ExecutionEvent::QuestionAnswered(_)) => {
+                    let (id, body, files, skills, steering_turn) = match event {
+                        ExecutionEvent::InputAccepted(input) => (
+                            input.id,
+                            input.prompt,
+                            input.attachments,
+                            input.skills,
+                            Some(turn.id),
+                        ),
+                        ExecutionEvent::QuestionAnswered(answer) => {
+                            (Uuid::new_v4(), answer, Vec::new(), Vec::new(), None)
+                        }
+                        _ => unreachable!(),
+                    };
                     final_text = None;
                     // Finish the preceding assistant segment before inserting the new user input.
                     let assistant = (!response.is_empty()).then(|| NewMessage {
@@ -1075,22 +1091,16 @@ impl ConversationService {
                         created_at: assistant_created_at,
                     });
                     let user = NewMessage {
-                        id: input.id,
+                        id,
                         chat_id,
                         role: MessageRole::User,
-                        body: input.prompt,
+                        body,
                         created_at: Utc::now()
                             .max(assistant_created_at + chrono::Duration::milliseconds(1)),
                     };
-                    let persisted = if let Some(writes) = &self.steered_input_writes {
+                    let persisted = if let Some(writes) = &self.accepted_input_writes {
                         writes
-                            .persist_steered_input(
-                                assistant,
-                                user,
-                                &input.attachments,
-                                &input.skills,
-                                turn.id,
-                            )
+                            .persist_accepted_input(assistant, user, &files, &skills, steering_turn)
                             .await
                     } else {
                         async {
@@ -1119,7 +1129,12 @@ impl ConversationService {
                     response.clear();
                     assistant_created_at = message.created_at + chrono::Duration::milliseconds(1);
                     assistant_id = Uuid::new_v4();
-                    let _ = output.send(ConversationEvent::UserMessage(message));
+                    let event = if steering_turn.is_some() {
+                        ConversationEvent::UserMessage(message)
+                    } else {
+                        ConversationEvent::UserAnswer(message)
+                    };
+                    let _ = output.send(event);
                 }
                 ExecutionEvent::TextDelta(delta) => {
                     had_output |= !delta.is_empty();

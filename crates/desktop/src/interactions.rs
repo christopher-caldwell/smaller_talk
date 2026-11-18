@@ -72,14 +72,18 @@ impl ChatsView {
             InteractionKind::Questions(questions) => {
                 for (index, question) in questions.iter().enumerate() {
                     details = details.child(div().child(question.prompt.clone()));
+                    let editor = &editors[index];
+                    let custom_answer = !editor.read(cx).content().trim().is_empty();
                     let mut options = row().gap_1().flex_wrap();
                     for option in &question.options {
-                        let selected = answers
-                            .get(&question.id)
-                            .is_some_and(|a| a.contains(option));
+                        let selected = (question.multiple || !custom_answer)
+                            && answers
+                                .get(&question.id)
+                                .is_some_and(|a| a.contains(option));
                         let question_id = question.id.clone();
                         let option = option.clone();
                         let multiple = question.multiple;
+                        let editor = editor.clone();
                         options = options.child(
                             compact_button(
                                 element_id("question-option", format!("{index}:{option}")),
@@ -109,6 +113,7 @@ impl ChatsView {
                                             }
                                         } else {
                                             *answers = vec![option.clone()];
+                                            editor.update(cx, |editor, cx| editor.reset(cx));
                                         }
                                     }
                                     cx.notify();

@@ -86,7 +86,7 @@ async fn setup_with_skills(catalog: Option<Arc<dyn SkillCatalog>>) -> Setup {
         temp.path().into(),
     )
     .with_workspace(db.clone(), db.clone())
-    .with_steered_input_writes(db.clone())
+    .with_accepted_input_writes(db.clone())
     .with_settings(db.clone())
     .with_instructions(
         Arc::new(InstructionService::new(db.clone(), db.clone(), db.clone())),
@@ -1525,4 +1525,53 @@ async fn stop_preserves_partial_output_and_pauses_only_the_target_queue() {
             .unwrap()
             .contains("Partial output")
     );
+}
+
+#[tokio::test]
+async fn question_answer_is_saved_between_assistant_segments_without_becoming_steering() {
+    let mut s = setup().await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    s.queue
+        .enqueue(EnqueueInput {
+            chat_id: chat,
+            draft: draft("initial"),
+        })
+        .await
+        .unwrap();
+    let run = next_run(&mut s).await;
+    run.events
+        .send(ExecutionEvent::TextDelta("Which color?".into()))
+        .unwrap();
+    run.events
+        .send(ExecutionEvent::QuestionAnswered("Custom blue".into()))
+        .unwrap();
+    run.events
+        .send(ExecutionEvent::TextDelta("Blue it is".into()))
+        .unwrap();
+    drop(run.events);
+    run.finish.send(Ok(())).unwrap();
+    event(&mut s, |event| {
+        matches!(event,
+            QueueEvent::Conversation(ConversationEvent::UserAnswer(message))
+                if message.role == MessageRole::User && message.body == "Custom blue"
+        )
+    })
+    .await;
+    event(&mut s, |event| {
+        matches!(event, QueueEvent::Finished(_, Ok(())))
+    })
+    .await;
+    let history = s.db.list_messages(chat).await.unwrap();
+    assert_eq!(
+        history
+            .iter()
+            .map(|message| message.body.as_str())
+            .collect::<Vec<_>>(),
+        ["initial", "Which color?", "Custom blue", "Blue it is"]
+    );
+    let links: i64 = sqlx::query_scalar("SELECT count(*) FROM turn_inputs")
+        .fetch_one(s.db.pool())
+        .await
+        .unwrap();
+    assert_eq!(links, 0);
 }

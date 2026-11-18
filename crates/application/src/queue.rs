@@ -13,6 +13,8 @@ pub enum QueueError {
     Policy(String),
     #[error("Queue operation failed: {0}")]
     Source(#[source] Box<dyn Error + Send + Sync + 'static>),
+    #[error("Response stopped.")]
+    Stopped,
     #[error("Message queue is unavailable")]
     Unavailable,
 }
@@ -160,6 +162,7 @@ enum Command {
     Remove(Uuid, Uuid),
     Retry(Uuid, Uuid),
     Steer(Uuid, Uuid),
+    Stop(Uuid, Uuid),
     Respond(Uuid, InteractionResponse),
     Event(Uuid, ConversationEvent),
     Finished(Uuid, Result<(), QueueError>),
@@ -167,6 +170,7 @@ enum Command {
 }
 struct Running {
     entry: Uuid,
+    stop: Option<oneshot::Sender<()>>,
     entry_delivered: bool,
     controls: mpsc::UnboundedSender<SteerCommand>,
     responses: mpsc::UnboundedSender<InteractionResponse>,
@@ -275,6 +279,9 @@ impl QueueCoordinator {
             .commands
             .send(Command::Steer(input.chat_id, input.entry_id));
     }
+    pub fn stop(&self, chat: Uuid, entry: Uuid) {
+        let _ = self.commands.send(Command::Stop(chat, entry));
+    }
     pub fn respond(&self, input: RespondQueueInput) {
         let _ = self
             .commands
@@ -288,10 +295,10 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
             .queue(chat)
             .await
             .map_err(QueueError::from_source)?;
-        queue.steer_available = self
-            .running
-            .get(&chat)
-            .is_some_and(|r| r.steering_available && !r.waiting);
+        let running = self.running.get(&chat);
+        queue.active_entry = running.filter(|r| r.stop.is_some()).map(|r| r.entry);
+        queue.steer_available =
+            running.is_some_and(|r| r.stop.is_some() && r.steering_available && !r.waiting);
         if let Some(run) = self.running.get(&chat)
             && run.entry_delivered
         {
@@ -331,10 +338,12 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
         }
         let (controls, control_rx) = mpsc::unbounded_channel();
         let (responses, response_rx) = mpsc::unbounded_channel();
+        let (stop, stop_rx) = oneshot::channel();
         self.running.insert(
             chat,
             Running {
                 entry: entry.id,
+                stop: Some(stop),
                 entry_delivered: false,
                 controls,
                 responses,
@@ -369,9 +378,13 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
                     events,
                     response_rx,
                     control_rx,
+                    stop_rx,
                 )
                 .await
-                .map_err(QueueError::from_source);
+                .map_err(|error| match error {
+                    SendMessageError::Stopped => QueueError::Stopped,
+                    error => QueueError::from_source(error),
+                });
             let _ = forwarding.await;
             let _ = sender.send(Command::Finished(chat, result));
         });
@@ -392,6 +405,7 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
                 | Command::Remove(c, _)
                 | Command::Retry(c, _)
                 | Command::Steer(c, _)
+                | Command::Stop(c, _)
                 | Command::Respond(c, _)
                 | Command::Event(c, _)
                 | Command::Finished(c, _)
@@ -563,8 +577,19 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
                     .map_err(QueueError::from_source)?;
                 self.publish(chat).await?;
             }
+            Command::Stop(chat, entry) => {
+                if let Some(run) = self.running.get_mut(&chat)
+                    && run.entry == entry
+                    && let Some(stop) = run.stop.take()
+                {
+                    let _ = stop.send(());
+                    self.publish(chat).await?;
+                }
+            }
             Command::Respond(chat, response) => {
-                if let Some(run) = self.running.get_mut(&chat) {
+                if let Some(run) = self.running.get_mut(&chat)
+                    && run.stop.is_some()
+                {
                     if run.pending_request.as_deref() != Some(response.id.as_str()) {
                         return Err("This is not the pending provider request.".into());
                     }
@@ -636,7 +661,8 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
             }
             Command::Finished(chat, result) => {
                 if let Some(run) = self.running.remove(&chat) {
-                    if result.is_ok() || run.has_steered {
+                    let stopped = matches!(&result, Err(QueueError::Stopped));
+                    if result.is_ok() || run.has_steered || (stopped && run.entry_delivered) {
                         self.writes
                             .remove_queued(chat, run.entry, true)
                             .await
@@ -655,14 +681,25 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
                             .await
                             .map_err(QueueError::from_source)?;
                     }
-                    if result.is_err() && run.has_steered {
-                        self.writes.pause_queue(chat, Some("The previous response failed. Review the conversation before resuming.")).await.map_err(QueueError::from_source)?;
-                    }
                     let queue = self
                         .queries
                         .queue(chat)
                         .await
                         .map_err(QueueError::from_source)?;
+                    if stopped && run.entry_delivered && !queue.entries.is_empty() {
+                        self.writes
+                            .pause_queue(
+                                chat,
+                                Some("Response stopped. Resume to send queued messages."),
+                            )
+                            .await
+                            .map_err(QueueError::from_source)?;
+                    } else if !stopped && run.has_steered && result.is_err() {
+                        self.writes
+                            .pause_queue(chat, Some("The previous response failed. Review the conversation before resuming."))
+                            .await
+                            .map_err(QueueError::from_source)?;
+                    }
                     for entry in queue.entries.iter().filter(|e| e.state == "steering") {
                         self.writes.transition(entry.id, "steering", "uncertain", Some("Provider delivery could not be confirmed. Check the conversation before Retry or Remove.")).await.map_err(QueueError::from_source)?;
                         self.writes
@@ -683,6 +720,9 @@ impl<U: UnitOfWork + 'static> Coordinator<U> {
                 let Some(run) = self.running.get(&chat) else {
                     return Ok(());
                 };
+                if run.stop.is_none() {
+                    return Ok(());
+                }
                 if run.waiting {
                     return Err("Answer the pending request before steering.".into());
                 }

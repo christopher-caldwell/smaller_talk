@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, SubsecRound, Utc};
 use smaller_talk_domain::*;
 use thiserror::Error;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
 mod queue;
@@ -327,6 +327,8 @@ pub enum SendMessageError {
     Execution(#[source] ExecutionError),
     #[error("the agent execution task stopped unexpectedly: {0}")]
     Task(String),
+    #[error("Response stopped.")]
+    Stopped,
     #[error("The agent completed without an assistant response")]
     EmptyResponse,
 }
@@ -602,7 +604,8 @@ impl ConversationService {
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
     ) -> Result<(), SendMessageError> {
         let (_, controls) = mpsc::unbounded_channel();
-        self.send_turn_internal(input, None, output, responses, controls)
+        let (_, stop) = oneshot::channel();
+        self.send_turn_internal(input, None, output, responses, controls, stop)
             .await
     }
 
@@ -613,8 +616,9 @@ impl ConversationService {
         output: mpsc::UnboundedSender<ConversationEvent>,
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
         controls: mpsc::UnboundedReceiver<SteerCommand>,
+        stop: oneshot::Receiver<()>,
     ) -> Result<(), SendMessageError> {
-        self.send_turn_internal(input, Some(message_id), output, responses, controls)
+        self.send_turn_internal(input, Some(message_id), output, responses, controls, stop)
             .await
     }
 
@@ -625,7 +629,14 @@ impl ConversationService {
         output: mpsc::UnboundedSender<ConversationEvent>,
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
         controls: mpsc::UnboundedReceiver<SteerCommand>,
+        stop: oneshot::Receiver<()>,
     ) -> Result<(), SendMessageError> {
+        let stop = async {
+            if stop.await.is_err() {
+                std::future::pending().await
+            }
+        };
+        tokio::pin!(stop);
         let chat_id = input.chat_id;
         {
             let mut active = self
@@ -679,11 +690,13 @@ impl ConversationService {
                     ))));
                 }
             }
-            let caps = self
-                .executor
-                .capabilities(preferences.execution.provider)
-                .await
-                .map_err(SendMessageError::Execution)?;
+            let caps = tokio::select! {
+                biased;
+                () = &mut stop => return Err(SendMessageError::Stopped),
+                caps = self.executor.capabilities(preferences.execution.provider) => {
+                    caps.map_err(SendMessageError::Execution)?
+                }
+            };
             validate_selection(&preferences.execution, &input.attachments, &caps)
                 .map_err(SendMessageError::Execution)?;
             if preferences.execution.model.is_none() {
@@ -891,6 +904,11 @@ impl ConversationService {
             None
         };
         validate_attachment_limits(&attachments).map_err(SendMessageError::Execution)?;
+        tokio::select! {
+            biased;
+            () = &mut stop => return Err(SendMessageError::Stopped),
+            () = std::future::ready(()) => {}
+        }
         let user_message = match input.retry_of {
             Some(id) => history
                 .iter()
@@ -973,7 +991,7 @@ impl ConversationService {
             attachments,
             prior_context,
         };
-        let task = tokio::spawn(async move {
+        let mut task = tokio::spawn(async move {
             executor
                 .execute_controlled(request, events, responses, controls)
                 .await
@@ -986,7 +1004,23 @@ impl ConversationService {
         let mut final_text = None;
         let mut storage_error = None;
         let mut had_output = false;
-        while let Some(event) = stream.recv().await {
+        let mut task_result = None;
+        loop {
+            let next = if task_result.is_some() {
+                // The child has stopped. Persist any events sent before cancellation.
+                stream.try_recv().ok()
+            } else {
+                tokio::select! {
+                    biased;
+                    () = &mut stop => {
+                        task.abort();
+                        task_result = Some((&mut task).await);
+                        continue;
+                    }
+                    event = stream.recv() => event,
+                }
+            };
+            let Some(event) = next else { break };
             match event {
                 ExecutionEvent::BindingEstablished(mut binding) => {
                     binding.instructions_fingerprint = instructions.fingerprint.clone();
@@ -1123,15 +1157,18 @@ impl ConversationService {
                 }
             }
         }
-        let mut result = match storage_error {
-            Some(error) => {
-                let _ = task.await;
-                Err(error)
+        let stop_requested = task_result.is_some();
+        let joined = match task_result {
+            Some(result) => result,
+            None => task.await,
+        };
+        let mut result = match (storage_error, joined) {
+            (Some(error), _) => Err(error),
+            (None, Err(error)) if stop_requested && error.is_cancelled() => {
+                Err(SendMessageError::Stopped)
             }
-            None => task
-                .await
-                .map_err(|e| SendMessageError::Task(e.to_string()))
-                .and_then(|r| r.map_err(SendMessageError::Execution)),
+            (None, Err(error)) => Err(SendMessageError::Task(error.to_string())),
+            (None, Ok(result)) => result.map_err(SendMessageError::Execution),
         };
         if result.is_ok() && response.is_empty() && !had_output {
             result = Err(SendMessageError::EmptyResponse);
@@ -1170,10 +1207,10 @@ impl ConversationService {
                 let _ = output.send(ConversationEvent::AssistantMessage(message));
             }
         }
-        turn.status = if result.is_ok() {
-            "completed"
-        } else {
-            "failed"
+        turn.status = match &result {
+            Ok(()) => "completed",
+            Err(SendMessageError::Stopped) => "interrupted",
+            Err(_) => "failed",
         }
         .into();
         turn.error = result.as_ref().err().map(ToString::to_string);

@@ -146,13 +146,17 @@ impl ChatsView {
                 benchmark.log.emit("first_content", json!({}));
             }
             UiEvent::Finished(id, result) => {
-                benchmark.log.emit("execution_finished", json!({"chat_id":id.to_string(),"ok":result.is_ok(),"error":result.as_ref().err()}));
+                let error = result.as_ref().err().map(ToString::to_string);
+                benchmark.log.emit(
+                    "execution_finished",
+                    json!({"chat_id":id.to_string(),"ok":result.is_ok(),"error":error}),
+                );
                 if result.is_ok() {
                     benchmark.completion = Some(*id);
                 } else {
                     benchmark.log.emit(
                         "error",
-                        json!({"message":"execution failed","details":result.as_ref().err()}),
+                        json!({"message":"execution failed","details":error}),
                     );
                 }
             }

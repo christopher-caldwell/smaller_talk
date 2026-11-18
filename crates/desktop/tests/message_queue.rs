@@ -1434,3 +1434,95 @@ async fn skill_disabled_after_enqueue_pauses_steering_without_sending_it() {
     drop(run.events);
     event(&mut s, |e| matches!(e, QueueEvent::Finished(_, Ok(())))).await;
 }
+
+#[tokio::test]
+async fn stop_preserves_partial_output_and_pauses_only_the_target_queue() {
+    let mut s = setup().await;
+    let chat = s.chats.create_empty_chat().await.unwrap().id;
+    let other = s.chats.create_empty_chat().await.unwrap().id;
+    for (chat_id, text) in [(chat, "first"), (other, "other"), (chat, "next")] {
+        s.queue
+            .enqueue(EnqueueInput {
+                chat_id,
+                draft: draft(text),
+            })
+            .await
+            .unwrap();
+    }
+    let first = next_run(&mut s).await;
+    let second = next_run(&mut s).await;
+    let (run, mut other_run) = if first.request.chat_id == chat {
+        (first, second)
+    } else {
+        (second, first)
+    };
+    let target = s.db.queue(chat).await.unwrap().entries[0].id;
+    s.queue.stop(chat, Uuid::new_v4());
+    run.events
+        .send(ExecutionEvent::TextDelta("Partial output".into()))
+        .unwrap();
+    event(&mut s, |e| matches!(e,
+        QueueEvent::Conversation(ConversationEvent::AssistantDelta { chat_id, .. }) if *chat_id == chat
+    )).await;
+    run.events
+        .send(ExecutionEvent::Interaction(Interaction {
+            id: "question".into(),
+            title: "A question".into(),
+            kind: InteractionKind::Questions(vec![]),
+        }))
+        .unwrap();
+    event(&mut s, |e| matches!(e,
+        QueueEvent::Conversation(ConversationEvent::Interaction { chat_id, .. }) if *chat_id == chat
+    )).await;
+    s.queue.stop(chat, target);
+    event(
+        &mut s,
+        |e| matches!(e, QueueEvent::Finished(id, Err(QueueError::Stopped)) if *id == chat),
+    )
+    .await;
+    assert!(run.finish.is_closed());
+    assert!(!other_run.finish.is_closed());
+    assert!(matches!(
+        other_run.responses.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let pending = s.db.queue(chat).await.unwrap();
+    assert!(pending.paused.is_some());
+    assert_eq!(
+        pending
+            .entries
+            .iter()
+            .map(|entry| entry.state.as_str())
+            .collect::<Vec<_>>(),
+        ["pending"]
+    );
+    assert_eq!(
+        s.db.last_turn(chat).await.unwrap().unwrap().status,
+        "interrupted"
+    );
+    let history = s.db.list_messages(chat).await.unwrap();
+    assert_eq!(history.last().unwrap().body, "Partial output");
+    other_run
+        .events
+        .send(ExecutionEvent::TextDelta("Other output".into()))
+        .unwrap();
+    drop(other_run.events);
+    other_run.finish.send(Ok(())).unwrap();
+    event(
+        &mut s,
+        |e| matches!(e, QueueEvent::Finished(id, Ok(())) if *id == other),
+    )
+    .await;
+    assert!(s.runs.try_recv().is_err());
+    s.queue.resume(chat);
+    let follow_up = next_run(&mut s).await;
+    assert_eq!(follow_up.request.prompt, "next");
+    assert!(
+        follow_up
+            .request
+            .prior_context
+            .as_deref()
+            .unwrap()
+            .contains("Partial output")
+    );
+}

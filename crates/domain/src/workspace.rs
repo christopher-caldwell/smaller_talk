@@ -313,6 +313,7 @@ pub struct QueuedMessage {
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct MessageQueue {
+    pub active_entry: Option<uuid::Uuid>,
     pub steer_available: bool,
     pub entries: Vec<QueuedMessage>,
     pub paused: Option<String>,

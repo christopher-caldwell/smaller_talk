@@ -1,4 +1,4 @@
-use crate::{ClaudeAdapter, CodexAdapter};
+use crate::{ClaudeAdapter, CodexAdapter, claude::ClaudeSessions};
 use async_trait::async_trait;
 use smaller_talk_application::{
     ExecutionAdapter, ExecutionError, ExecutionEvent, ExecutionRequest, ProviderControl,
@@ -9,9 +9,13 @@ use std::{
     collections::BTreeMap,
     path::PathBuf,
     sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    time::Duration,
 };
-use tokio::{process::Command, sync::mpsc, time::timeout};
+use tokio::{
+    process::Command,
+    sync::mpsc,
+    time::{Instant, timeout},
+};
 
 #[derive(Clone)]
 struct Connection {
@@ -23,11 +27,13 @@ struct Connection {
 pub struct AgentRouter {
     connections: Mutex<BTreeMap<Provider, Connection>>,
     skill_locations: Mutex<crate::SkillLocations>,
+    claude_sessions: Arc<ClaudeSessions>,
 }
 impl AgentRouter {
     pub fn new(codex: CodexAdapter, claude: ClaudeAdapter) -> Arc<Self> {
         Arc::new(Self {
             skill_locations: Mutex::new(crate::SkillLocations::default()),
+            claude_sessions: Arc::new(ClaudeSessions::default()),
             connections: Mutex::new(
                 [
                     (
@@ -95,7 +101,7 @@ impl AgentRouter {
         let connection = self.connection(provider)?;
         if !refresh
             && let Some((at, catalog)) = &connection.catalog
-            && at.elapsed() < Duration::from_secs(300)
+            && (provider == Provider::Claude || at.elapsed() < Duration::from_secs(300))
         {
             return Ok(catalog.clone());
         }
@@ -111,18 +117,28 @@ impl AgentRouter {
                     .await?
             }
         };
+        self.save_catalog(provider, connection.revision, catalog.clone())?;
+        Ok(catalog)
+    }
+
+    fn save_catalog(
+        &self,
+        provider: Provider,
+        revision: u64,
+        catalog: ProviderCapabilities,
+    ) -> Result<(), ExecutionError> {
         let mut connections = self
             .connections
             .lock()
             .map_err(|_| ExecutionError::new("Provider configuration is unavailable"))?;
         let current = connections.get_mut(&provider).expect("known provider");
-        if current.revision != connection.revision {
+        if current.revision != revision {
             return Err(ExecutionError::new(
                 "Provider configuration changed during discovery. Refresh to try again.",
             ));
         }
-        current.catalog = Some((Instant::now(), catalog.clone()));
-        Ok(catalog)
+        current.catalog = Some((Instant::now(), catalog));
+        Ok(())
     }
 }
 #[async_trait]
@@ -203,6 +219,7 @@ impl ExecutionAdapter for AgentRouter {
             }
             Provider::Claude => {
                 ClaudeAdapter::new(connection.executable)
+                    .with_sessions(self.claude_sessions.clone(), connection.revision)
                     .compact(request)
                     .await
             }
@@ -238,9 +255,21 @@ impl ExecutionAdapter for AgentRouter {
                     .await
             }
             Provider::Claude => {
+                let updates = events.clone();
                 ClaudeAdapter::new(c.executable)
                     .with_skill_locations(self.skill_locations())
-                    .execute_controlled(request, events, responses, controls)
+                    .with_sessions(self.claude_sessions.clone(), c.revision)
+                    .run(request, events, responses, controls, |catalog| {
+                        if self
+                            .save_catalog(Provider::Claude, c.revision, catalog.clone())
+                            .is_ok()
+                        {
+                            let _ = updates.send(ExecutionEvent::CatalogUpdated {
+                                catalog,
+                                revision: c.revision,
+                            });
+                        }
+                    })
                     .await
             }
         }

@@ -1,7 +1,9 @@
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::{BTreeSet, HashSet, VecDeque},
+    ffi::OsString,
     path::PathBuf,
     process::Stdio,
+    sync::Arc,
     time::Duration,
 };
 
@@ -19,6 +21,10 @@ use tokio::{
     time::{Instant, sleep_until, timeout},
 };
 
+mod session;
+pub(crate) use session::ClaudeSessions;
+use session::{ClaudeProcess, Startup};
+
 // Long silent tool calls are allowed, but a disconnected backend must leave the queue recoverable.
 const TURN_INACTIVITY_LIMIT: Duration = Duration::from_secs(10 * 60);
 
@@ -26,6 +32,8 @@ const TURN_INACTIVITY_LIMIT: Duration = Duration::from_secs(10 * 60);
 pub struct ClaudeAdapter {
     executable: PathBuf,
     skill_locations: crate::SkillLocations,
+    sessions: Arc<ClaudeSessions>,
+    revision: u64,
 }
 impl ClaudeAdapter {
     pub(crate) fn executable(&self) -> &std::path::Path {
@@ -35,6 +43,8 @@ impl ClaudeAdapter {
         Self {
             executable: executable.into(),
             skill_locations: crate::SkillLocations::default(),
+            sessions: Arc::new(ClaudeSessions::default()),
+            revision: 0,
         }
     }
 
@@ -42,6 +52,45 @@ impl ClaudeAdapter {
         self.skill_locations = locations;
         self
     }
+    pub(crate) fn with_sessions(mut self, sessions: Arc<ClaudeSessions>, revision: u64) -> Self {
+        self.sessions = sessions;
+        self.revision = revision;
+        self
+    }
+
+    fn startup(&self, request: &ExecutionRequest) -> Startup {
+        let mut arguments = Vec::<OsString>::new();
+        if !request.instructions.text.is_empty() {
+            arguments.extend([
+                "--append-system-prompt".into(),
+                (&request.instructions.text).into(),
+            ]);
+        }
+        if let Some(mode) = claude_permission_mode(&request.settings) {
+            arguments.extend(["--permission-mode".into(), mode.into()]);
+        }
+        if let Some(model) = &request.settings.model {
+            arguments.extend(["--model".into(), model.into()]);
+        }
+        if let Some(effort) = &request.settings.effort {
+            arguments.extend(["--effort".into(), effort.into()]);
+        }
+        let directories: BTreeSet<_> = request
+            .attachments
+            .iter()
+            .filter_map(|file| file.path.parent())
+            .collect();
+        for directory in directories {
+            arguments.extend(["--add-dir".into(), directory.into()]);
+        }
+        Startup {
+            arguments,
+            workspace: request.workspace.clone(),
+            executable: self.executable.clone(),
+            revision: self.revision,
+        }
+    }
+
     async fn content(
         &self,
         prompt: &str,
@@ -112,7 +161,7 @@ impl ClaudeAdapter {
 
     async fn start(
         &self,
-        request: Option<&ExecutionRequest>,
+        startup: Option<(&Startup, Option<&str>)>,
     ) -> Result<(Child, ChildStdin, BufReader<ChildStdout>), ExecutionError> {
         let mut cmd = Command::new(&self.executable);
         cmd.args([
@@ -130,32 +179,10 @@ impl ClaudeAdapter {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-        if let Some(request) = request {
-            cmd.current_dir(&request.workspace);
-            if !request.instructions.text.is_empty() {
-                cmd.arg("--append-system-prompt")
-                    .arg(&request.instructions.text);
-            }
-            if let Some(mode) = claude_permission_mode(&request.settings) {
-                cmd.args(["--permission-mode", mode]);
-            }
-            if let Some(model) = &request.settings.model {
-                cmd.args(["--model", model]);
-            }
-            if let Some(effort) = &request.settings.effort {
-                cmd.args(["--effort", effort]);
-            }
-            if let Some(binding) = &request.binding {
-                cmd.args(["--resume", &binding.native_session_id]);
-            }
-            let mut directories = HashSet::new();
-            for file in &request.attachments {
-                if let Some(parent) = file.path.parent() {
-                    directories.insert(parent.to_path_buf());
-                }
-            }
-            for directory in directories {
-                cmd.arg("--add-dir").arg(directory);
+        if let Some((startup, session)) = startup {
+            cmd.current_dir(&startup.workspace).args(&startup.arguments);
+            if let Some(session) = session {
+                cmd.args(["--resume", session]);
             }
         }
         let mut child = cmd.spawn().map_err(|e| ExecutionError::with_source("Could not start Claude Code. Install/sign in to Claude or set SMALLER_TALK_CLAUDE_BIN.", e))?;
@@ -209,21 +236,68 @@ impl ClaudeAdapter {
         })?
     }
 
-    async fn run(
+    pub(crate) async fn run(
         &self,
         request: ExecutionRequest,
         events: mpsc::UnboundedSender<ExecutionEvent>,
         mut responses: mpsc::UnboundedReceiver<InteractionResponse>,
         mut controls: mpsc::UnboundedReceiver<SteerCommand>,
+        catalog_updated: impl Fn(ProviderCapabilities) + Send + Sync,
     ) -> Result<(), ExecutionError> {
-        let (mut child, mut stdin, mut stdout) = self.start(Some(&request)).await?;
-        let initialized = Self::initialize(&mut stdin, &mut stdout).await?;
-        let commands: Vec<String> = initialized["commands"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .filter_map(|c| c["name"].as_str().map(str::to_owned))
-            .collect();
+        let startup = self.startup(&request);
+        let resume = request
+            .binding
+            .as_ref()
+            .map(|binding| binding.native_session_id.as_str());
+        let mut session_lease = match resume {
+            Some(session) => Some(self.sessions.lease(session).await),
+            None => None,
+        };
+        let mut process = match self
+            .sessions
+            .take(request.chat_id, resume, Some(&startup))
+            .await?
+        {
+            Some(process) => process,
+            None => {
+                let started_at = Instant::now();
+                let (child, mut stdin, mut stdout) = self.start(Some((&startup, resume))).await?;
+                let initialized = Self::initialize(&mut stdin, &mut stdout).await?;
+                if let Ok(catalog) = model_catalog(&initialized) {
+                    catalog_updated(catalog);
+                }
+                let commands = initialized["commands"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|command| command["name"].as_str().map(str::to_owned))
+                    .collect();
+                // The stdout reader stays with its child across turns.
+                let (frames, incoming) = mpsc::channel(64);
+                tokio::spawn(async move {
+                    loop {
+                        let frame = read(&mut stdout).await;
+                        let failed = frame.is_err();
+                        if frames.send(frame).await.is_err() || failed {
+                            break;
+                        }
+                    }
+                });
+                ClaudeProcess {
+                    child,
+                    stdin,
+                    incoming,
+                    commands,
+                    started_at,
+                }
+            }
+        };
+        let ClaudeProcess {
+            stdin,
+            incoming,
+            commands,
+            ..
+        } = &mut process;
         let content = self
             .content(
                 &request.prompt,
@@ -231,30 +305,20 @@ impl ClaudeAdapter {
                 &request.attachments,
                 &request.skills,
                 &request.workspace,
-                &commands,
+                commands,
             )
             .await?;
         let mut replay_inputs: VecDeque<_> = request.retry_inputs.iter().cloned().collect();
         let mut replay_id: Option<String> = None;
         let initial_id = uuid::Uuid::new_v4().to_string();
-        write(&mut stdin, &json!({ "uuid": initial_id, "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": request.binding.as_ref().map(|b| &b.native_session_id) })).await?;
+        write(stdin, &json!({ "uuid": initial_id, "type": "user", "message": { "role": "user", "content": content }, "parent_tool_use_id": null, "session_id": request.binding.as_ref().map(|b| &b.native_session_id) })).await?;
         let _ = events.send(ExecutionEvent::Activity(Activity::Working));
         let mut streamed_ids = HashSet::new();
         let mut outstanding_results = 1usize;
         let mut pending_steer: Option<SteerCommand> = None;
         let mut controls_open = true;
         let mut replay_verified = false;
-        let (frames, mut incoming) = mpsc::channel(64);
-        tokio::spawn(async move {
-            loop {
-                let frame = read(&mut stdout).await;
-                let failed = frame.is_err();
-                if frames.send(frame).await.is_err() || failed {
-                    break;
-                }
-            }
-        });
-        let mut bound = false;
+        let mut native_session = None;
         let mut interactions: VecDeque<(Interaction, Value)> = VecDeque::new();
         let mut last_progress = Instant::now();
         loop {
@@ -265,7 +329,7 @@ impl ClaudeAdapter {
                     if interactions.front().is_some_and(|(interaction, _)| interaction.id == response.id) {
                         let (interaction, request) = interactions.pop_front().expect("matched request");
                         let transcript_answer = interaction.answered_questions(&response);
-                        write_interaction_response(&mut stdin, &request, &interaction, response).await?;
+                        write_interaction_response(stdin, &request, &interaction, response).await?;
                         if let Some(answer) = transcript_answer {
                             let _ = events.send(ExecutionEvent::QuestionAnswered(answer));
                         }
@@ -281,11 +345,11 @@ impl ClaudeAdapter {
                     let Some(command) = command else { controls_open = false; continue; };
                     if !replay_verified { let _ = command.result.send(SteerOutcome::Rejected("This Claude version has not verified input acknowledgements. The message remains queued.".into())); continue; }
                     if let Err(error) = crate::steering::validate(&command.input).await { let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue; }
-                    let content = match self.content(&command.input.prompt, None, &command.input.attachments, &command.input.skills, &request.workspace, &commands).await {
+                    let content = match self.content(&command.input.prompt, None, &command.input.attachments, &command.input.skills, &request.workspace, commands).await {
                         Ok(content) => content,
                         Err(error) => { let _ = command.result.send(SteerOutcome::Rejected(error.to_string())); continue; }
                     };
-                    write(&mut stdin, &json!({"type":"user", "uuid":command.input.id.to_string(), "message":{"role":"user", "content":content}, "parent_tool_use_id":null})).await?;
+                    write(stdin, &json!({"type":"user", "uuid":command.input.id.to_string(), "message":{"role":"user", "content":content}, "parent_tool_use_id":null})).await?;
                     outstanding_results += 1;
                     pending_steer = Some(command);
                     continue;
@@ -325,13 +389,19 @@ impl ClaudeAdapter {
                     let _ = command.result.send(SteerOutcome::Accepted);
                 }
             }
-            if !bound && let Some(session) = value["session_id"].as_str() {
+            if native_session.is_none()
+                && let Some(session) = value["session_id"].as_str()
+                && !session.is_empty()
+            {
+                if session_lease.is_none() {
+                    session_lease = Some(self.sessions.lease(session).await);
+                }
                 let _ = events.send(ExecutionEvent::BindingEstablished(ExecutionBinding {
                     instructions_fingerprint: None,
                     adapter_key: "claude".into(),
                     native_session_id: session.into(),
                 }));
-                bound = true;
+                native_session = Some(session.to_owned());
             }
             match value["type"].as_str() {
                 Some("stream_event") => {
@@ -383,7 +453,7 @@ impl ClaudeAdapter {
                     }
                 }
                 Some("control_request") => {
-                    let interaction = read_interaction(&mut stdin, &value).await?;
+                    let interaction = read_interaction(stdin, &value).await?;
                     interactions.push_back((interaction, value));
                     if interactions.len() == 1 {
                         crate::approvals::show_interaction(
@@ -432,10 +502,10 @@ impl ClaudeAdapter {
                                     &replay.attachments,
                                     &replay.skills,
                                     &request.workspace,
-                                    &commands,
+                                    commands,
                                 )
                                 .await?;
-                            write(&mut stdin, &json!({"uuid":replay.id.to_string(),"type":"user","message":{"role":"user","content":content},"parent_tool_use_id":null})).await?;
+                            write(stdin, &json!({"uuid":replay.id.to_string(),"type":"user","message":{"role":"user","content":content},"parent_tool_use_id":null})).await?;
                             outstanding_results = 1;
                             continue;
                         }
@@ -455,6 +525,7 @@ impl ClaudeAdapter {
                 _ => {}
             }
         }
+        let settled = pending_steer.is_none() && interactions.is_empty();
         if let Some(command) = pending_steer {
             let _ = command.result.send(SteerOutcome::Uncertain(
                 "Claude finished without acknowledging the message. Review the conversation."
@@ -464,10 +535,12 @@ impl ClaudeAdapter {
         while let Ok(command) = controls.try_recv() {
             let _ = command.result.send(SteerOutcome::NotRunning);
         }
-        drop(stdin);
-        if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
+        if settled
+            && let Some(native_session) = native_session.or_else(|| resume.map(str::to_owned))
+        {
+            self.sessions
+                .park(request.chat_id, native_session, startup, process)
+                .await;
         }
         Ok(())
     }
@@ -492,7 +565,13 @@ impl ExecutionAdapter for ClaudeAdapter {
             retry_inputs: vec![],
             prior_context: None,
         };
-        let (mut child, mut stdin, mut stdout) = self.start(Some(&execution)).await?;
+        let _lease = self.sessions.lease(&session).await;
+        self.sessions
+            .take(execution.chat_id, Some(&session), None)
+            .await?;
+        let startup = self.startup(&execution);
+        let (mut child, mut stdin, mut stdout) =
+            self.start(Some((&startup, Some(&session)))).await?;
         // The ordinary adapter drains stderr in start(); initialization has the same 25s deadline.
         Self::initialize(&mut stdin, &mut stdout).await?;
         let result = timeout(Duration::from_secs(180), async {
@@ -525,55 +604,12 @@ impl ExecutionAdapter for ClaudeAdapter {
     ) -> Result<ProviderCapabilities, ExecutionError> {
         let (mut child, mut stdin, mut stdout) = self.start(None).await?;
         let data = Self::initialize(&mut stdin, &mut stdout).await?;
-        let mut models = Vec::new();
-        let mut seen = HashSet::new();
-        for model in data["models"].as_array().into_iter().flatten() {
-            let id = model["resolvedModel"]
-                .as_str()
-                .or_else(|| model["value"].as_str())
-                .ok_or_else(|| {
-                    ExecutionError::new("Claude returned a model without an identifier")
-                })?;
-            if !seen.insert(id.to_owned()) {
-                continue;
-            }
-            models.push(ModelCapability {
-                id: id.into(),
-                label: if model["value"] == "default" {
-                    let name = model["description"]
-                        .as_str()
-                        .and_then(|s| s.split('·').next())
-                        .unwrap_or(id)
-                        .trim();
-                    format!("{name} (default)")
-                } else {
-                    model["displayName"].as_str().unwrap_or(id).into()
-                },
-                efforts: model["supportedEffortLevels"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect(),
-                default_effort: None,
-                images: true,
-                is_default: model["value"] == "default",
-            });
-        }
         drop(stdin);
         if timeout(Duration::from_secs(2), child.wait()).await.is_err() {
             let _ = child.kill().await;
             let _ = child.wait().await;
         }
-        if models.is_empty() {
-            return Err(ExecutionError::new(
-                "Claude Code did not advertise supported models. Update the CLI and check `claude auth status`.",
-            ));
-        }
-        Ok(ProviderCapabilities {
-            provider: Provider::Claude,
-            models,
-        })
+        model_catalog(&data)
     }
     async fn execute(
         &self,
@@ -582,7 +618,7 @@ impl ExecutionAdapter for ClaudeAdapter {
     ) -> Result<(), ExecutionError> {
         let (_, responses) = mpsc::unbounded_channel();
         let (_, controls) = mpsc::unbounded_channel();
-        self.run(request, events, responses, controls).await
+        self.run(request, events, responses, controls, |_| {}).await
     }
     async fn execute_controlled(
         &self,
@@ -591,7 +627,7 @@ impl ExecutionAdapter for ClaudeAdapter {
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
         controls: mpsc::UnboundedReceiver<SteerCommand>,
     ) -> Result<(), ExecutionError> {
-        self.run(request, events, responses, controls).await
+        self.run(request, events, responses, controls, |_| {}).await
     }
     async fn execute_interactive(
         &self,
@@ -600,8 +636,53 @@ impl ExecutionAdapter for ClaudeAdapter {
         responses: mpsc::UnboundedReceiver<InteractionResponse>,
     ) -> Result<(), ExecutionError> {
         let (_, controls) = mpsc::unbounded_channel();
-        self.run(request, events, responses, controls).await
+        self.run(request, events, responses, controls, |_| {}).await
     }
+}
+
+fn model_catalog(data: &Value) -> Result<ProviderCapabilities, ExecutionError> {
+    let mut models = Vec::new();
+    let mut seen = HashSet::new();
+    for model in data["models"].as_array().into_iter().flatten() {
+        let id = model["resolvedModel"]
+            .as_str()
+            .or_else(|| model["value"].as_str())
+            .ok_or_else(|| ExecutionError::new("Claude returned a model without an identifier"))?;
+        if !seen.insert(id.to_owned()) {
+            continue;
+        }
+        models.push(ModelCapability {
+            id: id.into(),
+            label: if model["value"] == "default" {
+                let name = model["description"]
+                    .as_str()
+                    .and_then(|s| s.split('·').next())
+                    .unwrap_or(id)
+                    .trim();
+                format!("{name} (default)")
+            } else {
+                model["displayName"].as_str().unwrap_or(id).into()
+            },
+            efforts: model["supportedEffortLevels"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str().map(str::to_owned))
+                .collect(),
+            default_effort: None,
+            images: true,
+            is_default: model["value"] == "default",
+        });
+    }
+    if models.is_empty() {
+        return Err(ExecutionError::new(
+            "Claude Code did not advertise supported models. Update the CLI and check `claude auth status`.",
+        ));
+    }
+    Ok(ProviderCapabilities {
+        provider: Provider::Claude,
+        models,
+    })
 }
 
 fn claude_permission_mode(settings: &ExecutionSettings) -> Option<&'static str> {

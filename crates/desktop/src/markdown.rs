@@ -20,15 +20,12 @@ pub enum MarkdownBlockKind {
     Table(Vec<Alignment>),
 }
 
-type HighlightedCodeLine = (String, Vec<(Range<usize>, u32)>);
-
 #[derive(Clone, Debug, PartialEq)]
 pub struct MarkdownBlock {
     pub kind: MarkdownBlockKind,
     pub text: String,
     pub highlights: Vec<(Range<usize>, InlineStyle)>,
     pub code_highlights: Vec<(Range<usize>, u32)>,
-    pub code_lines: Vec<HighlightedCodeLine>,
     pub links: Vec<(Range<usize>, String)>,
     pub table_rows: Vec<Vec<MarkdownBlock>>,
 }
@@ -193,7 +190,6 @@ impl BlockBuilder {
                 text: std::mem::take(&mut self.text),
                 highlights: std::mem::take(&mut self.highlights),
                 code_highlights: Vec::new(),
-                code_lines: Vec::new(),
                 links: std::mem::take(&mut self.links),
                 table_rows: Vec::new(),
             });
@@ -222,7 +218,13 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
             Event::End(TagEnd::Heading(_)) => current.finish(&mut blocks),
             Event::Start(Tag::CodeBlock(kind)) => {
                 let language = match kind {
-                    CodeBlockKind::Fenced(language) => language.to_string(),
+                    CodeBlockKind::Fenced(info) => info
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or_default()
+                        .trim_start_matches("{.")
+                        .trim_end_matches('}')
+                        .to_owned(),
                     CodeBlockKind::Indented => String::new(),
                 };
                 current.begin(MarkdownBlockKind::Code(language));
@@ -282,7 +284,6 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
                     text,
                     highlights: vec![],
                     code_highlights: vec![],
-                    code_lines: vec![],
                     links: vec![],
                     table_rows: std::mem::take(&mut table_rows),
                 });
@@ -335,68 +336,9 @@ pub fn parse_markdown(source: &str) -> Vec<MarkdownBlock> {
     for block in &mut blocks {
         if let MarkdownBlockKind::Code(language) = &block.kind {
             block.code_highlights = highlight_code(language, &block.text);
-            block.code_lines = block
-                .text
-                .trim_end_matches('\n')
-                .split('\n')
-                .scan(0usize, |offset, line| {
-                    let line_start = *offset;
-                    *offset += line.len() + 1;
-                    Some((line, line_start))
-                })
-                .map(|(line, line_start)| {
-                    let (line, highlights) =
-                        display_code_line(line, line_start, &block.code_highlights);
-                    if line.is_empty() {
-                        (" ".to_owned(), Vec::new())
-                    } else {
-                        (line, highlights)
-                    }
-                })
-                .collect();
         }
     }
     blocks
-}
-
-fn display_code_line(
-    line: &str,
-    source_offset: usize,
-    highlights: &[(Range<usize>, u32)],
-) -> (String, Vec<(Range<usize>, u32)>) {
-    let mut displayed = String::with_capacity(line.len());
-    let mut mapped: Vec<(Range<usize>, u32)> = Vec::new();
-    let mut previous: Option<(usize, u32)> = None;
-    for (offset, character) in line.char_indices() {
-        let token = highlights
-            .iter()
-            .find(|(range, _)| range.contains(&(source_offset + offset)))
-            .map(|(_, token)| *token);
-        let start = displayed.len();
-        match character {
-            ' ' => displayed.push(' '),
-            '\t' => displayed.push_str("    "),
-            _ => displayed.push(character),
-        }
-        let end = displayed.len();
-        if let Some(token) = token {
-            if let Some((last, last_token)) = previous.as_mut()
-                && *last == start
-                && *last_token == token
-            {
-                *last = end;
-                if let Some((range, _)) = mapped.last_mut() {
-                    range.end = end;
-                }
-            } else {
-                mapped.push((start..end, token));
-                previous = Some((end, token));
-            }
-        } else {
-            previous = None;
-        }
-    }
-    (displayed, mapped)
 }
 
 struct SyntaxResources {
@@ -415,13 +357,16 @@ fn syntax_resources() -> &'static SyntaxResources {
 
 fn highlight_code(language: &str, source: &str) -> Vec<(Range<usize>, u32)> {
     let resources = syntax_resources();
-    let language = language.trim();
-    let language = if language.eq_ignore_ascii_case("typescript") {
-        "js"
-    } else {
-        language
+    let language = language.to_ascii_lowercase();
+    let syntax = match language.as_str() {
+        "" => source
+            .lines()
+            .next()
+            .and_then(|line| resources.syntaxes.find_syntax_by_first_line(line)),
+        "typescript" | "ts" | "tsx" | "jsx" => resources.syntaxes.find_syntax_by_token("js"),
+        language => resources.syntaxes.find_syntax_by_token(language),
     };
-    let Some(syntax) = resources.syntaxes.find_syntax_by_token(language) else {
+    let Some(syntax) = syntax else {
         return Vec::new();
     };
     if syntax.name == "Plain Text" {
@@ -574,6 +519,24 @@ mod tests {
                 assert!(block.text.is_char_boundary(range.end));
                 assert!(block.text.get(range.clone()).is_some());
             }
+        }
+    }
+
+    #[test]
+    fn highlights_fences_with_metadata_aliases_and_shebangs() {
+        let blocks = parse_markdown(
+            "```RUST title=main.rs\nfn main() { let count = 42; }\n```\n\n```{.tsx}\nconst count = 42;\n```\n\n```\n#!/usr/bin/env python\nprint('ok')\n```",
+        );
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].kind, MarkdownBlockKind::Code("RUST".into()));
+        assert_eq!(blocks[1].kind, MarkdownBlockKind::Code("tsx".into()));
+        for block in blocks {
+            let colors: std::collections::HashSet<_> = block
+                .code_highlights
+                .iter()
+                .map(|(_, color)| color)
+                .collect();
+            assert!(colors.len() > 1, "{:?} had no token colors", block.kind);
         }
     }
 
